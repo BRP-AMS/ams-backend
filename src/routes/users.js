@@ -85,7 +85,7 @@ router.post('/', authenticate, authorize('admin'), [
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
-    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, officeLat, officeLng, officeRadiusM } = req.body;
+    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
     const existingEmail = await User.findOne({ email }).lean();
     if (existingEmail) return res.status(409).json({ success: false, message: 'Email already exists' });
@@ -95,19 +95,17 @@ router.post('/', authenticate, authorize('admin'), [
 
     const id = uuidv4();
     await User.create({
-      _id:             id,
-      emp_id:          empId,
+      _id:               id,
+      emp_id:            empId,
       name,
       email,
-      password_hash:   bcrypt.hashSync(password, 10),
+      password_hash:     bcrypt.hashSync(password, 10),
       role,
       department,
-      manager_id:      managerId     || null,
-      phone:           phone         || null,
-      assigned_block:  assignedBlock || null,
-      office_lat:      officeLat     != null ? Number(officeLat) : null,
-      office_lng:      officeLng     != null ? Number(officeLng) : null,
-      office_radius_m: officeRadiusM != null ? Number(officeRadiusM) : 500,
+      manager_id:        managerId        || null,
+      phone:             phone            || null,
+      assigned_block:    assignedBlock    || null,
+      assigned_district: assignedDistrict || null,
     });
 
     const user = await User.findById(id).lean();
@@ -124,20 +122,18 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const { name, email, role, department, managerId, phone, isActive, assignedBlock, officeLat, officeLng, officeRadiusM } = req.body;
+    const { name, email, role, department, managerId, phone, isActive, assignedBlock, assignedDistrict } = req.body;
     const update = {
-      name:            name       || user.name,
-      email:           email      || user.email,
-      role:            role       || user.role,
-      department:      department || user.department,
-      manager_id:      managerId !== undefined ? (managerId || null) : user.manager_id,
-      phone:           phone      !== undefined ? (phone || null) : user.phone,
-      is_active:       isActive   !== undefined ? isActive : user.is_active,
-      assigned_block:  assignedBlock !== undefined ? (assignedBlock || null) : user.assigned_block,
+      name:              name              || user.name,
+      email:             email             || user.email,
+      role:              role              || user.role,
+      department:        department        || user.department,
+      manager_id:        managerId        !== undefined ? (managerId        || null) : user.manager_id,
+      phone:             phone            !== undefined ? (phone            || null) : user.phone,
+      is_active:         isActive         !== undefined ? isActive                  : user.is_active,
+      assigned_block:    assignedBlock    !== undefined ? (assignedBlock    || null) : user.assigned_block,
+      assigned_district: assignedDistrict !== undefined ? (assignedDistrict || null) : user.assigned_district,
     };
-    if (officeLat  != null) update.office_lat      = Number(officeLat);
-    if (officeLng  != null) update.office_lng      = Number(officeLng);
-    if (officeRadiusM != null) update.office_radius_m = Number(officeRadiusM);
     await User.findByIdAndUpdate(req.params.id, { $set: update });
 
     const updated = await User.findById(req.params.id).lean();
@@ -252,6 +248,45 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
   }
 });
 
+// ── POST /api/users/request-location-change ───────────────────────────────
+// Employee requests a change to their assigned block or district
+router.post('/request-location-change', authenticate, authorize('employee'), [
+  body('note').optional().trim(),
+], validate, async (req, res) => {
+  try {
+    const { note } = req.body;
+    const emp    = await User.findById(req.user.id).select('name emp_id email assigned_block assigned_district').lean();
+    const admins = await User.find({ role: 'admin', is_active: 1 }).select('_id email').lean();
+
+    const current = [emp.assigned_block, emp.assigned_district].filter(Boolean).join(' / ') || 'Not assigned';
+    const title   = 'Request: Location / Block Change';
+    const message = note
+      ? `${emp.name} (${emp.emp_id}) requests a change to their assigned location (current: ${current}). Note: ${note}`
+      : `${emp.name} (${emp.emp_id}) requests a change to their assigned location (current: ${current}).`;
+
+    if (admins.length) {
+      await Notification.insertMany(admins.map(a => ({
+        _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0,
+      })));
+    }
+
+    const emailHtml = `
+      <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;padding:32px">
+        <h2 style="color:#0A1F44;margin-bottom:8px">${title}</h2>
+        <p style="color:#64748B;font-size:14px;line-height:1.7">${message}</p>
+        <div style="margin-top:24px;padding:16px;background:#FEF3C7;border-radius:12px;border:1px solid #FDE68A">
+          <p style="color:#92400E;font-size:13px;margin:0">Log in to <strong>Admin → Users</strong> and edit this employee's Block / District assignment.</p>
+        </div>
+      </div>`;
+    for (const admin of admins) sendMail(admin.email, `[BRP AMS] ${title} — ${emp.name}`, emailHtml);
+
+    res.json({ success: true, message: 'Location change request sent to admin.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 function formatUser(u) {
   return {
     id:            u._id || u.id,
@@ -265,10 +300,8 @@ function formatUser(u) {
     phone:         u.phone,
     isActive:      !!u.is_active,
     createdAt:     u.created_at,
-    assignedBlock: u.assigned_block,
-    officeLat:     u.office_lat,
-    officeLng:     u.office_lng,
-    officeRadiusM: u.office_radius_m,
+    assignedBlock:    u.assigned_block,
+    assignedDistrict: u.assigned_district,
   };
 }
 

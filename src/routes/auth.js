@@ -56,10 +56,8 @@ router.post('/login', [
         managerName,
         managerEmail,
         phone:         user.phone,
-        assignedBlock: user.assigned_block,
-        officeLat:     user.office_lat,
-        officeLng:     user.office_lng,
-        officeRadiusM: user.office_radius_m,
+        assignedBlock:    user.assigned_block,
+        assignedDistrict: user.assigned_district,
       }
     });
   } catch (err) {
@@ -168,10 +166,8 @@ router.get('/me', authenticate, async (req, res) => {
       managerPhone:  u.manager_phone,
       phone:         u.phone,
       createdAt:     u.created_at,
-      assignedBlock: u.assigned_block,
-      officeLat:     u.office_lat,
-      officeLng:     u.office_lng,
-      officeRadiusM: u.office_radius_m,
+      assignedBlock:    u.assigned_block,
+      assignedDistrict: u.assigned_district,
     }});
   } catch (err) {
     console.error(err);

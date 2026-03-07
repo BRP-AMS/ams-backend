@@ -14,10 +14,8 @@ const userSchema = new mongoose.Schema({
   manager_id:       { type: String, ref: 'User', default: null },
   phone:            { type: String, default: null },
   is_active:        { type: Number, default: 1 },
-  assigned_block:   { type: String, default: null },
-  office_lat:       { type: Number, default: null },
-  office_lng:       { type: Number, default: null },
-  office_radius_m:  { type: Number, default: 500 },
+  assigned_block:    { type: String, default: null },
+  assigned_district: { type: String, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });

@@ -1,10 +1,20 @@
-# 1. Go into the backend folder
-cd ams-backend
+# Use Node.js version 18
+FROM node:18-alpine
 
-# 2. Add the Dockerfile specifically
-git add Dockerfile
+# Set the folder where your code will live inside the container
+WORKDIR /app
 
-# 3. Commit with a NEW message to force a new ID
-git commit -m "Deployment fix: adding Dockerfile to backend root"
+# Copy your package files first
+COPY package*.json ./
 
-# 4. Push to 
+# Install your backend dependencies
+RUN npm install
+
+# Copy all your backend code into the container
+COPY . .
+
+# Expose the port your backend uses (check your server.js, usually 5000 or 8080)
+EXPOSE 5000
+
+# The command to start your server
+CMD ["node", "server.js"]

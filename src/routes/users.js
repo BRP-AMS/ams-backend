@@ -65,7 +65,7 @@ router.post('/', authenticate, authorize('admin'), [
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
-    const { name, email, empId, password, role, department, managerId, phone } = req.body;
+    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, officeLat, officeLng, officeRadiusM } = req.body;
 
     const existingEmail = await User.findOne({ email }).lean();
     if (existingEmail) return res.status(409).json({ success: false, message: 'Email already exists' });
@@ -75,15 +75,19 @@ router.post('/', authenticate, authorize('admin'), [
 
     const id = uuidv4();
     await User.create({
-      _id:           id,
-      emp_id:        empId,
+      _id:             id,
+      emp_id:          empId,
       name,
       email,
-      password_hash: bcrypt.hashSync(password, 10),
+      password_hash:   bcrypt.hashSync(password, 10),
       role,
       department,
-      manager_id:    managerId || null,
-      phone:         phone || null,
+      manager_id:      managerId     || null,
+      phone:           phone         || null,
+      assigned_block:  assignedBlock || null,
+      office_lat:      officeLat     != null ? Number(officeLat) : null,
+      office_lng:      officeLng     != null ? Number(officeLng) : null,
+      office_radius_m: officeRadiusM != null ? Number(officeRadiusM) : 500,
     });
 
     const user = await User.findById(id).lean();
@@ -100,18 +104,21 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const { name, email, role, department, managerId, phone, isActive } = req.body;
-    await User.findByIdAndUpdate(req.params.id, {
-      $set: {
-        name:       name       || user.name,
-        email:      email      || user.email,
-        role:       role       || user.role,
-        department: department || user.department,
-        manager_id: managerId  || user.manager_id,
-        phone:      phone      || user.phone,
-        is_active:  isActive !== undefined ? isActive : user.is_active,
-      }
-    });
+    const { name, email, role, department, managerId, phone, isActive, assignedBlock, officeLat, officeLng, officeRadiusM } = req.body;
+    const update = {
+      name:            name       || user.name,
+      email:           email      || user.email,
+      role:            role       || user.role,
+      department:      department || user.department,
+      manager_id:      managerId !== undefined ? (managerId || null) : user.manager_id,
+      phone:           phone      !== undefined ? (phone || null) : user.phone,
+      is_active:       isActive   !== undefined ? isActive : user.is_active,
+      assigned_block:  assignedBlock !== undefined ? (assignedBlock || null) : user.assigned_block,
+    };
+    if (officeLat  != null) update.office_lat      = Number(officeLat);
+    if (officeLng  != null) update.office_lng      = Number(officeLng);
+    if (officeRadiusM != null) update.office_radius_m = Number(officeRadiusM);
+    await User.findByIdAndUpdate(req.params.id, { $set: update });
 
     const updated = await User.findById(req.params.id).lean();
     res.json({ success: true, message: 'User updated', data: formatUser(updated) });
@@ -178,17 +185,21 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
 
 function formatUser(u) {
   return {
-    id:          u._id || u.id,
-    empId:       u.emp_id,
-    name:        u.name,
-    email:       u.email,
-    role:        u.role,
-    department:  u.department,
-    managerId:   u.manager_id,
-    managerName: u.manager_name,
-    phone:       u.phone,
-    isActive:    !!u.is_active,
-    createdAt:   u.created_at,
+    id:            u._id || u.id,
+    empId:         u.emp_id,
+    name:          u.name,
+    email:         u.email,
+    role:          u.role,
+    department:    u.department,
+    managerId:     u.manager_id,
+    managerName:   u.manager_name,
+    phone:         u.phone,
+    isActive:      !!u.is_active,
+    createdAt:     u.created_at,
+    assignedBlock: u.assigned_block,
+    officeLat:     u.office_lat,
+    officeLng:     u.office_lng,
+    officeRadiusM: u.office_radius_m,
   };
 }
 

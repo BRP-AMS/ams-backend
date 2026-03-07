@@ -35,18 +35,31 @@ router.post('/login', [
     // Audit log
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'LOGIN', ip_address: req.ip });
 
+    // Lookup manager name for login response
+    let managerName = null, managerEmail = null;
+    if (user.manager_id) {
+      const mgr = await User.findById(user.manager_id).select('name email').lean();
+      if (mgr) { managerName = mgr.name; managerEmail = mgr.email; }
+    }
+
     res.json({
       success: true,
       token,
       user: {
-        id:         user._id,
-        empId:      user.emp_id,
-        name:       user.name,
-        email:      user.email,
-        role:       user.role,
-        department: user.department,
-        managerId:  user.manager_id,
-        phone:      user.phone,
+        id:            user._id,
+        empId:         user.emp_id,
+        name:          user.name,
+        email:         user.email,
+        role:          user.role,
+        department:    user.department,
+        managerId:     user.manager_id,
+        managerName,
+        managerEmail,
+        phone:         user.phone,
+        assignedBlock: user.assigned_block,
+        officeLat:     user.office_lat,
+        officeLng:     user.office_lng,
+        officeRadiusM: user.office_radius_m,
       }
     });
   } catch (err) {
@@ -134,6 +147,7 @@ router.get('/me', authenticate, async (req, res) => {
       { $addFields: {
           manager_name:  { $arrayElemAt: ['$manager.name',  0] },
           manager_email: { $arrayElemAt: ['$manager.email', 0] },
+          manager_phone: { $arrayElemAt: ['$manager.phone', 0] },
       }},
       { $project: { manager: 0, password_hash: 0 } },
     ]);
@@ -142,16 +156,22 @@ router.get('/me', authenticate, async (req, res) => {
     const u = user[0];
 
     res.json({ success: true, user: {
-      id:          u._id,
-      empId:       u.emp_id,
-      name:        u.name,
-      email:       u.email,
-      role:        u.role,
-      department:  u.department,
-      managerId:   u.manager_id,
-      managerName: u.manager_name,
-      phone:       u.phone,
-      createdAt:   u.created_at,
+      id:            u._id,
+      empId:         u.emp_id,
+      name:          u.name,
+      email:         u.email,
+      role:          u.role,
+      department:    u.department,
+      managerId:     u.manager_id,
+      managerName:   u.manager_name,
+      managerEmail:  u.manager_email,
+      managerPhone:  u.manager_phone,
+      phone:         u.phone,
+      createdAt:     u.created_at,
+      assignedBlock: u.assigned_block,
+      officeLat:     u.office_lat,
+      officeLng:     u.office_lng,
+      officeRadiusM: u.office_radius_m,
     }});
   } catch (err) {
     console.error(err);

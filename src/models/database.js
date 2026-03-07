@@ -11,9 +11,13 @@ const userSchema = new mongoose.Schema({
   password_hash: { type: String, required: true },
   role:          { type: String, enum: ['employee', 'manager', 'admin'], required: true },
   department:    { type: String, required: true },
-  manager_id:    { type: String, ref: 'User', default: null },
-  phone:         { type: String, default: null },
-  is_active:     { type: Number, default: 1 },
+  manager_id:       { type: String, ref: 'User', default: null },
+  phone:            { type: String, default: null },
+  is_active:        { type: Number, default: 1 },
+  assigned_block:   { type: String, default: null },
+  office_lat:       { type: Number, default: null },
+  office_lng:       { type: Number, default: null },
+  office_radius_m:  { type: Number, default: 500 },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });

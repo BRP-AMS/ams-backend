@@ -36,7 +36,7 @@ const activityValidators = [
   body('msme_name').trim().notEmpty().withMessage('MSME name required'),
   body('udyam_number').matches(UDYAM_RE).withMessage('Format: UDYAM-XX-00-0000000'),
   body('sector').isIn(['Manufacturing', 'Services', 'Trade', 'Agriculture', 'Other']),
-  body('support_type').isIn(['Incubation', 'Market Linkage', 'Advisory']),
+  body('support_type').isIn(['Awareness', 'Marketing Linkage', 'Loan Facilitation', 'Training/Workshop', 'Advisory/Other']),
   body('block_name').trim().notEmpty().withMessage('Block name required'),
   body('activity_date').isISO8601().toDate(),
 ];
@@ -288,18 +288,24 @@ router.get('/stats/compliance', authenticate, authorize('admin', 'manager'), asy
 });
 
 // ── GET /api/activity/report/excel ────────────────────────────────────
-router.get('/report/excel', authenticate, authorize('admin', 'manager'), [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly']),
+router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee'), [
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
 ], validate, async (req, res) => {
   try {
     const XLSX = require('xlsx');
     const { filter = 'monthly', startDate, endDate } = req.query;
-    const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
+    const isEmployee = req.user.role === 'employee';
+
+    const matchFilter = isEmployee ? { user_id: req.user.id } : {};
+    if (filter !== 'all') {
+      const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
+      matchFilter.activity_date = { $gte: start, $lte: end };
+    }
 
     const rows = await Activity.aggregate([
-      { $match: { activity_date: { $gte: start, $lte: end } } },
+      { $match: matchFilter },
       { $lookup: { from: 'users',             localField: 'user_id', foreignField: '_id', as: 'user' } },
       { $lookup: { from: 'activitydocuments', localField: '_id',     foreignField: 'activity_id', as: 'docs' } },
       { $addFields: {
@@ -329,21 +335,24 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager'), [
 
     // Block-wise summary sheet
     const blockRows = await Activity.aggregate([
-      { $match: { activity_date: { $gte: start, $lte: end } } },
+      { $match: matchFilter },
       { $group: {
-        _id:          '$block_name',
-        total:        { $sum: 1 },
-        incubation:   { $sum: { $cond: [{ $eq: ['$support_type', 'Incubation']    }, 1, 0] } },
-        market_linkage:{ $sum: { $cond: [{ $eq: ['$support_type', 'Market Linkage']}, 1, 0] } },
-        advisory:     { $sum: { $cond: [{ $eq: ['$support_type', 'Advisory']      }, 1, 0] } },
+        _id:               '$block_name',
+        total:             { $sum: 1 },
+        awareness:         { $sum: { $cond: [{ $eq: ['$support_type', 'Awareness']         }, 1, 0] } },
+        marketing_linkage: { $sum: { $cond: [{ $eq: ['$support_type', 'Marketing Linkage'] }, 1, 0] } },
+        loan_facilitation: { $sum: { $cond: [{ $eq: ['$support_type', 'Loan Facilitation'] }, 1, 0] } },
+        training_workshop: { $sum: { $cond: [{ $eq: ['$support_type', 'Training/Workshop'] }, 1, 0] } },
+        advisory_other:    { $sum: { $cond: [{ $eq: ['$support_type', 'Advisory/Other']    }, 1, 0] } },
       }},
-      { $project: { _id: 0, 'Block': '$_id', 'Total': '$total', 'Incubation': '$incubation', 'Market Linkage': '$market_linkage', 'Advisory': '$advisory' } },
+      { $project: { _id: 0, 'Block': '$_id', 'Total': '$total', 'Awareness': '$awareness', 'Marketing Linkage': '$marketing_linkage', 'Loan Facilitation': '$loan_facilitation', 'Training/Workshop': '$training_workshop', 'Advisory/Other': '$advisory_other' } },
       { $sort: { Total: -1 } },
     ]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(blockRows), 'Block Summary');
 
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    res.setHeader('Content-Disposition', `attachment; filename=activities_${start}_${end}.xlsx`);
+    const excelFilename = filter === 'all' ? `activities_all.xlsx` : `activities_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.xlsx`;
+    res.setHeader('Content-Disposition', `attachment; filename=${excelFilename}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buf);
   } catch (err) {
@@ -353,18 +362,24 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager'), [
 });
 
 // ── GET /api/activity/report/pdf ──────────────────────────────────────
-router.get('/report/pdf', authenticate, authorize('admin', 'manager'), [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly']),
+router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'), [
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
 ], validate, async (req, res) => {
   try {
     const PDFDocument = require('pdfkit');
     const { filter = 'monthly', startDate, endDate } = req.query;
-    const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
+    const isEmployee = req.user.role === 'employee';
+
+    const matchFilter = isEmployee ? { user_id: req.user.id } : {};
+    if (filter !== 'all') {
+      const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
+      matchFilter.activity_date = { $gte: start, $lte: end };
+    }
 
     const rows = await Activity.aggregate([
-      { $match: { activity_date: { $gte: start, $lte: end } } },
+      { $match: matchFilter },
       { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
       { $addFields: { officer: { $arrayElemAt: ['$user.name', 0] } } },
       { $project: { user: 0 } },
@@ -373,14 +388,15 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager'), [
     ]);
 
     const blockStats = await Activity.aggregate([
-      { $match: { activity_date: { $gte: start, $lte: end } } },
+      { $match: matchFilter },
       { $group: { _id: '$block_name', total: { $sum: 1 } } },
       { $project: { _id: 0, block_name: '$_id', total: 1 } },
       { $sort: { total: -1 } },
     ]);
 
+    const pdfFilename = filter === 'all' ? 'activity_report_all.pdf' : `activity_report_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.pdf`;
     const doc = new PDFDocument({ margin: 40, size: 'A4' });
-    res.setHeader('Content-Disposition', `attachment; filename=activity_report_${start}_${end}.pdf`);
+    res.setHeader('Content-Disposition', `attachment; filename=${pdfFilename}`);
     res.setHeader('Content-Type', 'application/pdf');
     doc.pipe(res);
 

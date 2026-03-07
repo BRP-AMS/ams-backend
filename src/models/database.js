@@ -45,6 +45,15 @@ const attendanceRecordSchema = new mongoose.Schema({
   actioned_by:          { type: String, ref: 'User', default: null },
   actioned_at:          { type: Date, default: null },
   submitted_at:         { type: Date, default: null },
+  worked_hours:         { type: Number, default: null },
+  is_auto_checkout:     { type: Boolean, default: false },
+  checkout_remarks:     { type: String, default: null },
+  leave_type:           { type: String, enum: ['Half Day', 'Emergency Leave', null], default: null },
+  leave_reason:         { type: String, default: null },
+  leave_status:         { type: String, enum: ['Pending', 'Approved', 'Rejected', null], default: null },
+  reapply_reason:       { type: String, default: null },
+  reapply_docs:         { type: [String], default: [] },
+  reapplied_at:         { type: Date, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 // Unique constraint equivalent to SQLite UNIQUE(emp_id, date)
@@ -95,7 +104,7 @@ const activitySchema = new mongoose.Schema({
   msme_name:        { type: String, required: true },
   udyam_number:     { type: String, required: true },
   sector:           { type: String, enum: ['Manufacturing', 'Services', 'Trade', 'Agriculture', 'Other'], required: true },
-  support_type:     { type: String, enum: ['Incubation', 'Market Linkage', 'Advisory'], required: true },
+  support_type:     { type: String, enum: ['Awareness', 'Marketing Linkage', 'Loan Facilitation', 'Training/Workshop', 'Advisory/Other'], required: true },
   block_name:       { type: String, required: true },
   latitude:         { type: Number, default: null },
   longitude:        { type: Number, default: null },

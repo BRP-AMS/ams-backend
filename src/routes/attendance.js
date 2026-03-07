@@ -1,12 +1,30 @@
-const express = require('express');
-const router  = express.Router();
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
+const express      = require('express');
+const router       = express.Router();
+const multer       = require('multer');
+const path         = require('path');
+const fs           = require('fs');
+const nodemailer   = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+
+// ── Email helper (graceful — no crash if SMTP not configured) ────────────
+const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
+  host:   process.env.SMTP_HOST,
+  port:   parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+}) : null;
+
+const sendMail = async (to, subject, html) => {
+  if (!mailer) return;
+  try {
+    await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
+  } catch (err) {
+    console.error('Email send error:', err.message);
+  }
+};
 
 // Multer config for selfie uploads
 const uploadDir = process.env.UPLOAD_DIR || './uploads';
@@ -209,23 +227,24 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
     if (record.status !== 'Draft') return res.status(400).json({ success: false, message: 'Cannot checkout - record already submitted' });
 
-    // ── 6-hour enforcement ─────────────────────────────────────────────────
+    // ── 4-hour enforcement ─────────────────────────────────────────────────
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00`);
     const hoursElapsed    = (now - checkinDateTime) / (1000 * 60 * 60);
-    if (hoursElapsed < 6) {
-      const remaining = 6 - hoursElapsed;
+    if (hoursElapsed < 4) {
+      const remaining = 4 - hoursElapsed;
       const h = Math.floor(remaining);
       const m = Math.floor((remaining - h) * 60);
       return res.status(400).json({
         success: false,
-        message: `Check-out is locked for ${h}h ${m}m more (minimum 6 hours after check-in).`,
+        message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
         hoursRemaining: remaining,
       });
     }
 
     const { latitude, longitude, locationAddress } = req.body;
     const checkoutSelfiePath = req.file ? `/uploads/${req.file.filename}` : null;
+    const workedHours = Math.round(hoursElapsed * 100) / 100;
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {
@@ -235,6 +254,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
         checkout_selfie_path:  checkoutSelfiePath,
         status:                'Pending',
         submitted_at:          now,
+        worked_hours:          workedHours,
       }
     });
 
@@ -326,6 +346,55 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
   }
 });
 
+// ── PUT /api/attendance/:id/leave-request ────────────────────────────────
+router.put('/:id/leave-request', authenticate, authorize('employee'), [
+  body('leaveType').isIn(['Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
+  body('reason').notEmpty().withMessage('Reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+  try {
+    const { leaveType, reason } = req.body;
+    const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (!record.checkout_time) return res.status(400).json({ success: false, message: 'Must checkout before requesting leave' });
+    if (record.leave_type) return res.status(409).json({ success: false, message: 'Leave already requested for this record' });
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: { leave_type: leaveType, leave_reason: reason, leave_status: 'Pending' }
+    });
+
+    // Notify manager
+    if (record.manager_id) {
+      const emp = await User.findById(req.user.id).select('name email').lean();
+      await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id);
+
+      // Email manager
+      const manager = await User.findById(record.manager_id).select('email name').lean();
+      if (manager?.email) {
+        await sendMail(
+          manager.email,
+          `[AMS] ${leaveType} Request – ${emp.name}`,
+          `<p>Hi ${manager.name},</p>
+           <p><strong>${emp.name}</strong> has submitted a <strong>${leaveType}</strong> request for <strong>${record.date}</strong>.</p>
+           <p><strong>Reason:</strong> ${reason}</p>
+           <p><strong>Worked hours:</strong> ${record.worked_hours ?? '—'} hrs</p>
+           <p>Please review this in the AMS Manager Dashboard.</p>`
+        );
+      }
+    }
+
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'LEAVE_REQUEST', entity_type: 'attendance', entity_id: record._id, new_value: leaveType });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    res.json({ success: true, message: 'Leave request submitted', data: formatRecord(updated) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ── GET /api/attendance/stats/summary ───────────────────────────────────
 router.get('/stats/summary', authenticate, async (req, res) => {
   try {
@@ -363,6 +432,57 @@ router.get('/stats/summary', authenticate, async (req, res) => {
   }
 });
 
+// ── PUT /api/attendance/:id/reapply ──────────────────────────────────────
+router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('reapplyDocs', 10), async (req, res) => {
+  try {
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ success: false, message: 'Reason is required' });
+
+    const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
+
+    const docPaths = (req.files || []).map(f => f.filename);
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        status:         'Pending',
+        manager_remark: null,
+        reapply_reason: reason.trim(),
+        reapply_docs:   docPaths,
+        reapplied_at:   new Date(),
+        submitted_at:   new Date(),
+      }
+    });
+
+    if (record.manager_id) {
+      const emp = await User.findById(req.user.id).select('name email').lean();
+      await notify(record.manager_id, 'Re-application Submitted', `${emp.name} has re-submitted attendance for ${record.date} after rejection. Reason: ${reason}`, 'info', record._id);
+
+      const manager = await User.findById(record.manager_id).select('email name').lean();
+      if (manager?.email) {
+        await sendMail(
+          manager.email,
+          `[AMS] Re-application – ${emp.name} (${record.date})`,
+          `<p>Hi ${manager.name},</p>
+           <p><strong>${emp.name}</strong> has re-submitted their attendance for <strong>${record.date}</strong> after it was rejected.</p>
+           <p><strong>Re-apply Reason:</strong> ${reason}</p>
+           <p><strong>Supporting documents:</strong> ${docPaths.length} file(s) attached</p>
+           <p>Please review this in the AMS Manager Dashboard.</p>`
+        );
+      }
+    }
+
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'REAPPLY', entity_type: 'attendance', entity_id: record._id, new_value: reason });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    res.json({ success: true, message: 'Re-application submitted successfully', data: formatRecord(updated) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ── Format helper ────────────────────────────────────────────────────────
 function formatRecord(r) {
   return {
@@ -392,6 +512,15 @@ function formatRecord(r) {
     actionedAt:          r.actioned_at,
     submittedAt:         r.submitted_at,
     createdAt:           r.created_at,
+    workedHours:         r.worked_hours,
+    isAutoCheckout:      r.is_auto_checkout,
+    checkoutRemarks:     r.checkout_remarks,
+    leaveType:           r.leave_type,
+    leaveReason:         r.leave_reason,
+    leaveStatus:         r.leave_status,
+    reapplyReason:       r.reapply_reason,
+    reapplyDocs:         r.reapply_docs || [],
+    reappliedAt:         r.reapplied_at,
   };
 }
 

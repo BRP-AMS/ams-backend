@@ -37,7 +37,7 @@ app.use('/uploads', express.static(path.resolve(uploadDir)));
 // Finds all Draft records (checked-in but not checked-out) for today and
 // auto-checks them out with a remark, then notifies each employee's manager.
 const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
-const { v4: uuidv4 } = require('uuid');
+import { v4 as uuidv4 } from 'uuid';
 
 cron.schedule('58 23 * * *', async () => {
   try {

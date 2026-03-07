@@ -1,10 +1,30 @@
-const express = require('express');
-const router  = express.Router();
-const bcrypt  = require('bcryptjs');
+const express    = require('express');
+const router     = express.Router();
+const bcrypt     = require('bcryptjs');
+const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
-const { User, AttendanceRecord } = require('../models/database');
+const { User, AttendanceRecord, Notification } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+
+// ── Email helper ─────────────────────────────────────────────────────────
+const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
+  host:   process.env.SMTP_HOST,
+  port:   parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+}) : null;
+const sendMail = async (to, subject, html) => {
+  if (!mailer) return;
+  try { await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html }); }
+  catch (err) { console.error('Email error:', err.message); }
+};
+
+const validate = (req, res, next) => {
+  const errs = validationResult(req);
+  if (!errs.isEmpty()) return res.status(422).json({ success: false, errors: errs.array() });
+  next();
+};
 
 // GET /api/users - Admin: all users | Manager: team
 router.get('/', authenticate, authorize('manager', 'admin'), async (req, res) => {
@@ -177,6 +197,55 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
     ]);
 
     res.json({ success: true, data: summary });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/users/request-assignment ───────────────────────────────────
+// Employee requests manager or block assignment — notifies all admins in-app + email
+router.post('/request-assignment', authenticate, authorize('employee'), [
+  body('type').isIn(['manager', 'block']).withMessage('type must be "manager" or "block"'),
+  body('note').optional().trim(),
+], validate, async (req, res) => {
+  try {
+    const { type, note } = req.body;
+    const emp = await User.findById(req.user.id).select('name emp_id email').lean();
+    const admins = await User.find({ role: 'admin', is_active: 1 }).select('_id email').lean();
+
+    const label   = type === 'manager' ? 'Manager Assignment' : 'Block Assignment';
+    const title   = `Request: ${label}`;
+    const message = note
+      ? `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment. Note: ${note}`
+      : `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment.`;
+
+    // In-app notifications for all admins
+    if (admins.length) {
+      await Notification.insertMany(admins.map(a => ({
+        _id:     uuidv4(),
+        user_id: a._id,
+        title,
+        message,
+        type:    'warning',
+        is_read: 0,
+      })));
+    }
+
+    // Email to all admins
+    const emailHtml = `
+      <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;padding:32px">
+        <h2 style="color:#0A1F44;margin-bottom:8px">${title}</h2>
+        <p style="color:#64748B;font-size:14px;line-height:1.7">${message}</p>
+        <div style="margin-top:24px;padding:16px;background:#FEF3C7;border-radius:12px;border:1px solid #FDE68A">
+          <p style="color:#92400E;font-size:13px;margin:0">Please log in to the <strong>Admin Dashboard → Users</strong> to assign the ${type === 'manager' ? 'reporting manager' : 'block'} for this employee.</p>
+        </div>
+      </div>`;
+    for (const admin of admins) {
+      sendMail(admin.email, `[BRP AMS] ${title} — ${emp.name}`, emailHtml);
+    }
+
+    res.json({ success: true, message: `Request sent to admin${admins.length > 1 ? 's' : ''}.` });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });

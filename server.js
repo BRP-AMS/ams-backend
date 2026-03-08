@@ -16,8 +16,18 @@ const PORT = process.env.PORT || 5000;
 
 // ── Security & Middleware ─────────────────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+const ALLOWED_ORIGINS = [
+  process.env.FRONTEND_URL || 'http://localhost:3000',
+  'capacitor://localhost',   // Android Capacitor app
+  'http://localhost',        // Android WebView fallback
+  'https://localhost',
+  null,                      // allow requests with no origin (mobile apps)
+];
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(morgan('dev'));

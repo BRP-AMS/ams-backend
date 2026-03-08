@@ -74,7 +74,7 @@ const recordListPipeline = (matchFilter, sortStage, skip, limit) => [
 // Employee: own records | Manager: team records | Admin: all records
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { status, startDate, endDate, empId } = req.query;
+    const { status, startDate, endDate, empId, onlyLeaves } = req.query;
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
@@ -91,7 +91,11 @@ router.get('/', authenticate, async (req, res) => {
     }
     // admin / hr / super_admin sees all (with optional empId filter)
 
-    if (status)    matchFilter.status = status;
+    if (onlyLeaves === 'true') matchFilter.leave_type = { $ne: null };
+    if (status) {
+      if (onlyLeaves === 'true') matchFilter.leave_status = status;
+      else matchFilter.status = status;
+    }
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
     if (endDate)   matchFilter.date = { ...matchFilter.date, $lte: endDate };
 

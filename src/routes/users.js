@@ -26,7 +26,7 @@ const sendMail = async (to, subject, html) => {
 
 const validate = (req, res, next) => {
   const errs = validationResult(req);
-  if (!errs.isEmpty()) return res.status(422).json({ success: false, errors: errs.array() });
+  if (!errs.isEmpty()) return res.status(422).json({ success: false, message: errs.array()[0].msg, errors: errs.array() });
   next();
 };
 
@@ -34,16 +34,9 @@ const validate = (req, res, next) => {
 router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, res) => {
   try {
     let users;
-    if (req.user.role === 'admin') {
+    if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
       users = await User.aggregate([
-        {
-          $lookup: {
-            from: 'users',
-            localField: 'manager_id',
-            foreignField: '_id',
-            as: 'manager',
-          },
-        },
+        { $lookup: { from: 'users', localField: 'manager_id', foreignField: '_id', as: 'manager' } },
         { $addFields: { manager_name: { $arrayElemAt: ['$manager.name', 0] } } },
         { $project: { manager: 0, password_hash: 0 } },
         { $sort: { role: 1, name: 1 } },
@@ -62,8 +55,8 @@ router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, r
   }
 });
 
-// GET /api/users/managers - for admin dropdown
-router.get('/managers', authenticate, authorize('admin'), async (req, res) => {
+// GET /api/users/managers - for admin/hr/super_admin dropdown
+router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res) => {
   try {
     const managers = await User
       .find({ role: 'manager', is_active: 1 })
@@ -76,18 +69,15 @@ router.get('/managers', authenticate, authorize('admin'), async (req, res) => {
   }
 });
 
-// POST /api/users - Admin creates user
+// POST /api/users - Admin / Super Admin creates user
 router.post('/', authenticate, authorize('admin'), [
-  body('name').notEmpty(),
-  body('email').isEmail().normalizeEmail(),
-  body('empId').notEmpty(),
-  body('password').isLength({ min: 6 }),
-  body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']),
-  body('department').notEmpty(),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-
+  body('name').notEmpty().withMessage('Name is required'),
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
+  body('empId').notEmpty().withMessage('Employee ID is required'),
+  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']).withMessage('Invalid role'),
+  body('department').notEmpty().withMessage('Department is required'),
+], validate, async (req, res) => {
   try {
     const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
@@ -117,6 +107,35 @@ router.post('/', authenticate, authorize('admin'), [
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PUT /api/users/:id/reset-password — must be before PUT /:id to avoid route shadowing
+const DEFAULT_PASSWORD = 'R@m%Brp@26';
+router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id).lean();
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    if (req.params.id === req.user.id)
+      return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
+
+    const hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: hash } });
+
+    // Notify user — don't let notification failure block the response
+    try {
+      await Notification.create({
+        _id: uuidv4(), user_id: target._id,
+        title: 'Password Reset by Admin',
+        message: 'Your password has been reset to the default by an administrator. Please log in and change it immediately.',
+        type: 'warning', is_read: 0,
+      });
+    } catch (_) {}
+
+    res.json({ success: true, message: `Password reset to default for ${target.name}` });
+  } catch (err) {
+    console.error('[reset-password]', err);
+    res.status(500).json({ success: false, message: 'Server error: ' + err.message });
   }
 });
 

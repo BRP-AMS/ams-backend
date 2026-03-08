@@ -113,13 +113,14 @@ router.post('/', authenticate, authorize('admin'), [
 // PUT /api/users/:id/reset-password — must be before PUT /:id to avoid route shadowing
 const DEFAULT_PASSWORD = 'R@m%Brp@26';
 router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
+  console.log('[reset-password] called by', req.user?.id, 'for target', req.params.id);
   try {
     const target = await User.findById(req.params.id).lean();
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
-    if (req.params.id === req.user.id)
+    if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
 
-    const hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+    const hash = bcrypt.hashSync(DEFAULT_PASSWORD, 10);
     await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: hash } });
 
     // Notify user — don't let notification failure block the response

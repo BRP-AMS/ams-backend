@@ -74,6 +74,7 @@ const notificationSchema = new mongoose.Schema({
   type:              { type: String, enum: ['info', 'success', 'warning', 'error'], default: 'info' },
   is_read:           { type: Number, default: 0 },
   related_record_id: { type: String, ref: 'AttendanceRecord', default: null },
+  link:              { type: String, default: null }, // frontend navigation path on click
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 notificationSchema.index({ user_id: 1 });

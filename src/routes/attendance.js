@@ -47,8 +47,8 @@ const upload = multer({
 });
 
 // ── Helper: Notify user ──────────────────────────────────────────────────
-const notify = async (userId, title, message, type = 'info', recordId = null) => {
-  await Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId });
+const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
+  await Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
 };
 
 // ── Helper: build aggregation pipeline for record list ───────────────────
@@ -261,7 +261,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     // Notify manager
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name').lean();
-      await notify(record.manager_id, 'New Attendance Pending', `${emp.name}'s attendance for ${record.date} requires your approval`, 'warning', record._id);
+      await notify(record.manager_id, 'New Attendance Pending', `${emp.name}'s attendance for ${record.date} requires your approval`, 'warning', record._id, '/manager/queue');
     }
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKOUT', entity_type: 'attendance', entity_id: record._id });
@@ -298,7 +298,7 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     if (isAdmin) updateFields.admin_remark = remark || '';
 
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
-    await notify(record.emp_id, 'Attendance Approved ✓', `Your attendance for ${record.date} has been approved`, 'success', record._id);
+    await notify(record.emp_id, 'Attendance Approved ✓', `Your attendance for ${record.date} has been approved`, 'success', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id,
       action: isAdmin ? 'ADMIN_OVERRIDE_APPROVE' : 'APPROVE',
@@ -332,7 +332,7 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() }
     });
-    await notify(record.emp_id, 'Attendance Rejected ✗', `Your attendance for ${record.date} was rejected: ${remark}`, 'error', record._id);
+    await notify(record.emp_id, 'Attendance Rejected ✗', `Your attendance for ${record.date} was rejected: ${remark}`, 'error', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id, action: 'REJECT',
       entity_type: 'attendance', entity_id: record._id,
@@ -368,7 +368,7 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
     // Notify manager
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name email').lean();
-      await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id);
+      await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id, '/manager/queue');
 
       // Email manager
       const manager = await User.findById(record.manager_id).select('email name').lean();
@@ -457,7 +457,7 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
 
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name email').lean();
-      await notify(record.manager_id, 'Re-application Submitted', `${emp.name} has re-submitted attendance for ${record.date} after rejection. Reason: ${reason}`, 'info', record._id);
+      await notify(record.manager_id, 'Re-application Submitted', `${emp.name} has re-submitted attendance for ${record.date} after rejection. Reason: ${reason}`, 'info', record._id, '/manager/queue');
 
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {

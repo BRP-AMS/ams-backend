@@ -13,7 +13,20 @@ router.get('/', authenticate, async (req, res) => {
       .lean();
 
     const unreadCount = await Notification.countDocuments({ user_id: req.user.id, is_read: 0 });
-    res.json({ success: true, data: notifications, unreadCount });
+    res.json({
+      success: true,
+      data: notifications.map(n => ({
+        id:                n._id,
+        title:             n.title,
+        message:           n.message,
+        type:              n.type,
+        is_read:           n.is_read,
+        related_record_id: n.related_record_id,
+        link:              n.link || null,
+        created_at:        n.created_at,
+      })),
+      unreadCount,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });

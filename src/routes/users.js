@@ -123,18 +123,67 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     const { name, email, role, department, managerId, phone, isActive, assignedBlock, assignedDistrict } = req.body;
+    const newManagerId = managerId        !== undefined ? (managerId        || null) : user.manager_id;
+    const newBlock     = assignedBlock    !== undefined ? (assignedBlock    || null) : user.assigned_block;
+    const newDistrict  = assignedDistrict !== undefined ? (assignedDistrict || null) : user.assigned_district;
+    const newIsActive  = isActive         !== undefined ? isActive                  : user.is_active;
+
     const update = {
-      name:              name              || user.name,
-      email:             email             || user.email,
-      role:              role              || user.role,
-      department:        department        || user.department,
-      manager_id:        managerId        !== undefined ? (managerId        || null) : user.manager_id,
-      phone:             phone            !== undefined ? (phone            || null) : user.phone,
-      is_active:         isActive         !== undefined ? isActive                  : user.is_active,
-      assigned_block:    assignedBlock    !== undefined ? (assignedBlock    || null) : user.assigned_block,
-      assigned_district: assignedDistrict !== undefined ? (assignedDistrict || null) : user.assigned_district,
+      name:              name       || user.name,
+      email:             email      || user.email,
+      role:              role       || user.role,
+      department:        department || user.department,
+      manager_id:        newManagerId,
+      phone:             phone !== undefined ? (phone || null) : user.phone,
+      is_active:         newIsActive,
+      assigned_block:    newBlock,
+      assigned_district: newDistrict,
     };
     await User.findByIdAndUpdate(req.params.id, { $set: update });
+
+    // ── Notify affected parties after profile update ───────────────────────
+    const targetRole = role || user.role;
+    if (targetRole === 'employee') {
+      const changes = [];
+
+      if (newManagerId !== user.manager_id) {
+        if (newManagerId) {
+          const mgr = await User.findById(newManagerId).select('name').lean();
+          if (mgr) {
+            changes.push(`Reporting Manager assigned: ${mgr.name}`);
+            await Notification.create({
+              _id: uuidv4(), user_id: newManagerId,
+              title: 'New Team Member Assigned',
+              message: `${user.name} (${user.emp_id}) has been assigned to your team by admin.`,
+              type: 'info', is_read: 0, link: '/manager/team',
+            });
+          }
+        } else {
+          changes.push('Reporting Manager removed');
+        }
+        if (user.manager_id && user.manager_id !== newManagerId) {
+          await Notification.create({
+            _id: uuidv4(), user_id: user.manager_id,
+            title: 'Team Member Reassigned',
+            message: `${user.name} (${user.emp_id}) has been reassigned by admin.`,
+            type: 'warning', is_read: 0, link: '/manager/team',
+          });
+        }
+      }
+
+      if (newBlock     !== user.assigned_block)    changes.push(`Block: ${newBlock || 'removed'}`);
+      if (newDistrict  !== user.assigned_district) changes.push(`District: ${newDistrict || 'removed'}`);
+      if (newIsActive  !== user.is_active)          changes.push(newIsActive ? 'Account activated' : 'Account deactivated');
+
+      if (changes.length) {
+        await Notification.create({
+          _id: uuidv4(), user_id: user._id,
+          title: 'Your Profile Has Been Updated',
+          message: `Admin has updated your profile — ${changes.join(', ')}.`,
+          type: 'info', is_read: 0, link: '/profile',
+        });
+      }
+    }
 
     const updated = await User.findById(req.params.id).lean();
     res.json({ success: true, message: 'User updated', data: formatUser(updated) });
@@ -225,6 +274,7 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
         message,
         type:    'warning',
         is_read: 0,
+        link:    '/admin/users',
       })));
     }
 
@@ -266,7 +316,7 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
 
     if (admins.length) {
       await Notification.insertMany(admins.map(a => ({
-        _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0,
+        _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0, link: '/admin/users',
       })));
     }
 

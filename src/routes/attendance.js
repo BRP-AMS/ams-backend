@@ -86,8 +86,10 @@ router.get('/', authenticate, async (req, res) => {
     } else if (req.user.role === 'manager') {
       matchFilter.manager_id = req.user.id;
       if (empId) matchFilter.emp_id = empId;
+    } else if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
+      if (empId) matchFilter.emp_id = empId;
     }
-    // admin sees all
+    // admin / hr / super_admin sees all (with optional empId filter)
 
     if (status)    matchFilter.status = status;
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
@@ -179,7 +181,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
     if (existing) return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
 
-    const { dutyType, sector, description, latitude, longitude, locationAddress } = req.body;
+    const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 
     if (dutyType === 'On Duty' && !sector)
       return res.status(400).json({ success: false, message: 'Sector is required for On Duty' });
@@ -191,10 +193,16 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const now = new Date();
     const id  = uuidv4();
 
+    // Support offline sync: capturedAt (HH:MM) and capturedDate (YYYY-MM-DD) override server time
+    const timeRe = /^\d{2}:\d{2}$/;
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : now.toTimeString().substring(0, 5);
+    const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
+
     await AttendanceRecord.create({
       _id:              id,
       emp_id:           req.user.id,
-      date:             today,
+      date:             checkinDate,
       duty_type:        dutyType,
       sector:           sector || null,
       description:      description || '',
@@ -203,7 +211,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       latitude:         parseFloat(latitude),
       longitude:        parseFloat(longitude),
       location_address: locationAddress || '',
-      checkin_time:     now.toTimeString().substring(0, 5),
+      checkin_time:     checkinTime,
       checkin_lat:      parseFloat(latitude),
       checkin_lng:      parseFloat(longitude),
       manager_id:       managerId,
@@ -213,6 +221,102 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
 
     const record = await AttendanceRecord.findById(id).lean();
     res.status(201).json({ success: true, message: 'Check-in successful', data: formatRecord(record) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/attendance/apply-leave ─────────────────────────────────────
+// Employee applies for a full-day leave (no check-in required), supports date range
+router.post('/apply-leave', authenticate, authorize('employee'), [
+  body('date').isDate().withMessage('Valid start date required'),
+  body('endDate').optional().isDate().withMessage('Valid end date required'),
+  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
+  body('reason').notEmpty().withMessage('Reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+  try {
+    const { date, endDate, leaveType, reason } = req.body;
+    const finalEndDate = endDate || date;
+
+    if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
+
+    // Allow up to 30 days in the past and 10 days in advance
+    const today   = new Date(); today.setHours(0, 0, 0, 0);
+    const minDate = new Date(today); minDate.setDate(minDate.getDate() - 30);
+    const maxDate = new Date(today); maxDate.setDate(maxDate.getDate() + 10);
+    const startD  = new Date(date);
+    const endD    = new Date(finalEndDate);
+    if (startD < minDate) return res.status(400).json({ success: false, message: 'Leave cannot be applied more than 30 days in the past' });
+    if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 10 days in advance' });
+
+    const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
+    const managerId   = currentUser?.manager_id || null;
+    const todayISO    = today.toISOString().split('T')[0];
+
+    // Build list of dates in range
+    const dates = [];
+    const cur = new Date(startD);
+    while (cur <= endD) {
+      dates.push(cur.toISOString().split('T')[0]);
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    const created = [];
+    const skipped = [];
+
+    for (const d of dates) {
+      const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: d }).lean();
+      if (existing) { skipped.push(d); continue; }
+      const id = uuidv4();
+      await AttendanceRecord.create({
+        _id: id, emp_id: req.user.id, date: d, duty_type: 'Leave',
+        status: 'Pending', manager_id: managerId,
+        leave_type: leaveType, leave_reason: reason,
+        leave_status: 'Pending', submitted_at: new Date(),
+      });
+      await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
+      created.push({ id, date: d });
+    }
+
+    if (created.length === 0) {
+      return res.status(409).json({ success: false, message: `Records already exist for all selected dates${skipped.length ? ': ' + skipped.join(', ') : ''}` });
+    }
+
+    if (managerId) {
+      const dateRange = date === finalEndDate ? date : `${date} to ${finalEndDate}`;
+      await notify(managerId, `${leaveType} Request`, `${currentUser.name} has applied for ${leaveType} (${created.length} day${created.length > 1 ? 's' : ''}) on ${dateRange}: ${reason}`, 'warning', created[0].id, '/manager/queue');
+      const manager = await User.findById(managerId).select('email name').lean();
+      if (manager?.email) {
+        await sendMail(
+          manager.email,
+          `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
+          `<p>Hi ${manager.name},</p>
+           <p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong> from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${created.length} day${created.length > 1 ? 's' : ''}).</p>
+           <p><strong>Reason:</strong> ${reason}</p>
+           ${skipped.length ? `<p><em>Note: ${skipped.length} date(s) were skipped as records already existed.</em></p>` : ''}
+           <p>Please review this in the AMS Manager Dashboard.</p>`
+        );
+      }
+    }
+
+    // Return the today record if today falls in range (for frontend step update)
+    let todayRecord = null;
+    if (todayISO >= date && todayISO <= finalEndDate) {
+      const rec = await AttendanceRecord.findOne({ emp_id: req.user.id, date: todayISO }).lean();
+      if (rec) todayRecord = formatRecord(rec);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Leave application submitted for ${created.length} day${created.length > 1 ? 's' : ''}${skipped.length ? ` (${skipped.length} skipped)` : ''}`,
+      count: created.length,
+      skipped,
+      todayRecord,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -230,7 +334,13 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     // ── 4-hour enforcement ─────────────────────────────────────────────────
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00`);
-    const hoursElapsed    = (now - checkinDateTime) / (1000 * 60 * 60);
+    // For offline sync: use capturedAt time if provided and valid (must be in the past)
+    const capturedAtBody = req.body?.capturedAt;
+    const timeReCheck    = /^\d{2}:\d{2}$/;
+    const effectiveNow   = (capturedAtBody && timeReCheck.test(capturedAtBody))
+      ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00`); return d <= now ? d : now; })()
+      : now;
+    const hoursElapsed    = (effectiveNow - checkinDateTime) / (1000 * 60 * 60);
     if (hoursElapsed < 4) {
       const remaining = 4 - hoursElapsed;
       const h = Math.floor(remaining);
@@ -242,13 +352,24 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       });
     }
 
-    const { latitude, longitude, locationAddress } = req.body;
+    const { latitude, longitude, locationAddress, capturedAt } = req.body;
     const checkoutSelfiePath = req.file ? `/uploads/${req.file.filename}` : null;
-    const workedHours = Math.round(hoursElapsed * 100) / 100;
+
+    // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
+    const timeRe = /^\d{2}:\d{2}$/;
+    let checkoutTime = now.toTimeString().substring(0, 5);
+    let workedHours  = Math.round(hoursElapsed * 100) / 100;
+    if (capturedAt && timeRe.test(capturedAt)) {
+      const capturedDT = new Date(`${record.date}T${capturedAt}:00`);
+      if (capturedDT <= now) {
+        checkoutTime = capturedAt;
+        workedHours  = Math.round(((capturedDT - checkinDateTime) / 3600000) * 100) / 100;
+      }
+    }
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {
-        checkout_time:         now.toTimeString().substring(0, 5),
+        checkout_time:         checkoutTime,
         checkout_lat:          parseFloat(latitude)  || record.latitude,
         checkout_lng:          parseFloat(longitude) || record.longitude,
         checkout_selfie_path:  checkoutSelfiePath,
@@ -296,9 +417,14 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
       actioned_at:  new Date(),
     };
     if (isAdmin) updateFields.admin_remark = remark || '';
+    if (record.leave_type) updateFields.leave_status = 'Approved';
 
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
-    await notify(record.emp_id, 'Attendance Approved ✓', `Your attendance for ${record.date} has been approved`, 'success', record._id, '/employee/history');
+    const notifTitle = record.leave_type ? `Leave Approved ✓` : 'Attendance Approved ✓';
+    const notifMsg   = record.leave_type
+      ? `Your ${record.leave_type} request for ${record.date} has been approved`
+      : `Your attendance for ${record.date} has been approved`;
+    await notify(record.emp_id, notifTitle, notifMsg, 'success', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id,
       action: isAdmin ? 'ADMIN_OVERRIDE_APPROVE' : 'APPROVE',
@@ -329,10 +455,14 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     if (req.user.role === 'manager' && record.manager_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Not your team member' });
 
-    await AttendanceRecord.findByIdAndUpdate(record._id, {
-      $set: { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() }
-    });
-    await notify(record.emp_id, 'Attendance Rejected ✗', `Your attendance for ${record.date} was rejected: ${remark}`, 'error', record._id, '/employee/history');
+    const rejectFields = { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() };
+    if (record.leave_type) rejectFields.leave_status = 'Rejected';
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: rejectFields });
+    const rejectTitle = record.leave_type ? `Leave Rejected ✗` : 'Attendance Rejected ✗';
+    const rejectMsg   = record.leave_type
+      ? `Your ${record.leave_type} request for ${record.date} was rejected: ${remark}`
+      : `Your attendance for ${record.date} was rejected: ${remark}`;
+    await notify(record.emp_id, rejectTitle, rejectMsg, 'error', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id, action: 'REJECT',
       entity_type: 'attendance', entity_id: record._id,
@@ -346,9 +476,57 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
   }
 });
 
+// ── PUT /api/attendance/:id/hr-override ──────────────────────────────────
+// HR / Super Admin: override a Rejected record back to Approved with mandatory remark
+router.put('/:id/hr-override', authenticate, authorize('hr'), [
+  body('remark').notEmpty().withMessage('HR override remark is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+  try {
+    const { remark } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+
+    if (record.status !== 'Rejected')
+      return res.status(400).json({ success: false, message: 'HR override only allowed on Rejected records' });
+
+    const updateFields = {
+      status:         'Approved',
+      hr_override:    true,
+      hr_remark:      remark,
+      hr_actioned_by: req.user.id,
+      hr_actioned_at: new Date(),
+    };
+    if (record.leave_type) updateFields.leave_status = 'Approved';
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
+
+    await notify(
+      record.emp_id,
+      'Attendance Override by HR ✓',
+      `Your ${record.leave_type ? record.leave_type + ' request' : 'attendance'} for ${record.date} has been approved via HR override. Remark: ${remark}`,
+      'success', record._id, '/employee/history'
+    );
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'HR_OVERRIDE_APPROVE',
+      entity_type: 'attendance', entity_id: record._id,
+      old_value: 'Rejected', new_value: 'Approved',
+    });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    res.json({ success: true, message: 'HR override applied successfully', data: formatRecord(updated) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ── PUT /api/attendance/:id/leave-request ────────────────────────────────
 router.put('/:id/leave-request', authenticate, authorize('employee'), [
-  body('leaveType').isIn(['Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
+  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
   body('reason').notEmpty().withMessage('Reason is required'),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -413,18 +591,24 @@ router.get('/stats/summary', authenticate, async (req, res) => {
     const result = await AttendanceRecord.aggregate([
       { $match: matchFilter },
       { $group: {
-        _id:         null,
-        total:       { $sum: 1 },
-        approved:    { $sum: { $cond: [{ $eq: ['$status',    'Approved']   }, 1, 0] } },
-        pending:     { $sum: { $cond: [{ $eq: ['$status',    'Pending']    }, 1, 0] } },
-        rejected:    { $sum: { $cond: [{ $eq: ['$status',    'Rejected']   }, 1, 0] } },
-        on_duty:     { $sum: { $cond: [{ $eq: ['$duty_type', 'On Duty']    }, 1, 0] } },
-        office_duty: { $sum: { $cond: [{ $eq: ['$duty_type', 'Office Duty']}, 1, 0] } },
+        _id:             null,
+        total:           { $sum: 1 },
+        approved:        { $sum: { $cond: [{ $eq: ['$status',     'Approved']        }, 1, 0] } },
+        pending:         { $sum: { $cond: [{ $eq: ['$status',     'Pending']         }, 1, 0] } },
+        rejected:        { $sum: { $cond: [{ $eq: ['$status',     'Rejected']        }, 1, 0] } },
+        on_duty:         { $sum: { $cond: [{ $eq: ['$duty_type',  'On Duty']         }, 1, 0] } },
+        office_duty:     { $sum: { $cond: [{ $eq: ['$duty_type',  'Office Duty']     }, 1, 0] } },
+        sick_leave:      { $sum: { $cond: [{ $eq: ['$leave_type', 'Sick Leave']      }, 1, 0] } },
+        casual_leave:    { $sum: { $cond: [{ $eq: ['$leave_type', 'Casual Leave']    }, 1, 0] } },
+        half_day:        { $sum: { $cond: [{ $eq: ['$leave_type', 'Half Day']        }, 1, 0] } },
+        emergency_leave: { $sum: { $cond: [{ $eq: ['$leave_type', 'Emergency Leave'] }, 1, 0] } },
+        total_leaves:    { $sum: { $cond: [{ $ne:  ['$leave_type', null]             }, 1, 0] } },
+        lop_count:       { $sum: { $cond: [{ $eq: ['$status',     'Rejected']        }, 1, 0] } },
       }},
       { $project: { _id: 0 } },
     ]);
 
-    const stats = result[0] || { total: 0, approved: 0, pending: 0, rejected: 0, on_duty: 0, office_duty: 0 };
+    const stats = result[0] || { total: 0, approved: 0, pending: 0, rejected: 0, on_duty: 0, office_duty: 0, sick_leave: 0, casual_leave: 0, half_day: 0, emergency_leave: 0, total_leaves: 0, lop_count: 0 };
     res.json({ success: true, data: stats });
   } catch (err) {
     console.error(err);
@@ -521,6 +705,10 @@ function formatRecord(r) {
     reapplyReason:       r.reapply_reason,
     reapplyDocs:         r.reapply_docs || [],
     reappliedAt:         r.reapplied_at,
+    hrOverride:          r.hr_override,
+    hrRemark:            r.hr_remark,
+    hrActionedBy:        r.hr_actioned_by,
+    hrActionedAt:        r.hr_actioned_at,
   };
 }
 

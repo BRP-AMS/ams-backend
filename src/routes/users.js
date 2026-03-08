@@ -1,11 +1,15 @@
 const express    = require('express');
 const router     = express.Router();
 const bcrypt     = require('bcryptjs');
+const multer     = require('multer');
+const XLSX       = require('xlsx');
 const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+
+const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // ── Email helper ─────────────────────────────────────────────────────────
 const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
@@ -26,8 +30,8 @@ const validate = (req, res, next) => {
   next();
 };
 
-// GET /api/users - Admin: all users | Manager: team
-router.get('/', authenticate, authorize('manager', 'admin'), async (req, res) => {
+// GET /api/users - Admin/HR/Super Admin: all users | Manager: team
+router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, res) => {
   try {
     let users;
     if (req.user.role === 'admin') {
@@ -78,7 +82,7 @@ router.post('/', authenticate, authorize('admin'), [
   body('email').isEmail().normalizeEmail(),
   body('empId').notEmpty(),
   body('password').isLength({ min: 6 }),
-  body('role').isIn(['employee', 'manager', 'admin']),
+  body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']),
   body('department').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -335,6 +339,98 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
+});
+
+// ── POST /api/users/bulk-upload ───────────────────────────────────────────
+// Super Admin: upload Excel with employee data and create/update users in bulk
+// Expected columns: EmpId, Name, Email, Password, Role, Department, ManagerId, Phone, Block, District
+router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ success: false, message: 'Excel file required' });
+
+  try {
+    const wb   = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+    if (!rows.length) return res.status(400).json({ success: false, message: 'Empty spreadsheet' });
+
+    const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin'];
+    const results = { created: 0, updated: 0, skipped: 0, errors: [] };
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2; // 1-based + header row
+
+      const empId    = String(row['EmpId']      || row['empId']      || '').trim();
+      const name     = String(row['Name']        || row['name']       || '').trim();
+      const email    = String(row['Email']       || row['email']      || '').trim().toLowerCase();
+      const password = String(row['Password']    || row['password']   || '').trim();
+      const role     = String(row['Role']        || row['role']       || 'employee').trim().toLowerCase();
+      const dept     = String(row['Department']  || row['department'] || '').trim();
+      const phone    = String(row['Phone']       || row['phone']      || '').trim() || null;
+      const block    = String(row['Block']       || row['block']      || '').trim() || null;
+      const district = String(row['District']    || row['district']   || '').trim() || null;
+
+      if (!empId || !name || !email || !dept) {
+        results.errors.push({ row: rowNum, reason: 'Missing required field (EmpId/Name/Email/Department)' });
+        results.skipped++;
+        continue;
+      }
+      if (!VALID_ROLES.includes(role)) {
+        results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` });
+        results.skipped++;
+        continue;
+      }
+
+      const existing = await User.findOne({ $or: [{ emp_id: empId }, { email }] }).lean();
+      if (existing) {
+        // Update existing user (password only updated if provided)
+        const update = { name, email, role, department: dept, phone, assigned_block: block, assigned_district: district };
+        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
+        await User.findByIdAndUpdate(existing._id, { $set: update });
+        results.updated++;
+      } else {
+        if (!password || password.length < 6) {
+          results.errors.push({ row: rowNum, reason: 'Password required for new user (min 6 chars)' });
+          results.skipped++;
+          continue;
+        }
+        await User.create({
+          _id:               uuidv4(),
+          emp_id:            empId,
+          name,
+          email,
+          password_hash:     bcrypt.hashSync(password, 10),
+          role,
+          department:        dept,
+          phone,
+          assigned_block:    block,
+          assigned_district: district,
+        });
+        results.created++;
+      }
+    }
+
+    res.json({ success: true, message: 'Bulk upload complete', data: results });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error during bulk upload' });
+  }
+});
+
+// ── GET /api/users/bulk-upload/template ──────────────────────────────────
+// Returns a downloadable Excel template for bulk user upload
+router.get('/bulk-upload/template', authenticate, authorize('super_admin'), (req, res) => {
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['EmpId', 'Name', 'Email', 'Password', 'Role', 'Department', 'Phone', 'Block', 'District'],
+    ['EMP001', 'John Doe', 'john@example.com', 'Pass@123', 'employee', 'Finance', '9876543210', 'Block A', 'District 1'],
+  ]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Employees');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Disposition', 'attachment; filename="bulk_upload_template.xlsx"');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buf);
 });
 
 function formatUser(u) {

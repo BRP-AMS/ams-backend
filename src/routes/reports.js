@@ -6,7 +6,7 @@ const { AttendanceRecord } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // ── GET /api/reports/export ──────────────────────────────────────────────
-router.get('/export', authenticate, authorize('manager', 'admin'), async (req, res) => {
+router.get('/export', authenticate, authorize('manager', 'admin', 'hr'), async (req, res) => {
   try {
     const { format = 'excel', startDate, endDate, department, status, empId } = req.query;
 

@@ -34,9 +34,10 @@ app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Rate limiting
-const limiter     = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: 'Too many login attempts' });
+// Rate limiting — scaled for up to 200 concurrent users
+// 200 users × ~10 req/min × 2-min window = ~4,000 req; max:10000 gives 2.5× headroom
+const limiter     = rateLimit({ windowMs: 2 * 60 * 1000, max: 10000, standardHeaders: true, legacyHeaders: false });
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500,  message: { success: false, message: 'Too many login attempts, please try again later.' } });
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 
@@ -109,7 +110,8 @@ app.use('/api/attendance',   require('./src/routes/attendance'));
 app.use('/api/users',        require('./src/routes/users'));
 app.use('/api/reports',      require('./src/routes/reports'));
 app.use('/api/notifications',require('./src/routes/notifications'));
-app.use('/api/activity',     require('./src/routes/activity'));
+app.use('/api/activity',          require('./src/routes/activity'));
+app.use('/api/activity-schedule', require('./src/routes/activity-schedule'));
 
 // Health check
 app.get('/api/health', (req, res) => {

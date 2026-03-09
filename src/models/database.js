@@ -136,6 +136,39 @@ const activityDocumentSchema = new mongoose.Schema({
 
 activityDocumentSchema.index({ activity_id: 1 });
 
+// Activity Schedule — created by managers, visible to all employees
+const activityScheduleSchema = new mongoose.Schema({
+  _id:              { type: String },
+  title:            { type: String, required: true },
+  description:      { type: String, default: null },
+  scheduled_date:   { type: String, required: true }, // YYYY-MM-DD
+  location:         { type: String, default: null },
+  assigned_to:      { type: String, ref: 'User', default: null }, // null = all employees
+  created_by:       { type: String, ref: 'User', required: true },
+  status:           { type: String, enum: ['Pending', 'Initiated', 'Completed'], default: 'Pending' },
+  initiated_by:     { type: String, ref: 'User', default: null },
+  initiated_at:     { type: Date, default: null },
+  completed_by:     { type: String, ref: 'User', default: null },
+  completed_at:     { type: Date, default: null },
+  work_description: { type: String, default: null },
+  remarks:          { type: String, default: null },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+
+activityScheduleSchema.index({ scheduled_date: 1 });
+activityScheduleSchema.index({ status: 1 });
+activityScheduleSchema.index({ assigned_to: 1 });
+activityScheduleSchema.index({ created_by: 1 });
+
+const scheduleDocumentSchema = new mongoose.Schema({
+  _id:          { type: String },
+  schedule_id:  { type: String, ref: 'ActivitySchedule', required: true },
+  file_path:    { type: String, required: true },
+  file_name:    { type: String, required: true },
+  file_type:    { type: String, default: null },
+}, { timestamps: { createdAt: 'created_at', updatedAt: false } });
+
+scheduleDocumentSchema.index({ schedule_id: 1 });
+
 // ── Models ────────────────────────────────────────────────────────────────
 
 const User             = mongoose.model('User',             userSchema);
@@ -145,6 +178,8 @@ const AuditLog         = mongoose.model('AuditLog',         auditLogSchema);
 const RevokedToken     = mongoose.model('RevokedToken',     revokedTokenSchema);
 const Activity         = mongoose.model('Activity',         activitySchema);
 const ActivityDocument = mongoose.model('ActivityDocument', activityDocumentSchema);
+const ActivitySchedule = mongoose.model('ActivitySchedule', activityScheduleSchema);
+const ScheduleDocument = mongoose.model('ScheduleDocument', scheduleDocumentSchema);
 
 // ── Default admin seed (only when DB is empty) ────────────────────────────
 
@@ -169,9 +204,18 @@ const initDefaultAdmin = async () => {
 
 // ── Connect ───────────────────────────────────────────────────────────────
 
-const connectionPromise = mongoose.connect(MONGO_URI)
+const connectionPromise = mongoose.connect(MONGO_URI, {
+  maxPoolSize:            100,   // support up to 200 concurrent users (each may need ~0.5 DB conn)
+  minPoolSize:              5,   // keep 5 connections warm at all times
+  serverSelectionTimeoutMS: 8000, // fail fast if Atlas unreachable (8s)
+  socketTimeoutMS:         45000, // drop hung sockets after 45s
+  connectTimeoutMS:        10000, // connection handshake timeout
+  heartbeatFrequencyMS:    10000, // check connection health every 10s
+  retryWrites:              true,
+  retryReads:               true,
+})
   .then(async () => {
-    console.log('✅ MongoDB Atlas connected');
+    console.log('✅ MongoDB Atlas connected (pool: 5–100)');
     await initDefaultAdmin();
   })
   .catch(err => {
@@ -187,5 +231,7 @@ module.exports = {
   RevokedToken,
   Activity,
   ActivityDocument,
+  ActivitySchedule,
+  ScheduleDocument,
   connectionPromise,
 };

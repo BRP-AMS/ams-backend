@@ -174,8 +174,6 @@
 // module.exports = router;
 
 
-
-
 const express      = require('express');
 const router       = express.Router();
 const XLSX         = require('xlsx');
@@ -184,9 +182,20 @@ const { AttendanceRecord } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const mongoose     = require('mongoose');
 
+// ── Helper: safe ObjectId conversion ─────────────────────────────────────
+const toObjectId = (id) => {
+  try {
+    return new mongoose.Types.ObjectId(String(id));
+  } catch (e) {
+    return id; // fallback to raw string if invalid
+  }
+};
+
 // ── GET /api/reports/export ──────────────────────────────────────────────
 router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employee'), async (req, res) => {
   try {
+    console.log('Export request by:', req.user.role, '| ID:', req.user.id, '| Query:', req.query);
+
     const { format = 'excel', startDate, endDate, department, status, empId } = req.query;
 
     // Build base match filter
@@ -194,18 +203,21 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
 
     // ── Role-based filtering ──────────────────────────────────────────
     if (req.user.role === 'employee') {
-      // Employee can ONLY see their own records — force filter to their ID
-      matchFilter.emp_id = new mongoose.Types.ObjectId(req.user.id);
+      // Employee can ONLY see their own records
+      matchFilter.emp_id = toObjectId(req.user.id);
+      console.log('Employee filter applied — emp_id:', matchFilter.emp_id);
     } else if (req.user.role === 'manager') {
-      matchFilter.manager_id = new mongoose.Types.ObjectId(req.user.id);
+      matchFilter.manager_id = toObjectId(req.user.id);
     } else if (empId) {
-      // Admin/HR can filter by a specific employee
-      matchFilter.emp_id = new mongoose.Types.ObjectId(empId);
+      // Admin/HR can optionally filter by a specific employee
+      matchFilter.emp_id = toObjectId(empId);
     }
 
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
     if (endDate)   matchFilter.date = { ...matchFilter.date, $lte: endDate   };
     if (status)    matchFilter.status = status;
+
+    console.log('Final matchFilter:', JSON.stringify(matchFilter));
 
     const MAX_EXPORT_ROWS = 5000;
 
@@ -225,22 +237,23 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
       { $limit: MAX_EXPORT_ROWS },
     ];
 
-    // Admin/HR can filter by department
+    // Admin/HR can filter by department (post-lookup)
     if (department && ['admin', 'hr'].includes(req.user.role)) {
       pipeline.splice(4, 0, { $match: { dept: department } });
     }
 
     const records = await AttendanceRecord.aggregate(pipeline);
+    console.log('Records found:', records.length);
 
     // ── Excel Export ─────────────────────────────────────────────────
     if (format === 'excel') {
       const wsData = [
         ['Date', 'Emp ID', 'Employee Name', 'Department', 'Duty Type', 'Sector', 'Check-In', 'Check-Out', 'Location', 'Description', 'Status', 'Manager', 'Remark', 'Actioned At'],
         ...records.map(r => [
-          r.date, r.emp_id_code, r.employee_name, r.dept,
-          r.duty_type, r.sector || '', r.checkin_time || '', r.checkout_time || '',
+          r.date,               r.emp_id_code,        r.employee_name,      r.dept,
+          r.duty_type,          r.sector        || '', r.checkin_time  || '', r.checkout_time  || '',
           r.location_address || '', r.description || '', r.status,
-          r.manager_name || '', r.manager_remark || '', r.actioned_at || '',
+          r.manager_name     || '', r.manager_remark || '', r.actioned_at || '',
         ])
       ];
       const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -285,7 +298,11 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
         const statusColor = { Approved: '#16A34A', Pending: '#D97706', Rejected: '#DC2626' }[r.status] || '#64748B';
         doc.fillColor('#334155').fontSize(7.5);
         x = 45;
-        [r.date, r.emp_id_code, r.employee_name, r.dept, r.duty_type, r.sector || '-', r.checkin_time || '-', r.checkout_time || '-', '', r.manager_name || '-'].forEach((val, i) => {
+        [
+          r.date, r.emp_id_code, r.employee_name, r.dept,
+          r.duty_type, r.sector || '-', r.checkin_time || '-', r.checkout_time || '-',
+          '', r.manager_name || '-'
+        ].forEach((val, i) => {
           if (i === 8) {
             doc.fillColor(statusColor).text(r.status, x, y + 3, { width: cols[i] });
             doc.fillColor('#334155');
@@ -302,8 +319,9 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
     }
 
     res.status(400).json({ success: false, message: 'Invalid format. Use excel or pdf' });
+
   } catch (err) {
-    console.error('Export error:', err);
+    console.error('Export error full:', err);
     res.status(500).json({ success: false, message: 'Server error', error: err.message });
   }
 });
@@ -311,14 +329,16 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
 // ── GET /api/reports/dashboard-stats ────────────────────────────────────
 router.get('/dashboard-stats', authenticate, async (req, res) => {
   try {
+    console.log('Dashboard stats request by:', req.user.role, '| ID:', req.user.id);
+
     const today     = new Date().toISOString().split('T')[0];
     const thisMonth = today.substring(0, 7);
 
     const empFilter = {};
     if (req.user.role === 'employee') {
-      empFilter.emp_id     = new mongoose.Types.ObjectId(req.user.id);
+      empFilter.emp_id     = toObjectId(req.user.id);
     } else if (req.user.role === 'manager') {
-      empFilter.manager_id = new mongoose.Types.ObjectId(req.user.id);
+      empFilter.manager_id = toObjectId(req.user.id);
     }
 
     const monthStart = `${thisMonth}-01`;
@@ -358,9 +378,10 @@ router.get('/dashboard-stats', authenticate, async (req, res) => {
     ]);
 
     res.json({ success: true, data: { monthly, trend } });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Dashboard stats error:', err);
+    res.status(500).json({ success: false, message: 'Server error', error: err.message });
   }
 });
 

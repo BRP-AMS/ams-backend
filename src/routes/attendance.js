@@ -688,6 +688,8 @@ function formatRecord(r) {
     checkinTime:         r.checkin_time,
     checkoutTime:        r.checkout_time,
     checkoutSelfiePath:  r.checkout_selfie_path,
+    checkoutLat:         r.checkout_lat,
+    checkoutLng:         r.checkout_lng,
     managerId:           r.manager_id,
     managerName:         r.manager_name,
     managerRemark:       r.manager_remark,

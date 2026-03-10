@@ -9,6 +9,10 @@ const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
+// ── IST time helpers (server may run in UTC) ─────────────────────────────
+const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
+
 // ── Email helper (graceful — no crash if SMTP not configured) ────────────
 const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
   host:   process.env.SMTP_HOST,
@@ -118,7 +122,7 @@ router.get('/', authenticate, async (req, res) => {
 // ── GET /api/attendance/today ────────────────────────────────────────────
 router.get('/today', authenticate, async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = istDateStr();
     const rows  = await AttendanceRecord.aggregate([
       { $match: { emp_id: req.user.id, date: today } },
       { $lookup: { from: 'users', localField: 'emp_id', foreignField: '_id', as: 'emp' } },
@@ -181,7 +185,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
-    const today    = new Date().toISOString().split('T')[0];
+    const today    = istDateStr();
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
     if (existing) return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
 
@@ -194,13 +198,12 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const currentUser = await User.findById(req.user.id).select('manager_id').lean();
     const managerId   = currentUser?.manager_id || null;
 
-    const now = new Date();
-    const id  = uuidv4();
+    const id = uuidv4();
 
     // Support offline sync: capturedAt (HH:MM) and capturedDate (YYYY-MM-DD) override server time
     const timeRe = /^\d{2}:\d{2}$/;
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : now.toTimeString().substring(0, 5);
+    const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : istTimeStr();
     const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
 
     await AttendanceRecord.create({
@@ -249,77 +252,69 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
 
     // Allow up to 30 days in the past and 10 days in advance
-    const today   = new Date(); today.setHours(0, 0, 0, 0);
-    const minDate = new Date(today); minDate.setDate(minDate.getDate() - 30);
-    const maxDate = new Date(today); maxDate.setDate(maxDate.getDate() + 10);
-    const startD  = new Date(date);
-    const endD    = new Date(finalEndDate);
+    const todayISO = istDateStr();
+    const minDate  = new Date(todayISO); minDate.setDate(minDate.getDate() - 30);
+    const maxDate  = new Date(todayISO); maxDate.setDate(maxDate.getDate() + 10);
+    const startD   = new Date(date);
+    const endD     = new Date(finalEndDate);
     if (startD < minDate) return res.status(400).json({ success: false, message: 'Leave cannot be applied more than 30 days in the past' });
     if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 10 days in advance' });
 
     const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
     const managerId   = currentUser?.manager_id || null;
-    const todayISO    = today.toISOString().split('T')[0];
 
-    // Build list of dates in range
-    const dates = [];
-    const cur = new Date(startD);
-    while (cur <= endD) {
-      dates.push(cur.toISOString().split('T')[0]);
-      cur.setDate(cur.getDate() + 1);
+    // Check for existing record on start date
+    const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
+    if (existing) {
+      return res.status(409).json({ success: false, message: `A record already exists for ${date}. Please choose a different start date.` });
     }
 
-    const created = [];
-    const skipped = [];
-
-    for (const d of dates) {
-      const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: d }).lean();
-      if (existing) { skipped.push(d); continue; }
-      const id = uuidv4();
-      await AttendanceRecord.create({
-        _id: id, emp_id: req.user.id, date: d, duty_type: 'Leave',
-        status: 'Pending', manager_id: managerId,
-        leave_type: leaveType, leave_reason: reason,
-        leave_status: 'Pending', submitted_at: new Date(),
-      });
-      await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
-      created.push({ id, date: d });
-    }
-
-    if (created.length === 0) {
-      return res.status(409).json({ success: false, message: `Records already exist for all selected dates${skipped.length ? ': ' + skipped.join(', ') : ''}` });
-    }
+    // Create a SINGLE record covering the full date range
+    const isMultiDay = finalEndDate !== date;
+    const dayCount   = Math.round((endD - startD) / 86400000) + 1;
+    const id = uuidv4();
+    await AttendanceRecord.create({
+      _id: id, emp_id: req.user.id,
+      date,
+      end_date:     isMultiDay ? finalEndDate : null,
+      duty_type:    'Leave',
+      status:       'Pending',
+      manager_id:   managerId,
+      leave_type:   leaveType,
+      leave_reason: reason,
+      leave_status: 'Pending',
+      submitted_at: new Date(),
+    });
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
 
     if (managerId) {
-      const dateRange = date === finalEndDate ? date : `${date} to ${finalEndDate}`;
-      await notify(managerId, `${leaveType} Request`, `${currentUser.name} has applied for ${leaveType} (${created.length} day${created.length > 1 ? 's' : ''}) on ${dateRange}: ${reason}`, 'warning', created[0].id, '/manager/queue');
+      const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
+      await notify(managerId, `${leaveType} Request`,
+        `${currentUser.name} applied for ${leaveType} (${dayCount} day${dayCount !== 1 ? 's' : ''}) — ${dateRange}: ${reason}`,
+        'warning', id, '/manager/queue');
       const manager = await User.findById(managerId).select('email name').lean();
       if (manager?.email) {
         await sendMail(
           manager.email,
           `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
           `<p>Hi ${manager.name},</p>
-           <p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong> from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${created.length} day${created.length > 1 ? 's' : ''}).</p>
+           <p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong>
+           ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p>
            <p><strong>Reason:</strong> ${reason}</p>
-           ${skipped.length ? `<p><em>Note: ${skipped.length} date(s) were skipped as records already existed.</em></p>` : ''}
            <p>Please review this in the AMS Manager Dashboard.</p>`
         );
       }
     }
 
-    // Return the today record if today falls in range (for frontend step update)
-    let todayRecord = null;
-    if (todayISO >= date && todayISO <= finalEndDate) {
-      const rec = await AttendanceRecord.findOne({ emp_id: req.user.id, date: todayISO }).lean();
-      if (rec) todayRecord = formatRecord(rec);
-    }
+    // Return the leave record (for frontend step update if today is in range)
+    const isTodayInRange = todayISO >= date && todayISO <= finalEndDate;
+    const record = await AttendanceRecord.findById(id).lean();
 
     res.status(201).json({
       success: true,
-      message: `Leave application submitted for ${created.length} day${created.length > 1 ? 's' : ''}${skipped.length ? ` (${skipped.length} skipped)` : ''}`,
-      count: created.length,
-      skipped,
-      todayRecord,
+      message: `${leaveType} application submitted for ${dayCount} day${dayCount !== 1 ? 's' : ''}`,
+      count: dayCount,
+      todayRecord: isTodayInRange ? formatRecord(record) : null,
     });
   } catch (err) {
     console.error(err);
@@ -337,12 +332,13 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
 
     // ── 4-hour enforcement ─────────────────────────────────────────────────
     const now             = new Date();
-    const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00`);
+    // Parse checkin time with IST offset (+05:30) so the 4-hour gap is computed correctly
+    const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
     // For offline sync: use capturedAt time if provided and valid (must be in the past)
     const capturedAtBody = req.body?.capturedAt;
     const timeReCheck    = /^\d{2}:\d{2}$/;
     const effectiveNow   = (capturedAtBody && timeReCheck.test(capturedAtBody))
-      ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00`); return d <= now ? d : now; })()
+      ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00+05:30`); return d <= now ? d : now; })()
       : now;
     const hoursElapsed    = (effectiveNow - checkinDateTime) / (1000 * 60 * 60);
     if (hoursElapsed < 4) {
@@ -361,10 +357,10 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
 
     // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
     const timeRe = /^\d{2}:\d{2}$/;
-    let checkoutTime = now.toTimeString().substring(0, 5);
+    let checkoutTime = istTimeStr();
     let workedHours  = Math.round(hoursElapsed * 100) / 100;
     if (capturedAt && timeRe.test(capturedAt)) {
-      const capturedDT = new Date(`${record.date}T${capturedAt}:00`);
+      const capturedDT = new Date(`${record.date}T${capturedAt}:00+05:30`);
       if (capturedDT <= now) {
         checkoutTime = capturedAt;
         workedHours  = Math.round(((capturedDT - checkinDateTime) / 3600000) * 100) / 100;
@@ -680,6 +676,7 @@ function formatRecord(r) {
     empCode:             r.emp_code,
     department:          r.department,
     date:                r.date,
+    endDate:             r.end_date || null,
     dutyType:            r.duty_type,
     sector:              r.sector,
     description:         r.description,

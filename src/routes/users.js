@@ -81,6 +81,11 @@ router.post('/', authenticate, authorize('admin'), [
   try {
     const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
+    // Admin cannot create admin or super_admin accounts — only Super Admin can
+    if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot create admin or super admin accounts' });
+    }
+
     const existingEmail = await User.findOne({ email }).lean();
     if (existingEmail) return res.status(409).json({ success: false, message: 'Email already exists' });
 
@@ -120,6 +125,11 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
     if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
 
+    // Admin cannot reset password for admin or super_admin users — only Super Admin can
+    if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(target.role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
+    }
+
     const hash = bcrypt.hashSync(DEFAULT_PASSWORD, 10);
     await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: hash } });
 
@@ -146,7 +156,17 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    // Admin cannot edit admin or super_admin users — only Super Admin can
+    if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(user.role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot modify admin or super admin accounts' });
+    }
+
     const { name, email, role, department, managerId, phone, isActive, assignedBlock, assignedDistrict } = req.body;
+
+    // Admin cannot promote a user to admin or super_admin
+    if (req.user.role === 'admin' && role && ['admin', 'super_admin'].includes(role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot assign admin or super admin roles' });
+    }
     const newManagerId = managerId        !== undefined ? (managerId        || null) : user.manager_id;
     const newBlock     = assignedBlock    !== undefined ? (assignedBlock    || null) : user.assigned_block;
     const newDistrict  = assignedDistrict !== undefined ? (assignedDistrict || null) : user.assigned_district;
@@ -222,6 +242,15 @@ router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
   try {
     if (req.params.id === req.user.id)
       return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });
+
+    // Admin cannot deactivate admin or super_admin users — only Super Admin can
+    if (req.user.role === 'admin') {
+      const target = await User.findById(req.params.id).select('role').lean();
+      if (target && ['admin', 'super_admin'].includes(target.role)) {
+        return res.status(403).json({ success: false, message: 'Admins cannot deactivate admin or super admin accounts' });
+      }
+    }
+
     await User.findByIdAndUpdate(req.params.id, { $set: { is_active: 0 } });
     res.json({ success: true, message: 'User deactivated' });
   } catch (err) {
@@ -233,7 +262,7 @@ router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
 // GET /api/users/team/attendance-summary - Manager view
 router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin'), async (req, res) => {
   try {
-    const today     = new Date().toISOString().split('T')[0];
+    const today     = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const matchStage = req.user.role === 'manager'
       ? { manager_id: req.user.id }
       : { role: 'employee' };
@@ -289,7 +318,7 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
       ? `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment. Note: ${note}`
       : `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment.`;
 
-    // In-app notifications for all admins
+    // In-app notifications for all admins — link deep-links to this employee's edit panel
     if (admins.length) {
       await Notification.insertMany(admins.map(a => ({
         _id:     uuidv4(),
@@ -298,7 +327,7 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
         message,
         type:    'warning',
         is_read: 0,
-        link:    '/admin/users',
+        link:    `/admin/users?editUser=${req.user.id}`,
       })));
     }
 
@@ -340,7 +369,8 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
 
     if (admins.length) {
       await Notification.insertMany(admins.map(a => ({
-        _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0, link: '/admin/users',
+        _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0,
+        link: `/admin/users?editUser=${req.user.id}`,
       })));
     }
 

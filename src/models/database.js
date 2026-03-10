@@ -26,6 +26,7 @@ const attendanceRecordSchema = new mongoose.Schema({
   _id:                  { type: String },
   emp_id:               { type: String, ref: 'User', required: true },
   date:                 { type: String, required: true },
+  end_date:             { type: String, default: null }, // for multi-day leave (null = single day)
   duty_type:            { type: String, enum: ['Office Duty', 'On Duty', 'Leave'], required: true },
   sector:               { type: String, default: null },
   description:          { type: String, default: null },
@@ -181,27 +182,6 @@ const ActivityDocument = mongoose.model('ActivityDocument', activityDocumentSche
 const ActivitySchedule = mongoose.model('ActivitySchedule', activityScheduleSchema);
 const ScheduleDocument = mongoose.model('ScheduleDocument', scheduleDocumentSchema);
 
-// ── Default admin seed (only when DB is empty) ────────────────────────────
-
-const initDefaultAdmin = async () => {
-  const count = await User.countDocuments();
-  if (count === 0) {
-    const bcrypt = require('bcryptjs');
-    const { v4: uuidv4 } = require('uuid');
-    await User.create({
-      _id:           uuidv4(),
-      emp_id:        'ADM001',
-      name:          'Admin',
-      email:         'admin@brp.com',
-      password_hash: bcrypt.hashSync('Admin@123', 10),
-      role:          'admin',
-      department:    'Administration',
-      phone:         '0000000000',
-    });
-    console.log('✅ Default admin created: admin@brp.com / Admin@123');
-  }
-};
-
 // ── Connect ───────────────────────────────────────────────────────────────
 
 const connectionPromise = mongoose.connect(MONGO_URI, {
@@ -214,9 +194,8 @@ const connectionPromise = mongoose.connect(MONGO_URI, {
   retryWrites:              true,
   retryReads:               true,
 })
-  .then(async () => {
+  .then(() => {
     console.log('✅ MongoDB Atlas connected (pool: 5–100)');
-    await initDefaultAdmin();
   })
   .catch(err => {
     console.error('❌ MongoDB connection error:', err);

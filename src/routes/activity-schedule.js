@@ -45,11 +45,12 @@ const uploadBulk  = multer({
 // ── GET /activity-schedule — list all (employees see all) ─────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { status, date_from, date_to, assigned_to } = req.query;
+    const { status, date_from, date_to, assigned_to, created_by } = req.query;
     const filter = {};
 
     if (status)      filter.status         = status;
     if (assigned_to) filter.assigned_to    = assigned_to;
+    if (created_by)  filter.created_by     = created_by;
     if (date_from || date_to) {
       filter.scheduled_date = {};
       if (date_from) filter.scheduled_date.$gte = date_from;

@@ -261,7 +261,9 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 10 days in advance' });
 
     const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
-    const managerId   = currentUser?.manager_id || null;
+    const managerId   = currentUser?.manager_id;
+    console.log("Employee:", currentUser.name);
+    console.log("Manager ID:", managerId);
 
     // Check for existing record on start date
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
@@ -325,6 +327,7 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
 // ── PUT /api/attendance/:id/checkout ─────────────────────────────────────
 router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('checkoutSelfie'), async (req, res) => {
   try {
+    const isEmergency = req.body.emergency === "true" || req.body.emergency === true;
     const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
     if (!record)              return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
@@ -341,16 +344,37 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00+05:30`); return d <= now ? d : now; })()
       : now;
     const hoursElapsed    = (effectiveNow - checkinDateTime) / (1000 * 60 * 60);
-    if (hoursElapsed < 4) {
-      const remaining = 4 - hoursElapsed;
-      const h = Math.floor(remaining);
-      const m = Math.floor((remaining - h) * 60);
-      return res.status(400).json({
-        success: false,
-        message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
-        hoursRemaining: remaining,
-      });
-    }
+    let leaveType = null;
+
+// Emergency checkout button pressed
+if (isEmergency) {
+
+  if (hoursElapsed < 3) {
+    leaveType = "Emergency Leave";
+  }
+
+  else if (hoursElapsed < 4) {
+    leaveType = "Half Day";
+  }
+
+}
+
+// Normal checkout
+else {
+
+  if (hoursElapsed < 4) {
+    const remaining = 4 - hoursElapsed;
+    const h = Math.floor(remaining);
+    const m = Math.floor((remaining - h) * 60);
+
+    return res.status(400).json({
+      success: false,
+      message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
+      hoursRemaining: remaining,
+    });
+  }
+
+}
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
     const checkoutSelfiePath = req.file ? `/uploads/${req.file.filename}` : null;
@@ -368,16 +392,18 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     }
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
-      $set: {
-        checkout_time:         checkoutTime,
-        checkout_lat:          parseFloat(latitude)  || record.latitude,
-        checkout_lng:          parseFloat(longitude) || record.longitude,
-        checkout_selfie_path:  checkoutSelfiePath,
-        status:                'Pending',
-        submitted_at:          now,
-        worked_hours:          workedHours,
-      }
-    });
+  $set: {
+    checkout_time:        checkoutTime,
+    checkout_lat:         parseFloat(latitude)  || record.latitude,
+    checkout_lng:         parseFloat(longitude) || record.longitude,
+    checkout_selfie_path: checkoutSelfiePath,
+    status:               'Pending',
+    submitted_at:         now,
+    worked_hours:         workedHours,
+    leave_type:           leaveType,
+    leave_status:         leaveType ? "Pending" : null
+  }
+});
 
     // Notify manager
     if (record.manager_id) {

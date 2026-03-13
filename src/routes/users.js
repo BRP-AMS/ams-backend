@@ -417,6 +417,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
       const password = String(row['Password']    || row['password']   || '').trim();
       const role     = String(row['Role']        || row['role']       || 'employee').trim().toLowerCase();
       const dept     = String(row['Department']  || row['department'] || '').trim();
+      const managerId = String(row['ManagerId']  || row['managerId']  || '').trim() || null;
       const phone    = String(row['Phone']       || row['phone']      || '').trim() || null;
       const block    = String(row['Block']       || row['block']      || '').trim() || null;
       const district = String(row['District']    || row['district']   || '').trim() || null;
@@ -453,6 +454,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
           password_hash:     bcrypt.hashSync(password, 10),
           role,
           department:        dept,
+          manager_id,              
           phone,
           assigned_block:    block,
           assigned_district: district,
@@ -472,8 +474,8 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
 // Returns a downloadable Excel template for bulk user upload
 router.get('/bulk-upload/template', authenticate, authorize('super_admin'), (req, res) => {
   const ws = XLSX.utils.aoa_to_sheet([
-    ['EmpId', 'Name', 'Email', 'Password', 'Role', 'Department', 'Phone', 'Block', 'District'],
-    ['EMP001', 'John Doe', 'john@example.com', 'Pass@123', 'employee', 'Finance', '9876543210', 'Block A', 'District 1'],
+    ['EmpId', 'Name', 'Email', 'Password', 'Role', 'Department', 'ManagerId', 'Phone', 'Block', 'District'],
+    ['EMP001', 'John Doe', 'john@example.com', 'Pass@123', 'employee', 'Finance', 'MGR001', '9876543210', 'Block A', 'District 1'],
   ]);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Employees');

@@ -39,7 +39,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Rate limiting — scaled for up to 200 concurrent users
 // 200 users × ~10 req/min × 2-min window = ~4,000 req; max:10000 gives 2.5× headroom
 const limiter     = rateLimit({ windowMs: 2 * 60 * 1000, max: 10000, standardHeaders: true, legacyHeaders: false });
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500,  message: { success: false, message: 'Too many login attempts, please try again later.' } });
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5000,  message: { success: false, message: 'Too many login attempts, please try again later.' } });
 app.use('/api/', limiter);
 app.use('/api/auth/login', authLimiter);
 

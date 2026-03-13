@@ -81,9 +81,9 @@ router.post('/', authenticate, authorize('admin'), [
   try {
     const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
-    // Admin cannot create admin or super_admin accounts — only Super Admin can
+    // Admin cannot create hr, admin or super_admin accounts — only Super Admin can
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
-      return res.status(403).json({ success: false, message: 'Admins cannot create admin or super admin accounts' });
+      return res.status(403).json({ success: false, message: 'Admins cannot create HR, admin or super admin accounts' });
     }
 
     const existingEmail = await User.findOne({ email }).lean();
@@ -125,9 +125,9 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
     if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
 
-    // Admin cannot reset password for admin or super_admin users — only Super Admin can
-    if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(target.role)) {
-      return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
+    // Admin cannot reset password for hr, admin or super_admin users — only Super Admin can
+    if (req.user.role === 'admin' && ['hr', 'admin', 'super_admin'].includes(target.role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for HR, admin or super admin accounts' });
     }
 
     const hash = bcrypt.hashSync(DEFAULT_PASSWORD, 10);
@@ -156,16 +156,16 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Admin cannot edit admin or super_admin users — only Super Admin can
-    if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(user.role)) {
-      return res.status(403).json({ success: false, message: 'Admins cannot modify admin or super admin accounts' });
+    // Admin cannot edit hr, admin or super_admin users — only Super Admin can
+    if (req.user.role === 'admin' && ['hr', 'admin', 'super_admin'].includes(user.role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot modify HR, admin or super admin accounts' });
     }
 
     const { name, email, role, department, managerId, phone, isActive, assignedBlock, assignedDistrict } = req.body;
 
-    // Admin cannot promote a user to admin or super_admin
-    if (req.user.role === 'admin' && role && ['admin', 'super_admin'].includes(role)) {
-      return res.status(403).json({ success: false, message: 'Admins cannot assign admin or super admin roles' });
+    // Admin cannot promote a user to hr, admin or super_admin
+    if (req.user.role === 'admin' && role && ['hr', 'admin', 'super_admin'].includes(role)) {
+      return res.status(403).json({ success: false, message: 'Admins cannot assign HR, admin or super admin roles' });
     }
     const newManagerId = managerId        !== undefined ? (managerId        || null) : user.manager_id;
     const newBlock     = assignedBlock    !== undefined ? (assignedBlock    || null) : user.assigned_block;
@@ -243,11 +243,11 @@ router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
     if (req.params.id === req.user.id)
       return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });
 
-    // Admin cannot deactivate admin or super_admin users — only Super Admin can
+    // Admin cannot deactivate hr, admin or super_admin users — only Super Admin can
     if (req.user.role === 'admin') {
       const target = await User.findById(req.params.id).select('role').lean();
-      if (target && ['admin', 'super_admin'].includes(target.role)) {
-        return res.status(403).json({ success: false, message: 'Admins cannot deactivate admin or super admin accounts' });
+      if (target && ['hr', 'admin', 'super_admin'].includes(target.role)) {
+        return res.status(403).json({ success: false, message: 'Admins cannot deactivate HR, admin or super admin accounts' });
       }
     }
 
@@ -407,57 +407,94 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
     const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin'];
     const results = { created: 0, updated: 0, skipped: 0, errors: [] };
 
+    // Helper to find column case-insensitively
+    const getVal = (row, keys) => {
+      for (const k of keys) {
+        if (row[k] !== undefined && row[k] !== '') return String(row[k]).trim();
+        // and try lowercase/uppercase variants
+        const lowerRow = Object.keys(row).reduce((acc, key) => { acc[key.toLowerCase()] = row[key]; return acc; }, {});
+        for (const variant of keys) {
+           const v = lowerRow[variant.toLowerCase()];
+           if (v !== undefined && v !== '') return String(v).trim();
+        }
+      }
+      return '';
+    };
+
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const rowNum = i + 2; // 1-based + header row
+      const rowNum = i + 2;
 
-      const empId    = String(row['EmpId']      || row['empId']      || '').trim();
-      const name     = String(row['Name']        || row['name']       || '').trim();
-      const email    = String(row['Email']       || row['email']      || '').trim().toLowerCase();
-      const password = String(row['Password']    || row['password']   || '').trim();
-      const role     = String(row['Role']        || row['role']       || 'employee').trim().toLowerCase();
-      const dept     = String(row['Department']  || row['department'] || '').trim();
-      const phone    = String(row['Phone']       || row['phone']      || '').trim() || null;
-      const block    = String(row['Block']       || row['block']      || '').trim() || null;
-      const district = String(row['District']    || row['district']   || '').trim() || null;
+      try {
+        const empId = getVal(row, ['EmpId', 'empId', 'Emp Id', 'Employee ID', 'ID']);
+        const name = getVal(row, ['Name', 'Full Name', 'name']);
+        const email = getVal(row, ['Email', 'email']).toLowerCase();
+        const password = getVal(row, ['Password', 'password']);
+        let role = getVal(row, ['Role', 'role']).toLowerCase().replace(/\s+/g, '_');
+        const dept = getVal(row, ['Department', 'Dept', 'department']);
+        const phone = getVal(row, ['Phone', 'Mobile', 'phone']) || null;
+        const block = getVal(row, ['Block', 'Assigned Block', 'block']) || null;
+        const district = getVal(row, ['District', 'Assigned District', 'district']) || null;
+        const mgrEmpId = getVal(row, ['ManagerId', 'Manager Id', 'Reporting Manager', 'manager_id']);
 
-      if (!empId || !name || !email || !dept) {
-        results.errors.push({ row: rowNum, reason: 'Missing required field (EmpId/Name/Email/Department)' });
-        results.skipped++;
-        continue;
-      }
-      if (!VALID_ROLES.includes(role)) {
-        results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` });
-        results.skipped++;
-        continue;
-      }
+        // Role mapping cleanup (e.g. "super admin" -> "super_admin")
+        if (role === 'superadmin') role = 'super_admin';
 
-      const existing = await User.findOne({ $or: [{ emp_id: empId }, { email }] }).lean();
-      if (existing) {
-        // Update existing user (password only updated if provided)
-        const update = { name, email, role, department: dept, phone, assigned_block: block, assigned_district: district };
-        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
-        await User.findByIdAndUpdate(existing._id, { $set: update });
-        results.updated++;
-      } else {
-        if (!password || password.length < 6) {
-          results.errors.push({ row: rowNum, reason: 'Password required for new user (min 6 chars)' });
+        if (!empId || !name || !email || !dept) {
+          results.errors.push({ row: rowNum, reason: `Missing required field on row ${rowNum}` });
           results.skipped++;
           continue;
         }
-        await User.create({
-          _id:               uuidv4(),
-          emp_id:            empId,
-          name,
-          email,
-          password_hash:     bcrypt.hashSync(password, 10),
-          role,
-          department:        dept,
-          phone,
-          assigned_block:    block,
-          assigned_district: district,
-        });
-        results.created++;
+
+        if (!VALID_ROLES.includes(role)) {
+          results.errors.push({ row: rowNum, reason: `Row ${rowNum}: Invalid role "${role}"` });
+          results.skipped++;
+          continue;
+        }
+
+        let manager_id = null;
+        if (mgrEmpId) {
+          const mgr = await User.findOne({ emp_id: { $regex: new RegExp(`^${mgrEmpId}$`, 'i') } }).select('_id').lean();
+          if (mgr) manager_id = mgr._id;
+        }
+
+        const existing = await User.findOne({ 
+          $or: [
+            { emp_id: { $regex: new RegExp(`^${empId}$`, 'i') } },
+            { email: { $regex: new RegExp(`^${email}$`, 'i') } }
+          ]
+        }).lean();
+
+        if (existing) {
+          const update = { name, email, role, department: dept, phone, assigned_block: block, assigned_district: district, manager_id };
+          if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
+          await User.findByIdAndUpdate(existing._id, { $set: update });
+          results.updated++;
+        } else {
+          if (!password || password.length < 6) {
+            results.errors.push({ row: rowNum, reason: `Row ${rowNum}: Password required for new user (min 6 chars)` });
+            results.skipped++;
+            continue;
+          }
+          await User.create({
+            _id: uuidv4(),
+            emp_id: empId,
+            name,
+            email,
+            password_hash: bcrypt.hashSync(password, 10),
+            role,
+            department: dept,
+            phone,
+            assigned_block: block,
+            assigned_district: district,
+            manager_id,
+          });
+          results.created++;
+        }
+      } catch (rowErr) {
+        console.error(`Error at row ${rowNum}:`, rowErr);
+        results.errors.push({ row: rowNum, reason: rowErr.message });
+        results.skipped++;
       }
     }
 

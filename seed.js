@@ -27,6 +27,8 @@ const seed = async () => {
   const emp2Id  = uuidv4();
   const emp3Id  = uuidv4();
   const emp4Id  = uuidv4();
+  const superAdminId = uuidv4();
+  const hrId = uuidv4();
 
   await User.insertMany([
     { _id: adminId, emp_id: 'ADM001', name: 'Rajesh Kumar', email: 'admin@brp.com',  password_hash: hash('Admin@123'),    role: 'admin',    department: 'Administration', manager_id: null,   phone: '9876543210' },
@@ -36,6 +38,8 @@ const seed = async () => {
     { _id: emp2Id,  emp_id: 'EMP002', name: 'Sarah Lee',    email: 'sarah@brp.com',  password_hash: hash('Employee@123'), role: 'employee', department: 'Engineering',    manager_id: mgr1Id, phone: '9876543214' },
     { _id: emp3Id,  emp_id: 'EMP003', name: 'David Kim',    email: 'david@brp.com',  password_hash: hash('Employee@123'), role: 'employee', department: 'Sales',          manager_id: mgr2Id, phone: '9876543215' },
     { _id: emp4Id,  emp_id: 'EMP004', name: 'Meera Patel',  email: 'meera@brp.com',  password_hash: hash('Employee@123'), role: 'employee', department: 'Sales',          manager_id: mgr2Id, phone: '9876543216' },
+    { _id: superAdminId, emp_id: 'SADM01', name: 'Super Admin', email: 'superadmin@brp.com', password_hash: hash('Super@123'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9876543217' },
+    { _id: hrId,    emp_id: 'HR001',  name: 'HR Manager',   email: 'hr@raminfo.com', password_hash: hash('Hr@12345'),     role: 'hr',       department: 'HR',             manager_id: adminId, phone: '9876543218' },
   ]);
 
   // ── Create attendance records ─────────────────────────────────────────
@@ -72,6 +76,8 @@ const seed = async () => {
   console.log('  Manager2: vikram@brp.com   / Manager@123');
   console.log('  Employee: john@brp.com     / Employee@123');
   console.log('  Employee: sarah@brp.com    / Employee@123');
+  console.log('  HR:       hr@raminfo.com   / Hr@12345');
+  console.log('  SuperAdm: superadmin@brp.com / Super@123');
 
   process.exit(0);
 };

@@ -20,6 +20,7 @@ const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || 'http://localhost:3000',
   'http://localhost:3000',   // local dev
   'http://localhost:3001',   // local dev fallback
+  'http://localhost:4001',   // local dev port active
   'capacitor://localhost',   // Android Capacitor app
   'http://localhost',        // Android WebView fallback
   'https://localhost',

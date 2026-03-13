@@ -182,14 +182,7 @@ const { AttendanceRecord } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const mongoose     = require('mongoose');
 
-// ── Helper: safe ObjectId conversion ─────────────────────────────────────
-const toObjectId = (id) => {
-  try {
-    return new mongoose.Types.ObjectId(String(id));
-  } catch (e) {
-    return id; // fallback to raw string if invalid
-  }
-};
+// ── Helper removed as IDs are strings ─────────────────────────────────────
 
 // ── GET /api/reports/export ──────────────────────────────────────────────
 router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employee'), async (req, res) => {
@@ -204,13 +197,17 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
     // ── Role-based filtering ──────────────────────────────────────────
     if (req.user.role === 'employee') {
       // Employee can ONLY see their own records
-      matchFilter.emp_id = toObjectId(req.user.id);
+      matchFilter.emp_id = req.user.id;
       console.log('Employee filter applied — emp_id:', matchFilter.emp_id);
     } else if (req.user.role === 'manager') {
-      matchFilter.manager_id = toObjectId(req.user.id);
+      matchFilter.manager_id = req.user.id;
     } else if (empId) {
       // Admin/HR can optionally filter by a specific employee
-      matchFilter.emp_id = toObjectId(empId);
+      matchFilter.emp_id = empId;
+    }
+    
+    if (['admin', 'hr', 'super_admin'].includes(req.user.role) && req.query.managerId) {
+      matchFilter.manager_id = req.query.managerId;
     }
 
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
@@ -336,9 +333,11 @@ router.get('/dashboard-stats', authenticate, async (req, res) => {
 
     const empFilter = {};
     if (req.user.role === 'employee') {
-      empFilter.emp_id     = toObjectId(req.user.id);
+      empFilter.emp_id     = req.user.id;
     } else if (req.user.role === 'manager') {
-      empFilter.manager_id = toObjectId(req.user.id);
+      empFilter.manager_id = req.user.id;
+    } else if (['admin', 'hr', 'super_admin'].includes(req.user.role) && req.query.managerId) {
+      empFilter.manager_id = req.query.managerId;
     }
 
     const monthStart = `${thisMonth}-01`;

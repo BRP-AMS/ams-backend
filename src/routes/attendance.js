@@ -91,6 +91,7 @@ router.get('/', authenticate, async (req, res) => {
       matchFilter.manager_id = req.user.id;
       if (empId) matchFilter.emp_id = empId;
     } else if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
+      if (req.query.managerId) matchFilter.manager_id = req.query.managerId;
       if (empId) matchFilter.emp_id = empId;
     }
     // admin / hr / super_admin sees all (with optional empId filter)
@@ -609,6 +610,9 @@ router.get('/stats/summary', authenticate, async (req, res) => {
       matchFilter.emp_id = req.user.id;
     } else if (req.user.role === 'manager') {
       matchFilter.manager_id = req.user.id;
+      if (empId) matchFilter.emp_id = empId;
+    } else if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
+      if (req.query.managerId) matchFilter.manager_id = req.query.managerId;
       if (empId) matchFilter.emp_id = empId;
     }
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };

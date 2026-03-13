@@ -422,8 +422,7 @@ else {
 });
 
 // ── PUT /api/attendance/:id/approve ──────────────────────────────────────
-router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (req, res) => {
-  try {
+router.put('/:id/approve', authenticate, authorize('manager', 'admin', 'hr'), async (req, res) => {  try {
     const { remark } = req.body;
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
@@ -435,7 +434,7 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
         return res.status(400).json({ success: false, message: 'Record cannot be approved in current state' });
     }
 
-    const isAdmin      = req.user.role === 'admin';
+   const isAdmin = ['admin', 'hr', 'super_admin'].includes(req.user.role);
     const updateFields = {
       status:       'Approved',
       manager_remark: remark || '',

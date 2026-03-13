@@ -87,17 +87,17 @@ router.get('/', authenticate, async (req, res) => {
       docsMap[d.schedule_id].push(d);
     });
 
-    const result = schedules.map(s => ({
-      ...s,
-      id:                s._id,
-      created_by_name:   userMap[s.created_by]?.name   || null,
-      assigned_to_name:  userMap[s.assigned_to]?.name  || null,
-      assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
-      initiated_by_name: userMap[s.initiated_by]?.name || null,
-      completed_by_name: userMap[s.completed_by]?.name || null,
-      documents:         docsMap[s._id] || [],
-    }));
-
+   const result = schedules.map(s => ({
+  ...s,
+  id: s._id,
+  created_by_name: userMap[s.created_by]?.name || null,
+  assigned_to_name: userMap[s.assigned_to]?.name || s.employee_name || null,
+  assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
+  manager_name: s.manager_name || userMap[s.created_by]?.name || null,
+  initiated_by_name: userMap[s.initiated_by]?.name || null,
+  completed_by_name: userMap[s.completed_by]?.name || null,
+  documents: docsMap[s._id] || [],
+}));
     res.json({ success: true, data: result });
   } catch (err) {
     console.error('GET /activity-schedule error:', err);
@@ -130,33 +130,53 @@ router.get('/my-completed', authenticate, async (req, res) => {
 });
 
 // ── POST /activity-schedule — create single (manager/admin) ───────────────
-router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+router.post('/', authenticate, async (req, res) => {
   try {
-    const { title, description, scheduled_date, location, assigned_emp_id } = req.body;
-    if (!title?.trim())      return res.status(422).json({ success: false, message: 'Title is required' });
-    if (!scheduled_date)     return res.status(422).json({ success: false, message: 'Scheduled date is required' });
+
+    const {
+      title,
+      description,
+      scheduled_date,
+      location,
+      assigned_emp_id
+    } = req.body;
+
+    let employee_name = null;
+    let manager_name = req.user.name;
 
     let assigned_to = null;
+
     if (assigned_emp_id) {
-      const emp = await User.findOne({ emp_id: assigned_emp_id }).select('_id').lean();
-      if (!emp) return res.status(404).json({ success: false, message: `Employee ${assigned_emp_id} not found` });
-      assigned_to = emp._id;
+      const emp = await User.findOne({ emp_id: assigned_emp_id }).lean();
+
+      if (emp) {
+        assigned_to = emp._id;
+        employee_name = emp.name;
+      }
     }
 
     const schedule = await ActivitySchedule.create({
-      _id:            uuidv4(),
-      title:          title.trim(),
-      description:    description?.trim() || null,
+      _id: uuidv4(),
+      title,
+      description,
       scheduled_date,
-      location:       location?.trim() || null,
+      location,
       assigned_to,
-      created_by:     req.user.id,
+      employee_name,
+      manager_name,
+      assigned_by: req.user.name,
+      created_by: req.user.id
     });
 
-    res.status(201).json({ success: true, data: { ...schedule.toObject(), id: schedule._id } });
-  } catch (err) {
-    console.error('POST /activity-schedule error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(201).json({
+      success: true,
+      data: schedule
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message
+    });
   }
 });
 
@@ -198,24 +218,32 @@ router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_ad
           continue;
         }
 
-        let assigned_to = null;
-        if (assigned_emp_id) {
-          const emp = await User.findOne({ emp_id: assigned_emp_id }).select('_id').lean();
-          if (!emp) { errors.push(`Row ${rowNum}: employee "${assigned_emp_id}" not found`); continue; }
-          assigned_to = emp._id;
-        }
+       
+let employee_name = null;
 
-        toInsert.push({
-          _id:            uuidv4(),
-          title,
-          description,
-          scheduled_date,
-          location,
-          assigned_to,
-          created_by:     req.user.id,
-        });
-      }
+if (assigned_emp_id) {
+  const emp = await User.findOne({ emp_id: assigned_emp_id }).lean();
+  if (!emp) {
+    errors.push(`Row ${rowNum}: employee "${assigned_emp_id}" not found`);
+    continue;
+  }
 
+  assigned_to = emp._id;
+  employee_name = emp.name;
+}
+
+toInsert.push({
+  _id: uuidv4(),
+  title,
+  description,
+  scheduled_date,
+  location,
+  assigned_to,
+  employee_name,
+  manager_name: req.user.name,
+  assigned_by: req.user.name,
+  created_by: req.user.id,
+});
       let inserted = [];
       if (toInsert.length) {
         inserted = await ActivitySchedule.insertMany(toInsert);

@@ -411,21 +411,72 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
       const row = rows[i];
       const rowNum = i + 2; // 1-based + header row
 
-      const empId    = String(row['EmpId']      || row['empId']      || '').trim();
-      const name     = String(row['Name']        || row['name']       || '').trim();
-      const email    = String(row['Email']       || row['email']      || '').trim().toLowerCase();
-      const password = String(row['Password']    || row['password']   || '').trim();
-      const role     = String(row['Role']        || row['role']       || 'employee').trim().toLowerCase();
-      const dept     = String(row['Department']  || row['department'] || '').trim();
-      const phone    = String(row['Phone']       || row['phone']      || '').trim() || null;
-      const block    = String(row['Block']       || row['block']      || '').trim() || null;
-      const district = String(row['District']    || row['district']   || '').trim() || null;
+      const empId = String(
+  row['EmpId'] ||
+  row['empId'] ||
+  ''
+).trim();
 
-      if (!empId || !name || !email || !dept) {
-        results.errors.push({ row: rowNum, reason: 'Missing required field (EmpId/Name/Email/Department)' });
-        results.skipped++;
-        continue;
-      }
+const name = String(
+  row['Name'] ||
+  row['name'] ||
+  ''
+).trim();
+
+const email = String(
+  row['Email'] ||
+  row['email'] ||
+  ''
+).trim().toLowerCase();
+
+const password = String(
+  row['Password'] ||
+  row['password'] ||
+  ''
+).trim();
+
+const role = String(
+  row['Role'] ||
+  row['role'] ||
+  'employee'
+).trim().toLowerCase();
+
+const dept = String(
+  row['Department'] ||
+  row['department'] ||
+  ''
+).trim();
+
+const phone = String(
+  row['Phone'] ||
+  row['phone'] ||
+  ''
+).trim() || null;
+
+const block = String(
+  row['Block'] ||
+  row['block'] ||
+  row['assignedBlock'] ||
+  row['AssignedBlock'] ||
+  ''
+).trim() || null;
+
+const district = String(
+  row['District'] ||
+  row['district'] ||
+  row['assignedDistrict'] ||
+  row['AssignedDistrict'] ||
+  ''
+).trim() || null;
+
+if (!empId || !name || !email || !dept) {
+  results.errors.push({
+    row: rowNum,
+    reason: 'Missing required field (EmpId/Name/Email/Department)'
+  });
+  results.skipped++;
+  continue;
+}
       if (!VALID_ROLES.includes(role)) {
         results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` });
         results.skipped++;

@@ -21,7 +21,7 @@ const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user    = await User
       .findById(decoded.id)
-      .select('id emp_id name email role department manager_id phone is_active')
+      .select('_id emp_id name email role department manager_id phone is_active')
       .lean();
 
     if (!user || !user.is_active) {
@@ -37,8 +37,10 @@ const authenticate = async (req, res, next) => {
 };
 
 const authorize = (...roles) => (req, res, next) => {
-  if (req.user.role === 'super_admin') return next();
-  if (!roles.includes(req.user.role)) {
+  const userRole = req.user?.role;
+  if (userRole === 'super_admin') return next();
+  if (!roles.includes(userRole)) {
+    console.warn(`[Auth] Forbidden: User ${req.user?._id} (${userRole}) attempted access to restricted route. Required: ${roles.join(', ')}`);
     return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
   next();

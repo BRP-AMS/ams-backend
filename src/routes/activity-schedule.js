@@ -49,7 +49,13 @@ router.get('/', authenticate, async (req, res) => {
     const filter = {};
 
     if (status)      filter.status         = status;
-    if (assigned_to) filter.assigned_to    = assigned_to;
+    if (assigned_to) {
+      filter.$or = [
+        { assigned_to: assigned_to },
+        { initiated_by: assigned_to },
+        { completed_by: assigned_to }
+      ];
+    }
     if (created_by)  filter.created_by     = created_by;
     if (date_from || date_to) {
       filter.scheduled_date = {};
@@ -71,10 +77,35 @@ router.get('/', authenticate, async (req, res) => {
     });
 
     const users = await User.find({ _id: { $in: [...userIds] } })
-      .select('_id name emp_id')
+      .select('_id name emp_id manager_id')
       .lean();
+
+    // Map managers if needed
+    const managerIds = new Set();
+    users.forEach(u => { if (u.manager_id) managerIds.add(u.manager_id); });
+    
+    // Fetch managers who aren't already in users list
+    const missingMgrIds = [...managerIds].filter(id => !userIds.has(id));
+    if (missingMgrIds.length) {
+      const extraMgrs = await User.find({ _id: { $in: missingMgrIds } }).select('_id name emp_id').lean();
+      users.push(...extraMgrs);
+    }
+
     const userMap = {};
-    users.forEach(u => { userMap[u._id] = { name: u.name, emp_id: u.emp_id }; });
+    users.forEach(u => { 
+      userMap[u._id] = { 
+        name: u.name, 
+        emp_id: u.emp_id,
+        manager_id: u.manager_id
+      }; 
+    });
+
+    // Second pass to attach manager_name to users
+    users.forEach(u => {
+      if (u.manager_id && userMap[u.manager_id]) {
+        userMap[u._id].manager_name = userMap[u.manager_id].name;
+      }
+    });
 
     // Attach documents for completed schedules
     const completedIds = schedules.filter(s => s.status === 'Completed').map(s => s._id);
@@ -91,8 +122,10 @@ router.get('/', authenticate, async (req, res) => {
       ...s,
       id:                s._id,
       created_by_name:   userMap[s.created_by]?.name   || null,
+      created_by_empid:  userMap[s.created_by]?.emp_id || null,
       assigned_to_name:  userMap[s.assigned_to]?.name  || null,
       assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
+      manager_name:      userMap[s.assigned_to]?.manager_name || null,
       initiated_by_name: userMap[s.initiated_by]?.name || null,
       initiated_by_empid: userMap[s.initiated_by]?.emp_id || null,
       completed_by_name: userMap[s.completed_by]?.name || null,
@@ -299,7 +332,13 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'super_a
     const filter = {};
 
     if (status)      filter.status         = status;
-    if (assigned_to) filter.assigned_to    = assigned_to;
+    if (assigned_to) {
+      filter.$or = [
+        { assigned_to: assigned_to },
+        { initiated_by: assigned_to },
+        { completed_by: assigned_to }
+      ];
+    }
     if (created_by)  filter.created_by     = created_by;
     if (date_from || date_to) {
       filter.scheduled_date = {};
@@ -374,7 +413,13 @@ router.get('/export-pdf', authenticate, authorize('manager', 'admin', 'hr', 'sup
     const filter = {};
 
     if (status)      filter.status         = status;
-    if (assigned_to) filter.assigned_to    = assigned_to;
+    if (assigned_to) {
+      filter.$or = [
+        { assigned_to: assigned_to },
+        { initiated_by: assigned_to },
+        { completed_by: assigned_to }
+      ];
+    }
     if (created_by)  filter.created_by     = created_by;
     if (date_from || date_to) {
       filter.scheduled_date = {};

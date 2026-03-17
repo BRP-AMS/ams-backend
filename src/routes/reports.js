@@ -328,6 +328,7 @@ router.get('/dashboard-stats', authenticate, async (req, res) => {
   try {
     console.log('Dashboard stats request by:', req.user.role, '| ID:', req.user.id);
 
+    const { startDate, endDate, empId } = req.query;
     const today     = new Date().toISOString().split('T')[0];
     const thisMonth = today.substring(0, 7);
 
@@ -339,15 +340,23 @@ router.get('/dashboard-stats', authenticate, async (req, res) => {
     } else if (['admin', 'hr', 'super_admin'].includes(req.user.role) && req.query.managerId) {
       empFilter.manager_id = req.query.managerId;
     }
+    if (empId) empFilter.emp_id = empId;
 
-    const monthStart = `${thisMonth}-01`;
-    const [year, month] = thisMonth.split('-').map(Number);
-    const nextMonth = month === 12
-      ? `${year + 1}-01-01`
-      : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    let dateFilter = {};
+    if (startDate || endDate) {
+      if (startDate) dateFilter.$gte = startDate;
+      if (endDate)   dateFilter.$lte = endDate;
+    } else {
+      const monthStart = `${thisMonth}-01`;
+      const [year, month] = thisMonth.split('-').map(Number);
+      const nextMonth = month === 12
+        ? `${year + 1}-01-01`
+        : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+      dateFilter = { $gte: monthStart, $lt: nextMonth };
+    }
 
     const monthlyResult = await AttendanceRecord.aggregate([
-      { $match: { date: { $gte: monthStart, $lt: nextMonth }, ...empFilter } },
+      { $match: { date: dateFilter, ...empFilter } },
       { $group: {
           _id:      null,
           total:    { $sum: 1 },

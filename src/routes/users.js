@@ -394,7 +394,7 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
 // ── POST /api/users/bulk-upload ───────────────────────────────────────────
 // Super Admin: upload Excel with employee data and create/update users in bulk
 // Expected columns: EmpId, Name, Email, Password, Role, Department, ManagerId, Phone, Block, District
-router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.single('file'), async (req, res) => {
+router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), uploadMem.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ success: false, message: 'Excel file required' });
 
   try {
@@ -417,10 +417,15 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
       const password = String(row['Password']    || row['password']   || '').trim();
       const role     = String(row['Role']        || row['role']       || 'employee').trim().toLowerCase();
       const dept     = String(row['Department']  || row['department'] || '').trim();
-      const managerId = String(row['ManagerId']  || row['managerId']  || '').trim() || null;
       const phone    = String(row['Phone']       || row['phone']      || '').trim() || null;
       const block    = String(row['Block']       || row['block']      || '').trim() || null;
       const district = String(row['District']    || row['district']   || '').trim() || null;
+  // Manager: accepts emp_id (MGR001) OR full name
+      const managerRef = String(
+        row['managerId']    || row['ManagerId']    ||
+        row['Manager Name'] || row['manager_name'] ||
+        row['ManagerName']  || row['manager_id']   || ''
+      ).trim() || null;
 
       if (!empId || !name || !email || !dept) {
         results.errors.push({ row: rowNum, reason: 'Missing required field (EmpId/Name/Email/Department)' });
@@ -432,17 +437,41 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
         results.skipped++;
         continue;
       }
+     // ── Resolve manager by emp_id OR name ────────────────────────────
+      let managerId = null;
+      if (managerRef) {
+        const mgr = await User.findOne({
+          $or: [
+            { emp_id: managerRef },
+            { name: { $regex: new RegExp(`^${managerRef}$`, 'i') } },
+          ],
+          is_active: 1,
+        }).lean();
 
+        if (mgr) {
+          managerId = mgr._id;
+        } else {
+          // Warn but don't skip — create user without manager
+          results.errors.push({ row: rowNum, reason: `Manager "${managerRef}" not found by name or emp_id — user created without manager link` });
+        }
+      }
       const existing = await User.findOne({ $or: [{ emp_id: empId }, { email }] }).lean();
+
       if (existing) {
-        // Update existing user (password only updated if provided)
-        const update = { name, email, role, department: dept, phone, assigned_block: block, assigned_district: district };
+        const update = {
+          name, email, role,
+          department:        dept,
+          phone,
+          manager_id:        managerId || existing.manager_id || null,
+          assigned_block:    block,
+          assigned_district: district,
+        };
         if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
         await User.findByIdAndUpdate(existing._id, { $set: update });
         results.updated++;
       } else {
         if (!password || password.length < 6) {
-          results.errors.push({ row: rowNum, reason: 'Password required for new user (min 6 chars)' });
+          results.errors.push({ row: rowNum, reason: `Password required for new user "${empId}" (min 6 chars)` });
           results.skipped++;
           continue;
         }
@@ -454,53 +483,97 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
           password_hash:     bcrypt.hashSync(password, 10),
           role,
           department:        dept,
-          manager_id,              
+          manager_id:        managerId || null,
           phone,
           assigned_block:    block,
           assigned_district: district,
+          is_active:         1,
+          email_verified:    true,
+          phone_verified:    true,
         });
         results.created++;
       }
     }
 
-    res.json({ success: true, message: 'Bulk upload complete', data: results });
+
+     res.json({
+      success: true,
+      message: `Bulk upload complete — ${results.created} created, ${results.updated} updated, ${results.skipped} skipped`,
+      data: results,
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error during bulk upload' });
+    console.error('Bulk upload error:', err);
+    res.status(500).json({ success: false, message: 'Server error during bulk upload: ' + err.message });
   }
 });
 
+
+
 // ── GET /api/users/bulk-upload/template ──────────────────────────────────
 // Returns a downloadable Excel template for bulk user upload
-router.get('/bulk-upload/template', authenticate, authorize('super_admin'), (req, res) => {
-  const ws = XLSX.utils.aoa_to_sheet([
-    ['EmpId', 'Name', 'Email', 'Password', 'Role', 'Department', 'ManagerId', 'Phone', 'Block', 'District'],
-    ['EMP001', 'John Doe', 'john@example.com', 'Pass@123', 'employee', 'Finance', 'MGR001', '9876543210', 'Block A', 'District 1'],
-  ]);
+router.get('/bulk-upload/template', authenticate, authorize('super_admin', 'admin'), (req, res) => {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Employees');
+
+  const templateData = [
+    ['name', 'email', 'empId', 'password', 'role', 'department', 'managerId', 'phone', 'assignedBlock', 'assignedDistrict'],
+    ['Manager One',   'manager1@brp.com',  'MGR001', 'R@m%Brp@26', 'manager',    'Engineering',    '',       '9876500001', 'Agartala',  'West Tripura'],
+    ['HR One',        'hr1@brp.com',       'HR001',  'R@m%Brp@26', 'hr',         'HR',             '',       '9876500010', 'Agartala',  'West Tripura'],
+    ['Admin One',     'admin1@brp.com',    'ADM001', 'R@m%Brp@26', 'admin',      'Administration', '',       '9876500020', 'Agartala',  'West Tripura'],
+    ['Rajesh Kumar',  'rajesh@brp.com',    'EMP001', 'R@m%Brp@26', 'employee',   'Engineering',    'MGR001', '9876543210', 'Agartala',  'West Tripura'],
+   
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(templateData);
+  ws['!cols'] = [
+    { wch: 16 }, { wch: 22 }, { wch: 10 }, { wch: 12 },
+    { wch: 12 }, { wch: 16 }, { wch: 14 }, { wch: 13 },
+    { wch: 14 }, { wch: 16 },
+  ];
+  XLSX.utils.book_append_sheet(wb, ws, 'Users Template');
+
+  // Rules sheet
+  const rules = XLSX.utils.aoa_to_sheet([
+    ['Column',           'Required', 'Notes'],
+    ['name',             'YES',      'Full name'],
+    ['email',            'YES',      'Valid unique email'],
+    ['empId',            'YES',      'Unique employee ID e.g. EMP001, MGR001'],
+    ['password',         'YES*',     'Min 6 chars. Required for new users only.'],
+    ['role',             'YES',      'One of: employee, manager, admin, hr, super_admin'],
+    ['department',       'YES',      'Department name'],
+    ['managerId',        'NO',       'Manager emp_id (MGR001) OR full name (Manager One). Leave blank for managers/admin/hr.'],
+    ['phone',            'NO',       '10-digit mobile number'],
+    ['assignedBlock',    'NO',       'Block name e.g. Agartala'],
+    ['assignedDistrict', 'NO',       'District name e.g. West Tripura'],
+    ['',                 '',         ''],
+    ['NOTE',             '',         'Add manager rows ABOVE employee rows so managers exist before employees reference them'],
+  ]);
+  rules['!cols'] = [{ wch: 18 }, { wch: 10 }, { wch: 65 }];
+  XLSX.utils.book_append_sheet(wb, rules, 'Rules');
+
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Disposition', 'attachment; filename="bulk_upload_template.xlsx"');
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(buf);
 });
 
+
 function formatUser(u) {
   return {
-    id:            u._id || u.id,
-    empId:         u.emp_id,
-    name:          u.name,
-    email:         u.email,
-    role:          u.role,
-    department:    u.department,
-    managerId:     u.manager_id,
-    managerName:   u.manager_name,
-    phone:         u.phone,
-    isActive:      !!u.is_active,
-    createdAt:     u.created_at,
+    id:               u._id || u.id,
+    empId:            u.emp_id,
+    name:             u.name,
+    email:            u.email,
+    role:             u.role,
+    department:       u.department,
+    managerId:        u.manager_id,
+    managerName:      u.manager_name || null,
+    phone:            u.phone,
+    isActive:         !!u.is_active,
+    createdAt:        u.created_at,
     assignedBlock:    u.assigned_block,
     assignedDistrict: u.assigned_district,
   };
+
 }
 
 module.exports = router;

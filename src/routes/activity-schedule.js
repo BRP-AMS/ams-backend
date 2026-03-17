@@ -2,26 +2,15 @@ const express  = require('express');
 const router   = express.Router();
 const multer   = require('multer');
 const path     = require('path');
-const fs       = require('fs');
 const XLSX     = require('xlsx');
+const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { ActivitySchedule, ScheduleDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// ── Upload directories ────────────────────────────────────────────────────
-const scheduleUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'schedule');
-if (!fs.existsSync(scheduleUploadDir)) fs.mkdirSync(scheduleUploadDir, { recursive: true });
-
-// For completion attachments
-const attachStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, scheduleUploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `sched_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-  },
-});
+// For completion attachments (memory storage → Cloudinary)
 const uploadAttach = multer({
-  storage: attachStorage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
@@ -298,16 +287,18 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
     schedule.remarks          = remarks?.trim() || null;
     await schedule.save();
 
-    // Save attachments
+    // Save attachments to Cloudinary
     if (req.files?.length) {
-      const docs = req.files.map(f => ({
+      const urls = await Promise.all(
+        req.files.map(f => uploadFile(f.buffer, 'ams/schedule-docs', f.originalname, f.mimetype))
+      );
+      await ScheduleDocument.insertMany(urls.map((url, i) => ({
         _id:         uuidv4(),
         schedule_id: schedule._id,
-        file_path:   `schedule/${f.filename}`,
-        file_name:   f.originalname,
-        file_type:   f.mimetype,
-      }));
-      await ScheduleDocument.insertMany(docs);
+        file_path:   url,
+        file_name:   req.files[i].originalname,
+        file_type:   req.files[i].mimetype,
+      })));
     }
 
     const documents = await ScheduleDocument.find({ schedule_id: schedule._id }).lean();
@@ -324,12 +315,7 @@ router.delete('/:id', authenticate, authorize('manager', 'admin', 'hr', 'super_a
     const schedule = await ActivitySchedule.findById(req.params.id);
     if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
 
-    // Remove attached files
-    const docs = await ScheduleDocument.find({ schedule_id: req.params.id }).lean();
-    docs.forEach(d => {
-      const fp = path.join(process.env.UPLOAD_DIR || './uploads', d.file_path);
-      if (fs.existsSync(fp)) fs.unlinkSync(fp);
-    });
+    // Files are on Cloudinary — just remove DB records
     await ScheduleDocument.deleteMany({ schedule_id: req.params.id });
     await schedule.deleteOne();
 

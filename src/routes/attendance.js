@@ -1,9 +1,8 @@
 const express      = require('express');
 const router       = express.Router();
 const multer       = require('multer');
-const path         = require('path');
-const fs           = require('fs');
 const nodemailer   = require('nodemailer');
+const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
@@ -30,19 +29,9 @@ const sendMail = async (to, subject, html) => {
   }
 };
 
-// Multer config for selfie uploads
-const uploadDir = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `selfie_${req.user.id}_${Date.now()}${ext}`);
-  }
-});
+// Multer — memory storage (files uploaded to Cloudinary)
 const upload = multer({
-  storage,
+  storage:    multer.memoryStorage(),
   limits:     { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
@@ -206,6 +195,10 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : istTimeStr();
     const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
 
+    const selfiePath = req.file
+      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
+      : null;
+
     await AttendanceRecord.create({
       _id:              id,
       emp_id:           req.user.id,
@@ -214,7 +207,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       sector:           sector || null,
       description:      description || '',
       status:           'Draft',
-      selfie_path:      req.file ? `/uploads/${req.file.filename}` : null,
+      selfie_path:      selfiePath,
       latitude:         parseFloat(latitude),
       longitude:        parseFloat(longitude),
       location_address: locationAddress || '',
@@ -377,7 +370,9 @@ else {
 }
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
-    const checkoutSelfiePath = req.file ? `/uploads/${req.file.filename}` : null;
+    const checkoutSelfiePath = req.file
+      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
+      : null;
 
     // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
     const timeRe = /^\d{2}:\d{2}$/;
@@ -652,7 +647,9 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
 
-    const docPaths = (req.files || []).map(f => f.filename);
+    const docPaths = await Promise.all(
+      (req.files || []).map(f => uploadFile(f.buffer, 'ams/reapply-docs', f.originalname, f.mimetype))
+    );
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {

@@ -2,25 +2,15 @@ const express = require('express');
 const router  = express.Router();
 const multer  = require('multer');
 const path    = require('path');
-const fs      = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { uploadFile } = require('../utils/storage');
 const { query, body, validationResult } = require('express-validator');
 const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// ── File Upload Config ────────────────────────────────────────────────────
-const activityUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'activity');
-if (!fs.existsSync(activityUploadDir)) fs.mkdirSync(activityUploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, activityUploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `act_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-  },
-});
+// ── File Upload Config (memory storage → Cloudinary) ─────────────────────
 const upload = multer({
-  storage,
+  storage:    multer.memoryStorage(),
   limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
@@ -86,14 +76,17 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       remarks:          remarks          || null,
     });
 
-    // Save uploaded documents
+    // Save uploaded documents to Cloudinary
     if (req.files?.length) {
-      await ActivityDocument.insertMany(req.files.map(f => ({
+      const uploaded = await Promise.all(
+        req.files.map(f => uploadFile(f.buffer, 'ams/activity-docs', f.originalname, f.mimetype))
+      );
+      await ActivityDocument.insertMany(uploaded.map((url, i) => ({
         _id:         uuidv4(),
         activity_id: id,
-        file_path:   f.filename,
-        file_name:   f.originalname,
-        file_type:   f.mimetype,
+        file_path:   url,
+        file_name:   req.files[i].originalname,
+        file_type:   req.files[i].mimetype,
       })));
     }
 

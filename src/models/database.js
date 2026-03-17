@@ -16,6 +16,17 @@ const userSchema = new mongoose.Schema({
   is_active:        { type: Number, default: 1 },
   assigned_block:    { type: String, default: null },
   assigned_district: { type: String, default: null },
+  // ── Email verification ───────────────────────────────────────────────
+  email_verified:       { type: Boolean, default: false },
+  email_verify_token:   { type: String,  default: null },  // hashed token
+  email_verify_expires: { type: Date,    default: null },
+  // ── Password reset ───────────────────────────────────────────────────
+  pwd_reset_token:      { type: String,  default: null },  // hashed token
+  pwd_reset_expires:    { type: Date,    default: null },
+  // ── Phone OTP ────────────────────────────────────────────────────────
+  phone_otp:            { type: String,  default: null },  // hashed OTP
+  phone_otp_expires:    { type: Date,    default: null },
+  phone_verified:       { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });

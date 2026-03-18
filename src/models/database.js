@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://kshreyareddy1323_db_user:kshreyareddy1323_db_user@cluster0.o9v3njy.mongodb.net/brp-attendance?retryWrites=true&w=majority';
+const MONGO_URI = process.env.MONGO_URI ;
 // ── Schemas ───────────────────────────────────────────────────────────────
 
 const userSchema = new mongoose.Schema({

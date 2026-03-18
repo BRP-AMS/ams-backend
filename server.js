@@ -12,7 +12,7 @@ const fs       = require('fs');
 const cron     = require('node-cron');
 
 const app  = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT ;
 
 // ── Security & Middleware ─────────────────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
@@ -132,6 +132,7 @@ app.listen(PORT, () => {
   console.log(`\n🚀 BRP Attendance API running on http://localhost:${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`\nRun 'npm run seed' to populate demo data\n`);
+  console.log("Connected DB:", mongoose.connection.name);
 });
 
 module.exports = app;

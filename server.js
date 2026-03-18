@@ -132,7 +132,7 @@ app.listen(PORT, () => {
   console.log(`\n🚀 BRP Attendance API running on http://localhost:${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`\nRun 'npm run seed' to populate demo data\n`);
-  console.log("Connected DB:", mongoose.connection.name);
+
 });
 
 module.exports = app;

@@ -19,11 +19,16 @@ const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
 }) : null;
 
 const sendMail = async (to, subject, html) => {
-  if (!mailer) { console.warn('[Email] SMTP not configured. Skipping:', subject); return; }
+  if (!mailer) {
+    console.warn('[Email] SMTP not configured (SMTP_HOST missing). Skipping:', subject);
+    return;
+  }
+  console.log(`[Email] Sending "${subject}" to ${to} via ${process.env.SMTP_HOST}:${process.env.SMTP_PORT} as ${process.env.SMTP_USER}`);
   try {
-    await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
+    const info = await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
+    console.log('[Email] Sent OK. MessageId:', info.messageId);
   } catch (err) {
-    console.error('[Email] Send error:', err.message);
+    console.error('[Email] Send FAILED:', err.message, '| code:', err.code, '| response:', err.response);
   }
 };
 

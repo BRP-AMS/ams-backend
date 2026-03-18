@@ -34,8 +34,14 @@ app.use(cors({
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-// Sanitize req.body / req.query / req.params against NoSQL injection ($, .)
-app.use(mongoSanitize({ replaceWith: '_' }));
+// Sanitize req.body / req.params against NoSQL injection ($, .)
+// Note: req.query is getter-only in Express 5 and cannot be reassigned,
+// so we sanitize only body and params using the sanitize() helper.
+app.use((req, res, next) => {
+  if (req.body)   req.body   = mongoSanitize.sanitize(req.body,   { replaceWith: '_' });
+  if (req.params) req.params = mongoSanitize.sanitize(req.params, { replaceWith: '_' });
+  next();
+});
 
 // Global rate limit (prevents DDoS / scraping)
 const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 5000, standardHeaders: true, legacyHeaders: false });

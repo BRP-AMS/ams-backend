@@ -240,7 +240,8 @@ router.post('/forgot-password', forgotLimiter, [
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
     });
 
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${rawToken}`;
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web.onrender.com';
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Reset Your Password',
       emailLayout('Password Reset Request', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
@@ -322,8 +323,37 @@ router.post('/reset-password', [
 });
 
 // ── GET /api/auth/verify-email/:token ────────────────────────────────────
-// Called when user clicks the link in their welcome/verification email
+// Called when user clicks the verification link in their welcome email.
+// Returns a self-contained HTML page — no redirect, no FRONTEND_URL needed.
 router.get('/verify-email/:token', async (req, res) => {
+  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web.onrender.com';
+
+  const page = (success, title, message) => `<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} — BRP AMS</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#f2f6f8;font-family:Arial,sans-serif;padding:24px}
+  .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);
+        padding:40px 36px;max-width:440px;width:100%;text-align:center}
+  .icon{font-size:52px;margin-bottom:20px}
+  h1{color:#0b1e3b;font-size:22px;margin-bottom:12px}
+  p{color:#475569;font-size:14px;line-height:1.7;margin-bottom:28px}
+  a.btn{display:inline-block;background:${success ? '#21879d' : '#64748b'};color:#fff;
+        padding:13px 32px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px}
+  a.btn:hover{opacity:.9}
+  .brand{color:#0b1e3b;font-size:12px;margin-top:24px;opacity:.5}
+</style></head>
+<body><div class="card">
+  <div class="icon">${success ? '✅' : '❌'}</div>
+  <h1>${title}</h1>
+  <p>${message}</p>
+  <a class="btn" href="${FRONTEND}/login">Go to Login</a>
+  <div class="brand">BRP · AMS &nbsp;|&nbsp; Attendance Management System</div>
+</div></body></html>`;
+
   try {
     const hashedTok = hashToken(req.params.token);
     const user = await User.findOne({
@@ -332,8 +362,10 @@ router.get('/verify-email/:token', async (req, res) => {
     }).lean();
 
     if (!user) {
-      // Redirect to frontend with error
-      return res.redirect(`${process.env.FRONTEND_URL}/login?verified=0`);
+      return res.status(400).send(page(false,
+        'Link Invalid or Expired',
+        'This verification link is no longer valid. It may have already been used or expired (links are valid for 48 hours).<br><br>Please log in and request a new verification email from your profile.'
+      ));
     }
 
     await User.findByIdAndUpdate(user._id, {
@@ -341,10 +373,13 @@ router.get('/verify-email/:token', async (req, res) => {
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'EMAIL_VERIFIED', ip_address: req.ip });
 
-    res.redirect(`${process.env.FRONTEND_URL}/login?verified=1`);
+    res.send(page(true,
+      'Email Verified!',
+      `Your email has been verified successfully, <strong>${user.name}</strong>.<br><br>Your account is now active. Click below to sign in.`
+    ));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).send(page(false, 'Server Error', 'Something went wrong. Please try again later.'));
   }
 });
 

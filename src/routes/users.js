@@ -82,12 +82,12 @@ router.post('/', authenticate, authorize('admin'), [
   body('name').notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
   body('empId').notEmpty().withMessage('Employee ID is required'),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  // password is now auto-generated — no longer required from the client
   body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']).withMessage('Invalid role'),
   body('department').notEmpty().withMessage('Department is required'),
 ], validate, async (req, res) => {
   try {
-    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
+    const { name, email, empId, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
     // Admin cannot create admin or super_admin accounts — only Super Admin can
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
@@ -104,9 +104,18 @@ router.post('/', authenticate, authorize('admin'), [
     const genToken   = () => crypto.randomBytes(32).toString('hex');
     const hashToken  = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
-    const rawToken   = genToken();
-    const hashedTok  = hashToken(rawToken);
-    const expires    = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h
+    // Email verification token (48h)
+    const rawVerifyToken   = genToken();
+    const hashedVerifyTok  = hashToken(rawVerifyToken);
+    const verifyExpires    = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+    // Password-set token (48h) — so user sets their own password on first login
+    const rawResetToken    = genToken();
+    const hashedResetTok   = hashToken(rawResetToken);
+    const resetExpires     = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+    // Temporary locked password — user must set their own via the reset link
+    const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
 
     const id = uuidv4();
     await User.create({
@@ -114,7 +123,7 @@ router.post('/', authenticate, authorize('admin'), [
       emp_id:               empId,
       name,
       email,
-      password_hash:        bcrypt.hashSync(password, 12),
+      password_hash:        bcrypt.hashSync(tempPassword, 12),
       role,
       department,
       manager_id:           managerId        || null,
@@ -122,17 +131,18 @@ router.post('/', authenticate, authorize('admin'), [
       assigned_block:       assignedBlock    || null,
       assigned_district:    assignedDistrict || null,
       email_verified:       false,
-      email_verify_token:   hashedTok,
-      email_verify_expires: expires,
+      email_verify_token:   hashedVerifyTok,
+      email_verify_expires: verifyExpires,
+      pwd_reset_token:      hashedResetTok,
+      pwd_reset_expires:    resetExpires,
     });
 
-    // Send welcome + verification email
     const BACKEND    = process.env.BACKEND_URL || 'https://ams-backend-mmgu.onrender.com';
-    const verifyUrl  = `${BACKEND}/api/auth/verify-email/${rawToken}`;
     const FRONTEND   = process.env.FRONTEND_URL || 'https://ams-frontend-web.onrender.com';
-    const loginUrl   = `${FRONTEND}/login`;
+    const verifyUrl  = `${BACKEND}/api/auth/verify-email/${rawVerifyToken}`;
+    const resetUrl   = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
-    await sendMail(email, '[BRP AMS] Welcome — Verify Your Email',
+    await sendMail(email, '[BRP AMS] Welcome — Activate Your Account & Set Password',
       `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
       <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
@@ -146,43 +156,53 @@ router.post('/', authenticate, authorize('admin'), [
       <tr><td style="padding:32px;">
         <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Welcome, ${name}!</h2>
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Your AMS account has been created. Here are your login details:
+          Your BRP AMS account has been created. Complete the two steps below to activate your account.
         </p>
         <table style="background:#f8fafc;border-radius:8px;padding:16px;width:100%;margin:16px 0;">
           <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Email</td>
               <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${email}</td></tr>
-          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Password</td>
-              <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${password}</td></tr>
           <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Employee ID</td>
               <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${empId}</td></tr>
           <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Role</td>
-              <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${role}</td></tr>
+              <td style="color:#0b1e3b;font-weight:700;font-size:13px;text-transform:capitalize;">${role}</td></tr>
         </table>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Please verify your email address to activate your account:
+
+        <p style="color:#0b1e3b;font-size:14px;font-weight:700;margin:24px 0 8px;">Step 1 — Verify your email</p>
+        <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">
+          Click below to confirm your email address and activate your account.
         </p>
-        <div style="text-align:center;margin:24px 0;">
+        <div style="text-align:center;margin:0 0 24px;">
           <a href="${verifyUrl}"
-            style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Verify Email &amp; Activate Account
+            style="background:#21879d;color:#fff;padding:13px 28px;border-radius:8px;
+                   text-decoration:none;font-weight:700;font-size:14px;display:inline-block;">
+            ✓ Verify Email &amp; Activate Account
           </a>
         </div>
-        <p style="color:#94a3b8;font-size:12px;word-break:break-all;">Or copy: ${verifyUrl}</p>
-        <p style="color:#475569;font-size:13px;">
-          Once verified, login at: <a href="${loginUrl}" style="color:#21879d;">${loginUrl}</a>
+        <p style="color:#94a3b8;font-size:11px;word-break:break-all;margin:0 0 24px;">Or copy: ${verifyUrl}</p>
+
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:0 0 24px;">
+
+        <p style="color:#0b1e3b;font-size:14px;font-weight:700;margin:0 0 8px;">Step 2 — Set your password</p>
+        <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">
+          Click below to create your own password. This link expires in <strong>48 hours</strong>.
         </p>
-        <p style="color:#dc2626;font-size:12px;">
-          Please change your password after first login.
-        </p>
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0;">
+        <div style="text-align:center;margin:0 0 16px;">
+          <a href="${resetUrl}"
+            style="background:#1e3a8a;color:#fff;padding:13px 28px;border-radius:8px;
+                   text-decoration:none;font-weight:700;font-size:14px;display:inline-block;">
+            🔑 Set My Password
+          </a>
+        </div>
+        <p style="color:#94a3b8;font-size:11px;word-break:break-all;margin:0 0 24px;">Or copy: ${resetUrl}</p>
+
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:0 0 16px;">
         <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
       </td></tr></table>
       </td></tr></table></body></html>`
     );
 
     const user = await User.findById(id).lean();
-    res.status(201).json({ success: true, message: 'User created. Verification email sent.', data: formatUser(user) });
+    res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });

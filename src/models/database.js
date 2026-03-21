@@ -23,6 +23,11 @@ const userSchema = new mongoose.Schema({
   // ── Password reset ───────────────────────────────────────────────────
   pwd_reset_token:      { type: String,  default: null },  // hashed token
   pwd_reset_expires:    { type: Date,    default: null },
+  // ── Password reset OTP ───────────────────────────────────────────────
+  pwd_reset_otp:        { type: String,  default: null },  // hashed OTP
+  pwd_reset_otp_expires:{ type: Date,    default: null },
+  // ── Password changed timestamp (for global logout) ─────────────────
+  pwd_changed_at:       { type: Date,    default: null },
   // ── Phone OTP ────────────────────────────────────────────────────────
   phone_otp:            { type: String,  default: null },  // hashed OTP
   phone_otp_expires:    { type: Date,    default: null },

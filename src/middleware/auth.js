@@ -21,11 +21,16 @@ const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user    = await User
       .findById(decoded.id)
-      .select('id emp_id name email role department manager_id phone is_active')
+      .select('id emp_id name email role department manager_id phone is_active pwd_changed_at')
       .lean();
 
     if (!user || !user.is_active) {
       return res.status(401).json({ success: false, message: 'User not found or inactive' });
+    }
+
+    // Global logout: reject tokens issued before the last password change
+    if (user.pwd_changed_at && decoded.iat < Math.floor(new Date(user.pwd_changed_at).getTime() / 1000)) {
+      return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
     }
 
     req.user  = { ...user, id: user._id };

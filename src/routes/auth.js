@@ -208,7 +208,7 @@ router.put('/change-password', authenticate, [
       return res.status(400).json({ success: false, message: 'New password must differ from current password' });
 
     await User.findByIdAndUpdate(req.user.id, {
-      $set: { password_hash: bcrypt.hashSync(newPassword, 12) }
+      $set: { password_hash: bcrypt.hashSync(newPassword, 12), pwd_changed_at: new Date() }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHANGE_PASSWORD', ip_address: req.ip });
     res.json({ success: true, message: 'Password changed successfully' });
@@ -274,16 +274,14 @@ router.post('/forgot-password', forgotLimiter, [
   }
 });
 
-// ── POST /api/auth/reset-password ────────────────────────────────────────
-router.post('/reset-password', [
+// ── POST /api/auth/reset-password-otp ─────────────────────────────────
+// After user clicks the reset link, the frontend calls this to send an OTP
+// to the user's email for additional verification before allowing password change.
+router.post('/reset-password-otp', otpLimiter, [
   body('token').notEmpty().withMessage('Reset token is required'),
-  body('newPassword')
-    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
-    .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
-    .matches(/[0-9]/).withMessage('Must contain at least one number'),
 ], validate, async (req, res) => {
   try {
-    const { token, newPassword } = req.body;
+    const { token } = req.body;
     const hashedTok = hashToken(token);
 
     const user = await User.findOne({
@@ -295,11 +293,76 @@ router.post('/reset-password', [
     if (!user)
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
 
+    const otp       = generateOTP();
+    const hashedOtp = hashToken(otp);
+    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { pwd_reset_otp: hashedOtp, pwd_reset_otp_expires: expires }
+    });
+
+    await sendMail(user.email, '[BRP AMS] Password Reset OTP',
+      emailLayout('Password Reset Verification Code', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, enter this code to verify your identity before resetting your password.
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <span style="font-size:42px;font-weight:900;letter-spacing:14px;color:#0b1e3b;">${otp}</span>
+        </div>
+        <p style="color:#475569;font-size:13px;text-align:center;">
+          This code expires in <strong>5 minutes</strong>.
+        </p>
+        <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
+      `)
+    );
+
+    res.json({ success: true, message: 'OTP sent to your email' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/reset-password ────────────────────────────────────────
+router.post('/reset-password', [
+  body('token').notEmpty().withMessage('Reset token is required'),
+  body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
+  body('newPassword')
+    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+    .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
+    .matches(/[0-9]/).withMessage('Must contain at least one number'),
+], validate, async (req, res) => {
+  try {
+    const { token, otp, newPassword } = req.body;
+    const hashedTok = hashToken(token);
+
+    const user = await User.findOne({
+      pwd_reset_token:   hashedTok,
+      pwd_reset_expires: { $gt: new Date() },
+      is_active: 1,
+    }).lean();
+
+    if (!user)
+      return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
+
+    // Validate OTP
+    if (!user.pwd_reset_otp || !user.pwd_reset_otp_expires)
+      return res.status(400).json({ success: false, message: 'No OTP found. Please request an OTP first.' });
+
+    if (new Date() > user.pwd_reset_otp_expires)
+      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
+
+    if (hashToken(otp) !== user.pwd_reset_otp)
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+
     await User.findByIdAndUpdate(user._id, {
       $set: {
-        password_hash:     bcrypt.hashSync(newPassword, 12),
-        pwd_reset_token:   null,
-        pwd_reset_expires: null,
+        password_hash:         bcrypt.hashSync(newPassword, 12),
+        pwd_reset_token:       null,
+        pwd_reset_expires:     null,
+        pwd_reset_otp:         null,
+        pwd_reset_otp_expires: null,
+        pwd_changed_at:        new Date(),
       }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });

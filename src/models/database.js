@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://kshreyareddy1323_db_user:kshreyareddy1323_db_user@cluster0.o9v3njy.mongodb.net/brp-attendance?retryWrites=true&w=majority';
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  console.error('FATAL: MONGO_URI environment variable is required');
+  process.exit(1);
+}
 // ── Schemas ───────────────────────────────────────────────────────────────
 
 const userSchema = new mongoose.Schema({
@@ -32,6 +36,9 @@ const userSchema = new mongoose.Schema({
   phone_otp:            { type: String,  default: null },  // hashed OTP
   phone_otp_expires:    { type: Date,    default: null },
   phone_verified:       { type: Boolean, default: false },
+  // ── Account lockout ─────────────────────────────────────────────────
+  failed_login_attempts: { type: Number, default: 0 },
+  login_locked_until:    { type: Date, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });

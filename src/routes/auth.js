@@ -90,9 +90,27 @@ router.post('/login', loginLimiter, [
     const { email, password } = req.body;
     const user = await User.findOne({ email, is_active: 1 }).lean();
 
+    // Account lockout check
+    if (user && user.login_locked_until && new Date(user.login_locked_until) > new Date()) {
+      return res.status(423).json({ success: false, message: 'Account temporarily locked. Try again later.' });
+    }
+
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+      // Audit log for failed login
+      if (user) {
+        await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'LOGIN_FAILED', ip_address: req.ip });
+        const attempts = (user.failed_login_attempts || 0) + 1;
+        const updateFields = { failed_login_attempts: attempts };
+        if (attempts >= 5) {
+          updateFields.login_locked_until = new Date(Date.now() + 15 * 60 * 1000);
+        }
+        await User.findByIdAndUpdate(user._id, { $set: updateFields });
+      }
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
+
+    // Reset failed login attempts on successful login
+    await User.findByIdAndUpdate(user._id, { $set: { failed_login_attempts: 0, login_locked_until: null } });
 
     const token = jwt.sign(
       { id: user._id, role: user.role, emp_id: user.emp_id },
@@ -195,7 +213,8 @@ router.put('/change-password', authenticate, [
   body('newPassword')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
-    .matches(/[0-9]/).withMessage('Must contain at least one number'),
+    .matches(/[0-9]/).withMessage('Must contain at least one number')
+    .matches(/[!@#$%^&*(),.?":{}|<>]/).withMessage('Must contain at least one special character'),
 ], validate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -330,7 +349,8 @@ router.post('/reset-password', [
   body('newPassword')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
-    .matches(/[0-9]/).withMessage('Must contain at least one number'),
+    .matches(/[0-9]/).withMessage('Must contain at least one number')
+    .matches(/[!@#$%^&*(),.?":{}|<>]/).withMessage('Must contain at least one special character'),
 ], validate, async (req, res) => {
   try {
     const { token, otp, newPassword } = req.body;

@@ -234,7 +234,7 @@ router.post('/forgot-password', forgotLimiter, [
 
     const rawToken  = generateToken();
     const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
 
     await User.findByIdAndUpdate(user._id, {
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
@@ -248,7 +248,7 @@ router.post('/forgot-password', forgotLimiter, [
           Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
         </p>
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Click the button below. This link expires in <strong>30 minutes</strong>.
+          Click the button below. This link expires in <strong>5 minutes</strong>.
         </p>
         <div style="text-align:center;margin:28px 0;">
           <a href="${resetUrl}"
@@ -364,7 +364,7 @@ router.get('/verify-email/:token', async (req, res) => {
     if (!user) {
       return res.status(400).send(page(false,
         'Link Invalid or Expired',
-        'This verification link is no longer valid. It may have already been used or expired (links are valid for 48 hours).<br><br>Please log in and request a new verification email from your profile.'
+        'This verification link is no longer valid. It may have already been used or expired (links are valid for 24 hours).<br><br>Please log in and request a new verification email from your profile.'
       ));
     }
 

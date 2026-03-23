@@ -4,18 +4,25 @@
  * Uses Firebase Auth REST API (HTTPS, port 443) to send emails.
  * This works on Render free-tier where SMTP ports are blocked.
  *
- * Supported email types:
- *   - Password reset   → Firebase sends branded reset email
- *   - Email verification → Firebase sends branded verification email
- *   - OTP / custom      → Uses Firebase password-reset flow as delivery mechanism
+ * IMPORTANT: Firebase only sends emails to users that EXIST in Firebase Auth.
+ * Every send function ensures the user exists first (creates if needed).
  *
  * Only requires FIREBASE_API_KEY (web API key from Firebase Console).
  */
 
+const crypto = require('crypto');
+
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
 const FIREBASE_REST    = 'https://identitytoolkit.googleapis.com/v1';
 
-if (!FIREBASE_API_KEY) {
+// Shadow password for Firebase-only users (not used for actual auth)
+const SHADOW_PWD_PREFIX = 'FbShadow@';
+const getShadowPassword = (email) =>
+  SHADOW_PWD_PREFIX + crypto.createHash('sha256').update(email + 'brp-ams-salt').digest('hex').slice(0, 20);
+
+if (FIREBASE_API_KEY) {
+  console.log('[Firebase Mailer] ✅ FIREBASE_API_KEY configured — email delivery via Firebase Auth REST API');
+} else {
   console.warn('[Firebase Mailer] ⚠️  FIREBASE_API_KEY not set — Firebase email delivery disabled');
 }
 
@@ -36,38 +43,48 @@ async function firebasePost(endpoint, body) {
   return data;
 }
 
-// ── Ensure a Firebase Auth user exists for this email ───────────────────────
-// Creates a shadow user if one doesn't exist. Returns idToken for further ops.
+// ── Ensure a Firebase Auth user exists ──────────────────────────────────────
+// Firebase ONLY sends emails to registered users. This creates one if needed.
 async function ensureFirebaseUser(email, password) {
-  const pwd = password || `Fb@${require('crypto').randomBytes(12).toString('hex')}`;
+  const pwd = password || getShadowPassword(email);
 
+  // Step 1: Try to create the user (fastest path for new users)
   try {
-    // Try sign in first (user may already exist)
+    const signUp = await firebasePost('accounts:signUp', {
+      email,
+      password: pwd,
+      returnSecureToken: true,
+    });
+    console.log(`[Firebase] ✅ Created shadow user: ${email}`);
+    return { idToken: signUp.idToken, isNew: true };
+  } catch (err) {
+    if (err.message !== 'EMAIL_EXISTS') throw err;
+  }
+
+  // Step 2: User exists — try signing in with our shadow password
+  try {
     const signIn = await firebasePost('accounts:signInWithPassword', {
       email,
       password: pwd,
       returnSecureToken: true,
     });
-    return signIn;
+    return { idToken: signIn.idToken, isNew: false };
   } catch (err) {
-    if (err.message === 'INVALID_LOGIN_CREDENTIALS' || err.message === 'EMAIL_NOT_FOUND') {
-      // User doesn't exist — create
-      try {
-        const signUp = await firebasePost('accounts:signUp', {
-          email,
-          password: pwd,
-          returnSecureToken: true,
-        });
-        console.log(`[Firebase] Created shadow user: ${email}`);
-        return signUp;
-      } catch (createErr) {
-        if (createErr.message === 'EMAIL_EXISTS') {
-          // User exists but password is wrong — use password reset flow
-          console.log(`[Firebase] User exists with different password: ${email}`);
-          return null; // Can still send PASSWORD_RESET without idToken
-        }
-        throw createErr;
+    if (err.message === 'INVALID_LOGIN_CREDENTIALS') {
+      // User exists with a different password (created manually or with temp password)
+      // Try the provided password
+      if (password && password !== pwd) {
+        try {
+          const signIn2 = await firebasePost('accounts:signInWithPassword', {
+            email,
+            password,
+            returnSecureToken: true,
+          });
+          return { idToken: signIn2.idToken, isNew: false };
+        } catch (_) { /* fall through */ }
       }
+      console.log(`[Firebase] User exists but password mismatch: ${email} — will use PASSWORD_RESET`);
+      return { idToken: null, isNew: false, exists: true };
     }
     throw err;
   }
@@ -79,23 +96,26 @@ async function ensureFirebaseUser(email, password) {
 
 /**
  * Send a password reset email via Firebase.
- * This is the simplest — only needs the email address, no auth required.
+ * ALWAYS ensures the user exists in Firebase Auth first.
  */
-async function sendPasswordResetEmail(email) {
+async function sendPasswordResetEmail(email, password) {
   if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY not configured');
+
+  // Ensure user exists — Firebase silently skips non-existent users
+  await ensureFirebaseUser(email, password);
 
   console.log(`[Firebase] Sending PASSWORD_RESET → ${email}`);
   const result = await firebasePost('accounts:sendOobCode', {
     requestType: 'PASSWORD_RESET',
     email,
   });
-  console.log(`[Firebase] ✅ Password reset email sent to ${email}`);
+  console.log(`[Firebase] ✅ Password reset email queued for ${email}`);
   return result;
 }
 
 /**
  * Send an email verification email via Firebase.
- * Requires creating/signing-in as the Firebase user to get an idToken.
+ * Creates user if needed, then sends verification.
  */
 async function sendVerificationEmail(email, password) {
   if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY not configured');
@@ -103,17 +123,26 @@ async function sendVerificationEmail(email, password) {
   console.log(`[Firebase] Sending VERIFY_EMAIL → ${email}`);
   const authData = await ensureFirebaseUser(email, password);
 
-  if (!authData?.idToken) {
-    // Fallback: send a password reset instead (still delivers an email)
-    console.log(`[Firebase] Falling back to PASSWORD_RESET for verification: ${email}`);
-    return sendPasswordResetEmail(email);
+  if (authData?.idToken) {
+    try {
+      const result = await firebasePost('accounts:sendOobCode', {
+        requestType: 'VERIFY_EMAIL',
+        idToken: authData.idToken,
+      });
+      console.log(`[Firebase] ✅ Verification email sent to ${email}`);
+      return result;
+    } catch (err) {
+      console.log(`[Firebase] VERIFY_EMAIL failed, falling back to PASSWORD_RESET: ${err.message}`);
+    }
   }
 
+  // Fallback: send password reset instead (still delivers an email to the user)
+  console.log(`[Firebase] Falling back to PASSWORD_RESET for: ${email}`);
   const result = await firebasePost('accounts:sendOobCode', {
-    requestType: 'VERIFY_EMAIL',
-    idToken: authData.idToken,
+    requestType: 'PASSWORD_RESET',
+    email,
   });
-  console.log(`[Firebase] ✅ Verification email sent to ${email}`);
+  console.log(`[Firebase] ✅ Fallback reset email sent to ${email}`);
   return result;
 }
 
@@ -127,7 +156,7 @@ async function createFirebaseUser(email, password) {
   try {
     const result = await firebasePost('accounts:signUp', {
       email,
-      password,
+      password: password || getShadowPassword(email),
       returnSecureToken: true,
     });
     console.log(`[Firebase] ✅ Created user: ${email}`);
@@ -141,29 +170,7 @@ async function createFirebaseUser(email, password) {
   }
 }
 
-/**
- * Unified sendMail replacement.
- * For password-reset and verification, uses Firebase Auth REST API.
- * For other email types (OTP, notifications), uses Firebase password-reset as delivery.
- */
-async function sendFirebaseMail(to, subject, html, options = {}) {
-  if (!FIREBASE_API_KEY) {
-    console.error('[Firebase Mailer] ⚠️  FIREBASE_API_KEY not set — cannot send email');
-    return null;
-  }
-
-  const type = options.type || 'PASSWORD_RESET';
-
-  if (type === 'VERIFY_EMAIL') {
-    return sendVerificationEmail(to, options.password);
-  }
-
-  // Default: use PASSWORD_RESET (works for any email — user gets a reset link)
-  return sendPasswordResetEmail(to);
-}
-
 module.exports = {
-  sendFirebaseMail,
   sendPasswordResetEmail,
   sendVerificationEmail,
   createFirebaseUser,

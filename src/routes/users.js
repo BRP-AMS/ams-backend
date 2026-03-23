@@ -142,7 +142,8 @@ router.post('/', authenticate, authorize('admin'), [
     const verifyUrl  = `${BACKEND}/api/auth/verify-email/${rawVerifyToken}`;
     const resetUrl   = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
-    await sendMail(email, '[BRP AMS] Welcome — Activate Your Account & Set Password',
+    // Fire-and-forget — don't block the HTTP response while email sends
+    sendMail(email, '[BRP AMS] Welcome — Activate Your Account & Set Password',
       `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
       <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
@@ -199,7 +200,7 @@ router.post('/', authenticate, authorize('admin'), [
         <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
       </td></tr></table>
       </td></tr></table></body></html>`
-    );
+    ).catch(err => console.error('[User Create] Welcome email failed:', err.message));
 
     const user = await User.findById(id).lean();
     res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });

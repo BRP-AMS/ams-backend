@@ -23,6 +23,9 @@ const cron          = require('node-cron');
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
+// Render (and most hosts) use a reverse proxy — trust it for rate-limiting & IP detection
+app.set('trust proxy', 1);
+
 // ── Security & Middleware ─────────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },

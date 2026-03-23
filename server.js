@@ -145,21 +145,8 @@ connectionPromise.then(() => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
 
-  // Verify SMTP connection on startup
-  if (process.env.SMTP_HOST) {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host:   process.env.SMTP_HOST,
-      port:   parseInt(process.env.SMTP_PORT || '587'),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    });
-    transporter.verify()
-      .then(() => console.log('✅ SMTP connection verified — emails will work'))
-      .catch(err => console.error('❌ SMTP connection FAILED:', err.message, '— emails will NOT send'));
-  } else {
-    console.warn('⚠️  SMTP_HOST not set — email features disabled');
-  }
+  // SMTP verification happens automatically in src/utils/mailer.js on require()
+  require('./src/utils/mailer');
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────

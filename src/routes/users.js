@@ -3,34 +3,13 @@ const router     = express.Router();
 const bcrypt     = require('bcryptjs');
 const multer     = require('multer');
 const XLSX       = require('xlsx');
-const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { sendMail } = require('../utils/mailer');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-
-// ── Email helper ─────────────────────────────────────────────────────────
-const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
-  host:   process.env.SMTP_HOST,
-  port:   parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-}) : null;
-const sendMail = async (to, subject, html) => {
-  if (!mailer) {
-    console.warn('[Email] SMTP not configured (SMTP_HOST missing). Skipping:', subject);
-    return;
-  }
-  console.log(`[Email] Sending "${subject}" to ${to} via ${process.env.SMTP_HOST}:${process.env.SMTP_PORT} as ${process.env.SMTP_USER}`);
-  try {
-    const info = await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
-    console.log('[Email] Sent OK. MessageId:', info.messageId);
-  } catch (err) {
-    console.error('[Email] Send FAILED:', err.message, '| code:', err.code, '| response:', err.response);
-  }
-};
 
 const validate = (req, res, next) => {
   const errs = validationResult(req);

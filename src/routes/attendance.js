@@ -1,33 +1,16 @@
 const express      = require('express');
 const router       = express.Router();
 const multer       = require('multer');
-const nodemailer   = require('nodemailer');
 const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { sendMail } = require('../utils/mailer');
 
 // ── IST time helpers (server may run in UTC) ─────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
-
-// ── Email helper (graceful — no crash if SMTP not configured) ────────────
-const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
-  host:   process.env.SMTP_HOST,
-  port:   parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-}) : null;
-
-const sendMail = async (to, subject, html) => {
-  if (!mailer) return;
-  try {
-    await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
-  } catch (err) {
-    console.error('Email send error:', err.message);
-  }
-};
 
 // Multer — memory storage (files uploaded to Cloudinary)
 const upload = multer({

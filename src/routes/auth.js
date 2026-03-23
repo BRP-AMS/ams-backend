@@ -59,6 +59,24 @@ const emailLayout = (title, bodyHtml) => `
 </table>
 </td></tr></table></body></html>`;
 
+// ── Firebase Auth helper (for password sync) ────────────────────────────────
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const verifyWithFirebase = async (email, password) => {
+  if (!FIREBASE_API_KEY) return false;
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, returnSecureToken: true }),
+      }
+    );
+    const data = await res.json();
+    return res.ok && !!data.idToken;
+  } catch { return false; }
+};
+
 // ── POST /api/auth/login ──────────────────────────────────────────────────
 router.post('/login', loginLimiter, [
   body('email').isEmail().normalizeEmail(),
@@ -73,7 +91,22 @@ router.post('/login', loginLimiter, [
       return res.status(423).json({ success: false, message: 'Account temporarily locked. Try again later.' });
     }
 
-    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    let passwordValid = user && bcrypt.compareSync(password, user.password_hash);
+
+    // If MongoDB password fails, try Firebase Auth (user may have reset password via Firebase)
+    if (!passwordValid && user && FIREBASE_API_KEY) {
+      const firebaseOk = await verifyWithFirebase(email, password);
+      if (firebaseOk) {
+        // Password valid in Firebase — sync back to MongoDB
+        console.log(`[Auth] Firebase password sync for: ${email}`);
+        await User.findByIdAndUpdate(user._id, {
+          $set: { password_hash: bcrypt.hashSync(password, 12) }
+        });
+        passwordValid = true;
+      }
+    }
+
+    if (!user || !passwordValid) {
       // Audit log for failed login
       if (user) {
         await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'LOGIN_FAILED', ip_address: req.ip });
@@ -216,7 +249,8 @@ router.put('/change-password', authenticate, [
 });
 
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
-// SECURITY FIX: token sent via email only — never returned in response
+// Uses Firebase to send password reset email (works on Render via HTTPS)
+// Falls back to custom token flow if Firebase is not configured
 router.post('/forgot-password', forgotLimiter, [
   body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
 ], validate, async (req, res) => {
@@ -225,10 +259,23 @@ router.post('/forgot-password', forgotLimiter, [
     const user = await User.findOne({ email, is_active: 1 }).lean();
 
     // Always same response — prevents email enumeration
-    const OK = { success: true, message: 'If that email is registered you will receive a reset link shortly.' };
+    const OK = { success: true, message: 'If that email is registered you will receive a password reset email shortly.' };
 
     if (!user) return res.json(OK);
 
+    // Try Firebase first (sends reset email via Firebase's SMTP relay)
+    if (FIREBASE_API_KEY) {
+      try {
+        const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+        await sendPasswordResetEmail(user.email);
+        await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
+        return res.json(OK);
+      } catch (err) {
+        console.error('[Auth] Firebase reset email failed, falling back to custom:', err.message);
+      }
+    }
+
+    // Fallback: custom token flow (for local dev / non-Firebase setups)
     const rawToken  = generateToken();
     const hashedTok = hashToken(rawToken);
     const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min

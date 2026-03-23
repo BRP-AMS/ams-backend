@@ -7,6 +7,10 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   console.error('FATAL: JWT_SECRET must be set and at least 32 characters');
   process.exit(1);
 }
+if (!process.env.MONGO_URI) {
+  console.error('FATAL: MONGO_URI environment variable is required');
+  process.exit(1);
+}
 
 const express       = require('express');
 const cors          = require('cors');
@@ -140,6 +144,22 @@ const pruneRevokedTokens = async () => {
 connectionPromise.then(() => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
+
+  // Verify SMTP connection on startup
+  if (process.env.SMTP_HOST) {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host:   process.env.SMTP_HOST,
+      port:   parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    transporter.verify()
+      .then(() => console.log('✅ SMTP connection verified — emails will work'))
+      .catch(err => console.error('❌ SMTP connection FAILED:', err.message, '— emails will NOT send'));
+  } else {
+    console.warn('⚠️  SMTP_HOST not set — email features disabled');
+  }
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────

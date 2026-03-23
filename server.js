@@ -168,16 +168,17 @@ app.get('/api/health', (req, res) => {
 
 // ── Email test endpoint (temporary — remove after debugging) ─────────────
 app.get('/api/test-email', async (req, res) => {
-  const { sendMail } = require('./src/utils/mailer');
+  const { sendMail, mode } = require('./src/utils/mailer');
   const to = req.query.to;
   if (!to) return res.status(400).json({ error: 'Pass ?to=email@example.com' });
   try {
     const info = await sendMail(to, '[BRP AMS] Test Email',
-      '<h2>✅ Email is working!</h2><p>This is a test email from BRP-AMS backend on Render.</p>'
+      '<h2>✅ Email is working!</h2><p>This is a test email from BRP-AMS backend on Render.</p>',
+      { type: 'PASSWORD_RESET' }
     );
-    res.json({ success: true, messageId: info?.messageId, accepted: info?.accepted });
+    res.json({ success: true, mode, info: info || 'sent' });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message, code: err.code, response: err.response });
+    res.status(500).json({ success: false, mode, error: err.message, code: err.code });
   }
 });
 

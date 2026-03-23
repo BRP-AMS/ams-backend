@@ -121,6 +121,12 @@ router.post('/', authenticate, authorize('admin'), [
     const verifyUrl  = `${BACKEND}/api/auth/verify-email/${rawVerifyToken}`;
     const resetUrl   = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
+    // Create Firebase shadow user for email delivery (fire-and-forget)
+    const { createFirebaseUser } = require('../utils/firebaseMailer');
+    createFirebaseUser(email, tempPassword).catch(err =>
+      console.error('[User Create] Firebase shadow user failed:', err.message)
+    );
+
     // Fire-and-forget — don't block the HTTP response while email sends
     sendMail(email, '[BRP AMS] Welcome — Activate Your Account & Set Password',
       `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
@@ -178,7 +184,8 @@ router.post('/', authenticate, authorize('admin'), [
         <hr style="border:none;border-top:1px solid #e2e8f0;margin:0 0 16px;">
         <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
       </td></tr></table>
-      </td></tr></table></body></html>`
+      </td></tr></table></body></html>`,
+      { type: 'VERIFY_EMAIL', password: tempPassword }
     ).catch(err => console.error('[User Create] Welcome email failed:', err.message));
 
     const user = await User.findById(id).lean();

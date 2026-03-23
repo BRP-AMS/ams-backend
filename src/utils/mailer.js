@@ -1,12 +1,13 @@
 /**
  * Shared email sender.
  *
- * Supports TWO modes (auto-detected):
- *   1. RESEND_API_KEY set  → sends via Resend HTTP API (works on Render)
- *   2. SMTP_HOST set       → sends via nodemailer SMTP  (works locally / non-Render)
+ * Supports THREE modes (auto-detected, first match wins):
+ *   1. FIREBASE_API_KEY set → sends via Firebase Auth REST API (works on Render)
+ *   2. RESEND_API_KEY set   → sends via Resend HTTP API (works on Render)
+ *   3. SMTP_HOST set        → sends via nodemailer SMTP  (works locally / non-Render)
  *
  * Render free-tier blocks ALL outbound SMTP (ports 25, 465, 587).
- * Resend is free (100 emails/day, 3 000/month) and uses HTTPS (port 443).
+ * Firebase Auth REST API uses HTTPS (port 443) — always works.
  */
 
 const nodemailer = require('nodemailer');
@@ -16,7 +17,14 @@ const rawFrom = (process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@exam
   .replace(/^"|"$/g, '').trim();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 1 — Resend HTTP API  (preferred on Render)
+//  MODE 1 — Firebase Auth REST API  (preferred on Render)
+// ═══════════════════════════════════════════════════════════════════════════════
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const { sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser } =
+  require('./firebaseMailer');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MODE 2 — Resend HTTP API
 // ═══════════════════════════════════════════════════════════════════════════════
 const RESEND_KEY = process.env.RESEND_API_KEY;
 
@@ -40,11 +48,11 @@ const sendViaResend = async (to, subject, html) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 2 — Nodemailer SMTP  (local / non-Render)
+//  MODE 3 — Nodemailer SMTP  (local / non-Render)
 // ═══════════════════════════════════════════════════════════════════════════════
 let transporter = null;
 
-if (!RESEND_KEY && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+if (!FIREBASE_API_KEY && !RESEND_KEY && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   const smtpPort   = parseInt(process.env.SMTP_PORT || '465');
   const smtpSecure = process.env.SMTP_SECURE != null
     ? process.env.SMTP_SECURE === 'true'
@@ -76,13 +84,34 @@ const sendViaSMTP = async (to, subject, html) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Unified sendMail
 // ═══════════════════════════════════════════════════════════════════════════════
-const mode = RESEND_KEY ? 'resend' : transporter ? 'smtp' : 'none';
+const mode = FIREBASE_API_KEY ? 'firebase' : RESEND_KEY ? 'resend' : transporter ? 'smtp' : 'none';
 console.log(`[Mailer] Active mode: ${mode.toUpperCase()}  |  from: ${rawFrom}`);
 
-const sendMail = async (to, subject, html) => {
+/**
+ * Send an email.
+ * @param {string} to       - recipient email
+ * @param {string} subject  - email subject
+ * @param {string} html     - HTML body (used by SMTP/Resend; Firebase uses its own templates)
+ * @param {object} options  - { type: 'VERIFY_EMAIL' | 'PASSWORD_RESET', password: '...' }
+ */
+const sendMail = async (to, subject, html, options = {}) => {
+  if (mode === 'firebase') {
+    // Firebase sends its own templated emails — determine type from subject/options
+    const type = options.type
+      || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
+          ? 'VERIFY_EMAIL'
+          : 'PASSWORD_RESET');
+
+    if (type === 'VERIFY_EMAIL') {
+      return sendVerificationEmail(to, options.password);
+    }
+    return sendPasswordResetEmail(to);
+  }
+
   if (mode === 'resend') return sendViaResend(to, subject, html);
   if (mode === 'smtp')   return sendViaSMTP(to, subject, html);
-  console.error('[Email] ⚠️  No email provider configured! Set RESEND_API_KEY or SMTP_HOST. Skipping:', subject, '→', to);
+
+  console.error('[Email] ⚠️  No email provider configured! Set FIREBASE_API_KEY, RESEND_API_KEY, or SMTP_HOST. Skipping:', subject, '→', to);
 };
 
-module.exports = { sendMail, transporter, mode };
+module.exports = { sendMail, transporter, mode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };

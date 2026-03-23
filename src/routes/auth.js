@@ -260,7 +260,8 @@ router.post('/forgot-password', forgotLimiter, [
         <p style="color:#dc2626;font-size:13px;">
           If you didn't request this, ignore this email. Your password won't change.
         </p>
-      `)
+      `),
+      { type: 'PASSWORD_RESET' }
     );
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
@@ -310,7 +311,8 @@ router.post('/reset-password-otp', otpLimiter, [
           This code expires in <strong>5 minutes</strong>.
         </p>
         <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
-      `)
+      `),
+      { type: 'PASSWORD_RESET' }
     );
 
     res.json({ success: true, message: 'OTP sent to your email' });
@@ -365,7 +367,8 @@ router.post('/reset-password', [
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });
 
-    await sendMail(user.email, '[BRP AMS] Password Changed',
+    // Password changed notification — fire-and-forget
+    sendMail(user.email, '[BRP AMS] Password Changed',
       emailLayout('Password Changed Successfully', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
           Hi <strong>${user.name}</strong>, your AMS password was changed successfully.
@@ -373,8 +376,9 @@ router.post('/reset-password', [
         <p style="color:#dc2626;font-size:13px;">
           If you did not do this, contact your administrator immediately.
         </p>
-      `)
-    );
+      `),
+      { type: 'PASSWORD_RESET' }
+    ).catch(err => console.error('[Auth] Password changed email failed:', err.message));
 
     res.json({ success: true, message: 'Password reset successfully. Please log in.' });
   } catch (err) {
@@ -474,7 +478,8 @@ router.post('/resend-verification', authenticate, async (req, res) => {
           </a>
         </div>
         <p style="color:#94a3b8;font-size:12px;">This link expires in 24 hours.</p>
-      `)
+      `),
+      { type: 'VERIFY_EMAIL' }
     );
     res.json({ success: true, message: 'Verification email sent' });
   } catch (err) {
@@ -513,7 +518,8 @@ router.post('/send-phone-otp', otpLimiter, authenticate, async (req, res) => {
           This code expires in <strong>10 minutes</strong>.
         </p>
         <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
-      `)
+      `),
+      { type: 'VERIFY_EMAIL' }
     );
 
     res.json({ success: true, message: 'OTP sent to your registered email' });

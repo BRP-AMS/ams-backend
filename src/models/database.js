@@ -151,6 +151,7 @@ const activityDocumentSchema = new mongoose.Schema({
   file_name:   { type: String, required: true }, // original filename
   file_type:   { type: String, default: null  }, // mimetype
   public_id:   { type: String, default: null  }, // ← NEW: Cloudinary public_id for deletion
+  resource_type: { type: String }, // 'image' | 'raw'
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 activityDocumentSchema.index({ activity_id: 1 });
@@ -194,6 +195,7 @@ const scheduleDocumentSchema = new mongoose.Schema({
   file_name:   { type: String, required: true }, // original filename
   file_type:   { type: String, default: null  }, // mimetype
   public_id:   { type: String, default: null  }, // ← NEW: Cloudinary public_id for deletion
+  resource_type: { type: String }, // 'image' | 'raw'
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 scheduleDocumentSchema.index({ schedule_id: 1 });

@@ -390,6 +390,7 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
         file_name:   f.originalname,
         file_type:   f.mimetype,
         public_id:   f.filename,    // ← Cloudinary public_id (for deletion)
+         resource_type: 'auto', // ✅ add this
       })));
     }
 

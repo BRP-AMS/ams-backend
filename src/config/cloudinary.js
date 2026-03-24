@@ -18,14 +18,23 @@ const getResourceType = (mimetype) => {
 
 const makeStorage = (folder) => new CloudinaryStorage({
   cloudinary,
-  params: async (req, file) => ({
-    folder,
-    resource_type: 'auto', // ✅ important
-    public_id: `${Date.now()}_${file.originalname.replace(/\.[^/.]+$/, '').replace(/\s+/g, '_')}`,
-    ...(file.mimetype.startsWith('image/') && {
-      transformation: [{ quality: 'auto', fetch_format: 'auto' }],
-    }),
-  }),
+  params: async (req, file) => {
+    const ext      = file.originalname.split('.').pop().toLowerCase();
+    const baseName = file.originalname.replace(/\.[^/.]+$/, '').replace(/\s+/g, '_');
+    const isImage  = file.mimetype.startsWith('image/');
+
+    return {
+      folder,
+      resource_type: 'auto',
+      // Images don't need extension, files (pdf/docx/xlsx) MUST have extension
+      public_id: isImage
+        ? `${Date.now()}_${baseName}`
+        : `${Date.now()}_${baseName}.${ext}`,
+      ...(isImage && {
+        transformation: [{ quality: 'auto', fetch_format: 'auto' }],
+      }),
+    };
+  },
 });
 
 // ── Selfie uploader (checkin / checkout photos) ───────────────────────────

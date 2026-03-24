@@ -238,26 +238,52 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
 });
 
 // DELETE /api/users/:id - Soft delete
-router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
+// router.delete('/:id', authenticate, authorize('admin','super_admin'), async (req, res) => {
+//   try {
+//     if (req.params.id === req.user.id)
+//       return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });
+
+//     // Admin cannot deactivate admin or super_admin users — only Super Admin can
+//     if (req.user.role === 'admin') {
+//       const target = await User.findById(req.params.id).select('role').lean();
+//       if (target && ['admin', 'super_admin'].includes(target.role)) {
+//         return res.status(403).json({ success: false, message: 'Admins cannot deactivate admin or super admin accounts' });
+//       }
+//     }
+
+//     await User.findByIdAndUpdate(req.params.id, { $set: { is_active: 0 } });
+//     res.json({ success: true, message: 'User deactivated' });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ success: false, message: 'Server error' });
+//   }
+// });
+//delete permenantly
+router.delete('/:id', authenticate, authorize('admin','super_admin'), async (req, res) => {
   try {
     if (req.params.id === req.user.id)
-      return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });
+      return res.status(400).json({ success: false, message: 'Cannot delete yourself' });
 
-    // Admin cannot deactivate admin or super_admin users — only Super Admin can
+    // Admin cannot delete admin or super_admin users — only Super Admin can
     if (req.user.role === 'admin') {
       const target = await User.findById(req.params.id).select('role').lean();
       if (target && ['admin', 'super_admin'].includes(target.role)) {
-        return res.status(403).json({ success: false, message: 'Admins cannot deactivate admin or super admin accounts' });
+        return res.status(403).json({ success: false, message: 'Admins cannot delete admin or super admin accounts' });
       }
     }
 
-    await User.findByIdAndUpdate(req.params.id, { $set: { is_active: 0 } });
-    res.json({ success: true, message: 'User deactivated' });
+    const deleted = await User.findByIdAndDelete(req.params.id);
+
+    if (!deleted)
+      return res.status(404).json({ success: false, message: 'User not found' });
+
+    res.json({ success: true, message: 'User deleted successfully' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
 
 // GET /api/users/team/attendance-summary - Manager view
 router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin'), async (req, res) => {

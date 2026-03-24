@@ -166,6 +166,35 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
+// ── Seed endpoint (temporary — run once then remove) ─────────────────────
+app.get('/api/run-seed', async (req, res) => {
+  try {
+    const bcrypt = require('bcryptjs');
+    const { v4: uuidv4 } = require('uuid');
+    const { User, AttendanceRecord, Notification, AuditLog } = require('./src/models/database');
+
+    // Clear existing data
+    await Promise.all([
+      AuditLog.deleteMany({}),
+      Notification.deleteMany({}),
+      AttendanceRecord.deleteMany({}),
+      User.deleteMany({}),
+    ]);
+
+    const hash = (pw) => bcrypt.hashSync(pw, 10);
+    const pw = 'R@m%Brp@26';
+
+    await User.insertMany([
+      { _id: uuidv4(), emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', password_hash: hash(pw), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', email_verified: true },
+      { _id: uuidv4(), emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmal.com', password_hash: hash(pw), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', email_verified: true },
+    ]);
+
+    res.json({ success: true, message: 'Database seeded! Login: ajay.s@raminfo.com / R@m%Brp@26' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Admin: unlock all locked accounts (temporary) ───────────────────────
 app.get('/api/admin-unlock', async (req, res) => {
   try {

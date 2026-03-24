@@ -116,77 +116,12 @@ router.post('/', authenticate, authorize('admin'), [
       pwd_reset_expires:    resetExpires,
     });
 
-    const BACKEND    = process.env.BACKEND_URL || 'https://ams-backend-mmgu.onrender.com';
-    const FRONTEND   = process.env.FRONTEND_URL || 'https://ams-frontend-web.onrender.com';
-    const verifyUrl  = `${BACKEND}/api/auth/verify-email/${rawVerifyToken}`;
-    const resetUrl   = `${FRONTEND}/reset-password?token=${rawResetToken}`;
-
-    // Create Firebase shadow user for email delivery (fire-and-forget)
-    const { createFirebaseUser } = require('../utils/firebaseMailer');
-    createFirebaseUser(email, tempPassword).catch(err =>
-      console.error('[User Create] Firebase shadow user failed:', err.message)
+    // Send ONE Firebase password reset email — serves as both verification + password setup
+    // When user clicks the link and sets password, they prove email ownership (= verified)
+    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+    sendPasswordResetEmail(email, tempPassword).catch(err =>
+      console.error('[User Create] Firebase welcome email failed:', err.message)
     );
-
-    // Fire-and-forget — don't block the HTTP response while email sends
-    sendMail(email, '[BRP AMS] Welcome — Activate Your Account & Set Password',
-      `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-      <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
-      <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-        style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
-      <tr><td style="background:#0b1e3b;padding:28px 32px;">
-        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
-        <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
-      </td></tr>
-      <tr><td style="padding:32px;">
-        <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Welcome, ${name}!</h2>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Your BRP AMS account has been created. Complete the two steps below to activate your account.
-        </p>
-        <table style="background:#f8fafc;border-radius:8px;padding:16px;width:100%;margin:16px 0;">
-          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Email</td>
-              <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${email}</td></tr>
-          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Employee ID</td>
-              <td style="color:#0b1e3b;font-weight:700;font-size:13px;">${empId}</td></tr>
-          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Role</td>
-              <td style="color:#0b1e3b;font-weight:700;font-size:13px;text-transform:capitalize;">${role}</td></tr>
-        </table>
-
-        <p style="color:#0b1e3b;font-size:14px;font-weight:700;margin:24px 0 8px;">Step 1 — Verify your email</p>
-        <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">
-          Click below to confirm your email address and activate your account.
-        </p>
-        <div style="text-align:center;margin:0 0 24px;">
-          <a href="${verifyUrl}"
-            style="background:#21879d;color:#fff;padding:13px 28px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:14px;display:inline-block;">
-            ✓ Verify Email &amp; Activate Account
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:11px;word-break:break-all;margin:0 0 24px;">Or copy: ${verifyUrl}</p>
-
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:0 0 24px;">
-
-        <p style="color:#0b1e3b;font-size:14px;font-weight:700;margin:0 0 8px;">Step 2 — Set your password</p>
-        <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">
-          Click below to create your own password. This link expires in <strong>24 hours</strong>.
-        </p>
-        <div style="text-align:center;margin:0 0 16px;">
-          <a href="${resetUrl}"
-            style="background:#1e3a8a;color:#fff;padding:13px 28px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:14px;display:inline-block;">
-            🔑 Set My Password
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:11px;word-break:break-all;margin:0 0 24px;">Or copy: ${resetUrl}</p>
-
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:0 0 16px;">
-        <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
-      </td></tr></table>
-      </td></tr></table></body></html>`,
-      { type: 'VERIFY_EMAIL', password: tempPassword }
-    ).catch(err => console.error('[User Create] Welcome email failed:', err.message));
 
     const user = await User.findById(id).lean();
     res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });

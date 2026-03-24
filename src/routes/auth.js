@@ -97,11 +97,15 @@ router.post('/login', loginLimiter, [
     if (!passwordValid && user && FIREBASE_API_KEY) {
       const firebaseOk = await verifyWithFirebase(email, password);
       if (firebaseOk) {
-        // Password valid in Firebase — sync back to MongoDB
+        // Password valid in Firebase — sync back to MongoDB + auto-verify email
         console.log(`[Auth] Firebase password sync for: ${email}`);
-        await User.findByIdAndUpdate(user._id, {
-          $set: { password_hash: bcrypt.hashSync(password, 12) }
-        });
+        const syncUpdate = { password_hash: bcrypt.hashSync(password, 12) };
+        // If user set password via Firebase, they proved email ownership = verified
+        if (!user.email_verified) {
+          syncUpdate.email_verified = true;
+          console.log(`[Auth] Auto-verified email for: ${email}`);
+        }
+        await User.findByIdAndUpdate(user._id, { $set: syncUpdate });
         passwordValid = true;
       }
     }

@@ -7,37 +7,42 @@ const XLSX     = require('xlsx');
 const { v4: uuidv4 } = require('uuid');
 const { ActivitySchedule, ScheduleDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { scheduleUploader, bulkExcelUploader, deleteFromCloudinary } = require('../config/cloudinary');
+ 
+// ── Multer uploaders (Cloudinary) ────────────────────────────────────────
+const uploadAttach = scheduleUploader;   // .array('attachments', 10) — goes to Cloudinary
+const uploadBulk   = bulkExcelUploader; // .single('file')            — stays in memory
 
 // ── Upload directories ────────────────────────────────────────────────────
-const scheduleUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'schedule');
-if (!fs.existsSync(scheduleUploadDir)) fs.mkdirSync(scheduleUploadDir, { recursive: true });
+// const scheduleUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'schedule');
+// if (!fs.existsSync(scheduleUploadDir)) fs.mkdirSync(scheduleUploadDir, { recursive: true });
 
-const attachStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, scheduleUploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `sched_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-  },
-});
-const uploadAttach = multer({
-  storage: attachStorage,
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
-  fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('File type not allowed'));
-  },
-});
+// const attachStorage = multer.diskStorage({
+//   destination: (req, file, cb) => cb(null, scheduleUploadDir),
+//   filename:    (req, file, cb) => {
+//     const ext = path.extname(file.originalname);
+//     cb(null, `sched_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+//   },
+// });
+// const uploadAttach = multer({
+//   storage: attachStorage,
+//   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+//   fileFilter: (req, file, cb) => {
+//     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
+//     if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
+//     else cb(new Error('File type not allowed'));
+//   },
+// });
 
-const uploadBulk = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  fileFilter: (req, file, cb) => {
-    const allowed = /xlsx|xls|csv/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('Only Excel (.xlsx/.xls) or CSV files allowed'));
-  },
-});
+// const uploadBulk = multer({
+//   storage: multer.memoryStorage(),
+//   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+//   fileFilter: (req, file, cb) => {
+//     const allowed = /xlsx|xls|csv/;
+//     if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
+//     else cb(new Error('Only Excel (.xlsx/.xls) or CSV files allowed'));
+//   },
+// });
 
 // ── Helper: resolve user map ──────────────────────────────────────────────
 const resolveUsers = async (schedules) => {
@@ -376,14 +381,15 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
     schedule.work_description = work_description.trim();
     schedule.remarks          = remarks?.trim() || null;
     await schedule.save();
-
+  // Save attachments — file_path = Cloudinary URL
     if (req.files?.length) {
       await ScheduleDocument.insertMany(req.files.map(f => ({
         _id:         uuidv4(),
         schedule_id: schedule._id,
-        file_path:   `schedule/${f.filename}`,
+        file_path:   f.path,        // ← Cloudinary URL
         file_name:   f.originalname,
         file_type:   f.mimetype,
+        public_id:   f.filename,    // ← Cloudinary public_id (for deletion)
       })));
     }
 
@@ -401,10 +407,8 @@ router.delete('/:id', authenticate, authorize('manager', 'admin', 'hr', 'super_a
     const schedule = await ActivitySchedule.findById(req.params.id);
     if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
     const docs = await ScheduleDocument.find({ schedule_id: req.params.id }).lean();
-    docs.forEach(d => {
-      const fp = path.join(process.env.UPLOAD_DIR || './uploads', d.file_path);
-      if (fs.existsSync(fp)) fs.unlinkSync(fp);
-    });
+   // Delete files from Cloudinary
+    await Promise.all(docs.map(d => deleteFromCloudinary(d.public_id || d.file_path)));
     await ScheduleDocument.deleteMany({ schedule_id: req.params.id });
     await schedule.deleteOne();
     res.json({ success: true, message: 'Schedule deleted' });

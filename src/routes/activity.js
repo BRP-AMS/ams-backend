@@ -7,27 +7,30 @@ const { v4: uuidv4 } = require('uuid');
 const { query, body, validationResult } = require('express-validator');
 const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-
+const { activityUploader, deleteFromCloudinary } = require('../config/cloudinary');
+ 
+// ── Multer uploader (Cloudinary) ─────────────────────────────────────────
+const upload = activityUploader; // .array('documents', 10)
 // ── File Upload Config ────────────────────────────────────────────────────
-const activityUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'activity');
-if (!fs.existsSync(activityUploadDir)) fs.mkdirSync(activityUploadDir, { recursive: true });
+// const activityUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'activity');
+// if (!fs.existsSync(activityUploadDir)) fs.mkdirSync(activityUploadDir, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, activityUploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `act_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-  },
-});
-const upload = multer({
-  storage,
-  limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
-  fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('File type not allowed'));
-  },
-});
+// const storage = multer.diskStorage({
+//   destination: (req, file, cb) => cb(null, activityUploadDir),
+//   filename:    (req, file, cb) => {
+//     const ext = path.extname(file.originalname);
+//     cb(null, `act_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+//   },
+// });
+// const upload = multer({
+//   storage,
+//   limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
+//   fileFilter: (req, file, cb) => {
+//     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
+//     if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
+//     else cb(new Error('File type not allowed'));
+//   },
+// });
 
 // ── Validators ────────────────────────────────────────────────────────────
 const UDYAM_RE = /^UDYAM-[A-Z]{2}-\d{2}-\d{7}$/;
@@ -84,16 +87,19 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       location_address: location_address || null,
       activity_date:    typeof activity_date === 'string' ? activity_date : activity_date.toISOString().slice(0, 10),
       remarks:          remarks          || null,
+      resource_type: 'auto',
     });
 
-    // Save uploaded documents
+  // Save uploaded documents — file_path = Cloudinary URL
     if (req.files?.length) {
       await ActivityDocument.insertMany(req.files.map(f => ({
         _id:         uuidv4(),
         activity_id: id,
-        file_path:   f.filename,
+        file_path:   f.path,          // ← Cloudinary URL
         file_name:   f.originalname,
         file_type:   f.mimetype,
+        public_id:   f.filename,      // ← Cloudinary public_id (for deletion)
+        resource_type: 'auto', // ✅ add this
       })));
     }
 

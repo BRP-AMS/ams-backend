@@ -1,38 +1,49 @@
 const mongoose = require('mongoose');
 
-const MONGO_URI = process.env.MONGO_URI ;
+const MONGO_URI = process.env.MONGO_URI;
+
 // ── Schemas ───────────────────────────────────────────────────────────────
 
 const userSchema = new mongoose.Schema({
-  _id:           { type: String },
-  emp_id:        { type: String, unique: true, required: true },
-  name:          { type: String, required: true },
-  email:         { type: String, unique: true, required: true },
-  password_hash: { type: String, required: true },
-  role:          { type: String, enum: ['employee', 'manager', 'admin', 'hr', 'super_admin'], required: true },
-  department:    { type: String, required: true },
-  manager_id:       { type: String, ref: 'User', default: null },
-  phone:            { type: String, default: null },
-  is_active:        { type: Number, default: 1 },
+  _id:               { type: String },
+  emp_id:            { type: String, unique: true, required: true },
+  name:              { type: String, required: true },
+  email:             { type: String, unique: true, required: true },
+  password_hash:     { type: String, required: true },
+  role:              { type: String, enum: ['employee', 'manager', 'admin', 'hr', 'super_admin'], required: true },
+  department:        { type: String, required: true },
+  manager_id:        { type: String, ref: 'User', default: null },
+  phone:             { type: String, default: null },
+  is_active:         { type: Number, default: 1 },
   assigned_block:    { type: String, default: null },
   assigned_district: { type: String, default: null },
+  email_verified:    { type: Boolean, default: false },
+  phone_verified:    { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ is_active: 1 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTENDANCE RECORD
+// selfie_path          → Cloudinary URL (checkin photo)
+// checkout_selfie_path → Cloudinary URL (checkout photo)
+// reapply_docs         → Array of Cloudinary URLs
+// ─────────────────────────────────────────────────────────────────────────────
 const attendanceRecordSchema = new mongoose.Schema({
   _id:                  { type: String },
   emp_id:               { type: String, ref: 'User', required: true },
   date:                 { type: String, required: true },
-  end_date:             { type: String, default: null }, // for multi-day leave (null = single day)
+  end_date:             { type: String, default: null },
   duty_type:            { type: String, enum: ['Office Duty', 'On Duty', 'Leave'], required: true },
   sector:               { type: String, default: null },
   description:          { type: String, default: null },
   status:               { type: String, enum: ['Draft', 'Pending', 'Approved', 'Rejected'], default: 'Draft' },
-  selfie_path:          { type: String, default: null },
-  checkout_selfie_path: { type: String, default: null },
+  // ── Cloudinary URLs ──────────────────────────────────────────────────────
+  selfie_path:          { type: String, default: null }, // Cloudinary secure URL
+  checkout_selfie_path: { type: String, default: null }, // Cloudinary secure URL
+  // ────────────────────────────────────────────────────────────────────────
   latitude:             { type: Number, default: null },
   longitude:            { type: Number, default: null },
   location_address:     { type: String, default: null },
@@ -55,7 +66,7 @@ const attendanceRecordSchema = new mongoose.Schema({
   leave_reason:         { type: String, default: null },
   leave_status:         { type: String, enum: ['Pending', 'Approved', 'Rejected', null], default: null },
   reapply_reason:       { type: String, default: null },
-  reapply_docs:         { type: [String], default: [] },
+  reapply_docs:         { type: [String], default: [] }, // Array of Cloudinary URLs
   reapplied_at:         { type: Date, default: null },
   hr_override:          { type: Boolean, default: false },
   hr_remark:            { type: String, default: null },
@@ -63,13 +74,14 @@ const attendanceRecordSchema = new mongoose.Schema({
   hr_actioned_at:       { type: Date, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
-// Unique constraint equivalent to SQLite UNIQUE(emp_id, date)
 attendanceRecordSchema.index({ emp_id: 1, date: 1 }, { unique: true });
 attendanceRecordSchema.index({ date: 1 });
 attendanceRecordSchema.index({ status: 1 });
 attendanceRecordSchema.index({ manager_id: 1 });
 attendanceRecordSchema.index({ manager_id: 1, status: 1 });
 attendanceRecordSchema.index({ date: 1, status: 1 });
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const notificationSchema = new mongoose.Schema({
   _id:               { type: String },
@@ -79,7 +91,7 @@ const notificationSchema = new mongoose.Schema({
   type:              { type: String, enum: ['info', 'success', 'warning', 'error'], default: 'info' },
   is_read:           { type: Number, default: 0 },
   related_record_id: { type: String, ref: 'AttendanceRecord', default: null },
-  link:              { type: String, default: null }, // frontend navigation path on click
+  link:              { type: String, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 notificationSchema.index({ user_id: 1 });
@@ -100,9 +112,8 @@ auditLogSchema.index({ entity_type: 1, entity_id: 1 });
 auditLogSchema.index({ user_id: 1 });
 auditLogSchema.index({ created_at: 1 });
 
-// Uses token_hash as _id for O(1) lookup and insert-or-ignore behaviour
 const revokedTokenSchema = new mongoose.Schema({
-  _id:        { type: String }, // token_hash stored as _id
+  _id:        { type: String },
   revoked_at: { type: Date, default: Date.now },
 });
 
@@ -119,6 +130,7 @@ const activitySchema = new mongoose.Schema({
   location_address: { type: String, default: null },
   activity_date:    { type: String, required: true },
   remarks:          { type: String, default: null },
+  resource_type: { type: String }, // 'image' | 'raw'
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 activitySchema.index({ user_id: 1 });
@@ -127,25 +139,33 @@ activitySchema.index({ block_name: 1 });
 activitySchema.index({ sector: 1 });
 activitySchema.index({ activity_date: 1, block_name: 1 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY DOCUMENT
+// file_path  → Cloudinary secure URL (was: local filename like act_userid_123.jpg)
+// public_id  → Cloudinary public_id for deletion (NEW field)
+// ─────────────────────────────────────────────────────────────────────────────
 const activityDocumentSchema = new mongoose.Schema({
   _id:         { type: String },
   activity_id: { type: String, ref: 'Activity', required: true },
-  file_path:   { type: String, required: true },
-  file_name:   { type: String, required: true },
-  file_type:   { type: String, default: null },
+  file_path:   { type: String, required: true }, // Cloudinary secure URL
+  file_name:   { type: String, required: true }, // original filename
+  file_type:   { type: String, default: null  }, // mimetype
+  public_id:   { type: String, default: null  }, // ← NEW: Cloudinary public_id for deletion
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 activityDocumentSchema.index({ activity_id: 1 });
 
-// Activity Schedule — created by managers, visible to all employees
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY SCHEDULE
+// ─────────────────────────────────────────────────────────────────────────────
 const activityScheduleSchema = new mongoose.Schema({
   _id:              { type: String },
   title:            { type: String, required: true },
   description:      { type: String, default: null },
-  scheduled_date:   { type: String, required: true }, // YYYY-MM-DD
+  scheduled_date:   { type: String, required: true },
   location:         { type: String, default: null },
-  assigned_to:      { type: String, ref: 'User', default: null }, 
-  manager_id:       { type: String, ref: 'User', default: null },// null = all employees
+  assigned_to:      { type: String, ref: 'User', default: null },
+  manager_id:       { type: String, ref: 'User', default: null },
   created_by:       { type: String, ref: 'User', required: true },
   status:           { type: String, enum: ['Pending', 'Initiated', 'Completed'], default: 'Pending' },
   initiated_by:     { type: String, ref: 'User', default: null },
@@ -160,13 +180,20 @@ activityScheduleSchema.index({ scheduled_date: 1 });
 activityScheduleSchema.index({ status: 1 });
 activityScheduleSchema.index({ assigned_to: 1 });
 activityScheduleSchema.index({ created_by: 1 });
+activityScheduleSchema.index({ manager_id: 1 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEDULE DOCUMENT
+// file_path  → Cloudinary secure URL (was: schedule/sched_userid_123.jpg)
+// public_id  → Cloudinary public_id for deletion (NEW field)
+// ─────────────────────────────────────────────────────────────────────────────
 const scheduleDocumentSchema = new mongoose.Schema({
-  _id:          { type: String },
-  schedule_id:  { type: String, ref: 'ActivitySchedule', required: true },
-  file_path:    { type: String, required: true },
-  file_name:    { type: String, required: true },
-  file_type:    { type: String, default: null },
+  _id:         { type: String },
+  schedule_id: { type: String, ref: 'ActivitySchedule', required: true },
+  file_path:   { type: String, required: true }, // Cloudinary secure URL
+  file_name:   { type: String, required: true }, // original filename
+  file_type:   { type: String, default: null  }, // mimetype
+  public_id:   { type: String, default: null  }, // ← NEW: Cloudinary public_id for deletion
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 scheduleDocumentSchema.index({ schedule_id: 1 });
@@ -186,22 +213,17 @@ const ScheduleDocument = mongoose.model('ScheduleDocument', scheduleDocumentSche
 // ── Connect ───────────────────────────────────────────────────────────────
 
 const connectionPromise = mongoose.connect(MONGO_URI, {
-  maxPoolSize:            100,   // support up to 200 concurrent users (each may need ~0.5 DB conn)
-  minPoolSize:              5,   // keep 5 connections warm at all times
-  serverSelectionTimeoutMS: 8000, // fail fast if Atlas unreachable (8s)
-  socketTimeoutMS:         45000, // drop hung sockets after 45s
-  connectTimeoutMS:        10000, // connection handshake timeout
-  heartbeatFrequencyMS:    10000, // check connection health every 10s
-  retryWrites:              true,
-  retryReads:               true,
+  maxPoolSize:             100,
+  minPoolSize:               5,
+  serverSelectionTimeoutMS: 8000,
+  socketTimeoutMS:          45000,
+  connectTimeoutMS:         10000,
+  heartbeatFrequencyMS:     10000,
+  retryWrites:               true,
+  retryReads:                true,
 })
-  .then(() => {
-    console.log('✅ MongoDB Atlas connected (pool: 5–100)');
-  })
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err);
-    process.exit(1);
-  });
+  .then(() => console.log('✅ MongoDB Atlas connected (pool: 5–100)'))
+  .catch(err => { console.error('❌ MongoDB connection error:', err); process.exit(1); });
 
 module.exports = {
   User,

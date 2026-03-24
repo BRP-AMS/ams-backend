@@ -8,7 +8,11 @@ const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-
+const { selfieUploader, reapplyUploader } = require('../config/cloudinary');
+ 
+// ── Multer uploaders (Cloudinary) ────────────────────────────────────────
+const upload = selfieUploader;           // .single('selfie') or .single('checkoutSelfie')
+const uploadReapply = reapplyUploader;   // .array('reapplyDocs', 10)
 // ── IST time helpers (server may run in UTC) ─────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
@@ -31,24 +35,24 @@ const sendMail = async (to, subject, html) => {
 };
 
 // Multer config for selfie uploads
-const uploadDir = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+// const uploadDir = process.env.UPLOAD_DIR || './uploads';
+// if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename:    (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, `selfie_${req.user.id}_${Date.now()}${ext}`);
-  }
-});
-const upload = multer({
-  storage,
-  limits:     { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only images allowed'));
-  }
-});
+// const storage = multer.diskStorage({
+//   destination: (req, file, cb) => cb(null, uploadDir),
+//   filename:    (req, file, cb) => {
+//     const ext = path.extname(file.originalname);
+//     cb(null, `selfie_${req.user.id}_${Date.now()}${ext}`);
+//   }
+// });
+// const upload = multer({
+//   storage,
+//   limits:     { fileSize: 5 * 1024 * 1024 },
+//   fileFilter: (req, file, cb) => {
+//     if (file.mimetype.startsWith('image/')) cb(null, true);
+//     else cb(new Error('Only images allowed'));
+//   }
+// });
 
 // ── Helper: Notify user ──────────────────────────────────────────────────
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
@@ -214,7 +218,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       sector:           sector || null,
       description:      description || '',
       status:           'Draft',
-      selfie_path:      req.file ? `/uploads/${req.file.filename}` : null,
+      selfie_path:      req.file ? req.file.path : null,   // ← Cloudinary URL
       latitude:         parseFloat(latitude),
       longitude:        parseFloat(longitude),
       location_address: locationAddress || '',
@@ -377,7 +381,8 @@ else {
 }
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
-    const checkoutSelfiePath = req.file ? `/uploads/${req.file.filename}` : null;
+  // ← Cloudinary URL (was: `/uploads/${req.file.filename}`)
+    const checkoutSelfiePath = req.file ? req.file.path : null;
 
     // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
     const timeRe = /^\d{2}:\d{2}$/;
@@ -396,7 +401,7 @@ else {
     checkout_time:        checkoutTime,
     checkout_lat:         parseFloat(latitude)  || record.latitude,
     checkout_lng:         parseFloat(longitude) || record.longitude,
-    checkout_selfie_path: checkoutSelfiePath,
+     checkout_selfie_path: checkoutSelfiePath,   // ← Cloudinary URL
     status:               'Pending',
     submitted_at:         now,
     worked_hours:         workedHours,
@@ -652,14 +657,15 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
 
-    const docPaths = (req.files || []).map(f => f.filename);
+    // ← Cloudinary URLs (was: f.filename local paths)
+    const docPaths = (req.files || []).map(f => f.path);
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {
         status:         'Pending',
         manager_remark: null,
         reapply_reason: reason.trim(),
-        reapply_docs:   docPaths,
+        reapply_docs:   docPaths,    // ← Array of Cloudinary URLs
         reapplied_at:   new Date(),
         submitted_at:   new Date(),
       }
@@ -707,13 +713,13 @@ function formatRecord(r) {
     sector:              r.sector,
     description:         r.description,
     status:              r.status,
-    selfiePath:          r.selfie_path,
+    selfiePath:          r.selfie_path,          // Cloudinary URL
     latitude:            r.latitude,
     longitude:           r.longitude,
     locationAddress:     r.location_address,
     checkinTime:         r.checkin_time,
     checkoutTime:        r.checkout_time,
-    checkoutSelfiePath:  r.checkout_selfie_path,
+    checkoutSelfiePath:  r.checkout_selfie_path, // Cloudinary URL
     checkoutLat:         r.checkout_lat,
     checkoutLng:         r.checkout_lng,
     managerId:           r.manager_id,
@@ -732,7 +738,7 @@ function formatRecord(r) {
     leaveReason:         r.leave_reason,
     leaveStatus:         r.leave_status,
     reapplyReason:       r.reapply_reason,
-    reapplyDocs:         r.reapply_docs || [],
+    reapplyDocs:         r.reapply_docs || [],   // Array of Cloudinary URLs
     reappliedAt:         r.reapplied_at,
     hrOverride:          r.hr_override,
     hrRemark:            r.hr_remark,

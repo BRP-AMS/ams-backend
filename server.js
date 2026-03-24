@@ -166,6 +166,20 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
+// ── Admin: unlock all locked accounts (temporary) ───────────────────────
+app.get('/api/admin-unlock', async (req, res) => {
+  try {
+    const { User } = require('./src/models/database');
+    const result = await User.updateMany(
+      {},
+      { $set: { login_locked_until: null, failed_login_attempts: 0 } }
+    );
+    res.json({ success: true, unlocked: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Email test endpoint (temporary — remove after debugging) ─────────────
 app.get('/api/test-email', async (req, res) => {
   const { sendMail, mode } = require('./src/utils/mailer');

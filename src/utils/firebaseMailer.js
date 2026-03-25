@@ -104,15 +104,10 @@ async function sendPasswordResetEmail(email, password) {
   // Ensure user exists — Firebase silently skips non-existent users
   await ensureFirebaseUser(email, password);
 
-  // After password set, redirect user to Play Store or web app
-  const continueUrl = 'https://play.google.com/store/apps/details?id=brp.ams.com';
-
   console.log(`[Firebase] Sending PASSWORD_RESET → ${email}`);
   const result = await firebasePost('accounts:sendOobCode', {
     requestType: 'PASSWORD_RESET',
     email,
-    continueUrl,
-    canHandleCodeInApp: true,
   });
   console.log(`[Firebase] ✅ Password reset email queued for ${email}`);
   return result;

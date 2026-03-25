@@ -166,65 +166,6 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
-// ── Seed endpoint (temporary — run once then remove) ─────────────────────
-app.get('/api/run-seed', async (req, res) => {
-  try {
-    const bcrypt = require('bcryptjs');
-    const { v4: uuidv4 } = require('uuid');
-    const { User, AttendanceRecord, Notification, AuditLog } = require('./src/models/database');
-
-    // Clear existing data
-    await Promise.all([
-      AuditLog.deleteMany({}),
-      Notification.deleteMany({}),
-      AttendanceRecord.deleteMany({}),
-      User.deleteMany({}),
-    ]);
-
-    const hash = (pw) => bcrypt.hashSync(pw, 10);
-    const pw = 'R@m%Brp@26';
-
-    await User.insertMany([
-      { _id: uuidv4(), emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', password_hash: hash(pw), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', email_verified: true },
-      { _id: uuidv4(), emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmal.com', password_hash: hash(pw), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', email_verified: true },
-    ]);
-
-    res.json({ success: true, message: 'Database seeded! Login: ajay.s@raminfo.com / R@m%Brp@26' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ── Admin: unlock all locked accounts (temporary) ───────────────────────
-app.get('/api/admin-unlock', async (req, res) => {
-  try {
-    const { User } = require('./src/models/database');
-    const result = await User.updateMany(
-      {},
-      { $set: { login_locked_until: null, failed_login_attempts: 0 } }
-    );
-    res.json({ success: true, unlocked: result.modifiedCount });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ── Email test endpoint (temporary — remove after debugging) ─────────────
-app.get('/api/test-email', async (req, res) => {
-  const { sendMail, mode } = require('./src/utils/mailer');
-  const to = req.query.to;
-  if (!to) return res.status(400).json({ error: 'Pass ?to=email@example.com' });
-  try {
-    const info = await sendMail(to, '[BRP AMS] Test Email',
-      '<h2>✅ Email is working!</h2><p>This is a test email from BRP-AMS backend on Render.</p>',
-      { type: 'PASSWORD_RESET' }
-    );
-    res.json({ success: true, mode, info: info || 'sent' });
-  } catch (err) {
-    res.status(500).json({ success: false, mode, error: err.message, code: err.code });
-  }
-});
-
 // ── Error Handler ─────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);

@@ -33,7 +33,7 @@ const seed = async () => {
     { _id: superAdminId, emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', password_hash: hash(pw), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001' },
     
     // Admin (Make sure there is no stray ' above this line)
-    { _id: adminId, emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmal.com', password_hash: hash(pw), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002' },
+    { _id: adminId, emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmail.com', password_hash: hash(pw), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002' },
   ]);
 
  

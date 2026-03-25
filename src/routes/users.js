@@ -164,7 +164,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       }
     });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web.onrender.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
     // Send reset email

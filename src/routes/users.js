@@ -72,17 +72,20 @@ router.get('/locations', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users/employees - all active employees for dropdown
+// GET /api/users/employees - active employees for dropdown (optionally filter by manager_id)
 router.get('/employees', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     let filter = { role: 'employee', is_active: 1 };
-    // Managers only see their own team
-    if (req.user.role === 'manager') {
+    // If manager_id query param provided, filter by that manager
+    if (req.query.manager_id) {
+      filter.manager_id = req.query.manager_id;
+    } else if (req.user.role === 'manager') {
+      // Managers see only their own team by default
       filter.manager_id = req.user.id;
     }
     const employees = await User
       .find(filter)
-      .select('emp_id name email department assigned_block')
+      .select('emp_id name email department assigned_block manager_id')
       .sort({ name: 1 })
       .lean();
     res.json({ success: true, data: employees });

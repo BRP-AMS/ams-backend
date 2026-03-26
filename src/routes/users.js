@@ -220,7 +220,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
 });
 
 // PUT /api/users/:id - Update user
-router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
+router.put('/:id', authenticate, authorize('admin','super_admin'), async (req, res) => {
   try {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });

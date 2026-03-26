@@ -13,12 +13,21 @@ const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asi
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 
 // Multer — memory storage (files uploaded to Cloudinary)
+const path = require('path');
 const upload = multer({
   storage:    multer.memoryStorage(),
   limits:     { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only images allowed'));
+    // Validate MIME type
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only images allowed'));
+    // Validate file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+    if (!allowedExts.includes(ext)) return cb(new Error('Invalid file extension'));
+    // Validate extension matches MIME type
+    const extToMime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
+    if (extToMime[ext] && extToMime[ext] !== file.mimetype) return cb(new Error('File extension does not match file type'));
+    cb(null, true);
   }
 });
 

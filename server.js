@@ -56,7 +56,6 @@ const ALLOWED_ORIGINS = [
   'capacitor://localhost',   // Android Capacitor app
   'http://localhost',        // Android WebView fallback
   'https://localhost',
-  null,                      // allow requests with no origin (mobile apps)
 ];
 app.use(cors({
   origin: (origin, cb) => {
@@ -84,11 +83,19 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // strings don't need NoSQL sanitization — only user-supplied JSON bodies do.
 app.use((req, res, next) => {
   if (req.body) req.body = mongoSanitize.sanitize(req.body, { replaceWith: '_' });
+  // Sanitize query params: strip any keys containing $ or . to prevent NoSQL injection
+  if (req.query && typeof req.query === 'object') {
+    for (const key of Object.keys(req.query)) {
+      if (typeof req.query[key] === 'string') {
+        req.query[key] = req.query[key].replace(/[$]/g, '');
+      }
+    }
+  }
   next();
 });
 
 // Global rate limit (prevents DDoS / scraping)
-const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 5000, standardHeaders: true, legacyHeaders: false });
+const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
 
 // ── Auto-checkout cron (23:58 every day) ─────────────────────────────────
@@ -171,7 +178,9 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   if (err.code === 'LIMIT_FILE_SIZE')
     return res.status(400).json({ success: false, message: 'File too large (max 5MB)' });
-  res.status(err.status || 500).json({ success: false, message: err.message || 'Internal server error' });
+  const isProd = process.env.NODE_ENV === 'production';
+  const message = isProd ? 'Internal server error' : (err.message || 'Internal server error');
+  res.status(err.status || 500).json({ success: false, message });
 });
 
 app.listen(PORT, () => {

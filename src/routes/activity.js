@@ -109,6 +109,16 @@ router.get('/', authenticate, [
 ], validate, async (req, res) => {
   try {
     const { filter = 'monthly', startDate, endDate, block, sector, support_type, limit = 100, offset = 0 } = req.query;
+
+    // Validate query params: only allow alphanumeric chars, spaces, hyphens, and /
+    const safeParam = /^[a-zA-Z0-9 \-\/]*$/;
+    if (block && !safeParam.test(block))
+      return res.status(400).json({ success: false, message: 'Invalid block parameter' });
+    if (sector && !safeParam.test(sector))
+      return res.status(400).json({ success: false, message: 'Invalid sector parameter' });
+    if (support_type && !safeParam.test(support_type))
+      return res.status(400).json({ success: false, message: 'Invalid support_type parameter' });
+
     const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
 
     const matchFilter = { activity_date: { $gte: start, $lte: end } };

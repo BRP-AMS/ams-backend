@@ -489,9 +489,10 @@ router.get('/verify-email/:token', async (req, res) => {
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'EMAIL_VERIFIED', ip_address: req.ip });
 
+    const safeName = user.name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     res.send(page(true,
       'Email Verified!',
-      `Your email has been verified successfully, <strong>${user.name}</strong>.<br><br>Your account is now active. Click below to sign in.`
+      `Your email has been verified successfully, <strong>${safeName}</strong>.<br><br>Your account is now active. Click below to sign in.`
     ));
   } catch (err) {
     console.error(err);

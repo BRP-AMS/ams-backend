@@ -121,7 +121,7 @@ router.get('/my-completed', authenticate, async (req, res) => {
 // ── POST /activity-schedule — create single (manager/admin) ───────────────
 router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
-    const { title, description, scheduled_date, location, assigned_emp_id } = req.body;
+    const { title, description, scheduled_date, location, assigned_emp_id, assigned_to: assignedToId } = req.body;
     if (!title?.trim())      return res.status(422).json({ success: false, message: 'Title is required' });
     if (!scheduled_date)     return res.status(422).json({ success: false, message: 'Scheduled date is required' });
 
@@ -129,6 +129,11 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
     if (assigned_emp_id) {
       const emp = await User.findOne({ emp_id: assigned_emp_id }).select('_id').lean();
       if (!emp) return res.status(404).json({ success: false, message: `Employee ${assigned_emp_id} not found` });
+      assigned_to = emp._id;
+    } else if (assignedToId) {
+      // Accept user _id directly (from mobile / dropdown)
+      const emp = await User.findById(assignedToId).select('_id').lean();
+      if (!emp) return res.status(404).json({ success: false, message: 'Assigned employee not found' });
       assigned_to = emp._id;
     }
 

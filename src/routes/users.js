@@ -42,14 +42,50 @@ router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, r
   }
 });
 
-// GET /api/users/managers - for admin/hr/super_admin dropdown
-router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res) => {
+// GET /api/users/managers - dropdown for manager selection
+router.get('/managers', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const managers = await User
       .find({ role: 'manager', is_active: 1 })
       .select('emp_id name email department')
       .lean();
     res.json({ success: true, data: managers });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/users/locations - distinct blocks & districts for dropdown
+router.get('/locations', authenticate, async (req, res) => {
+  try {
+    const [blocks, districts] = await Promise.all([
+      User.distinct('assigned_block',    { assigned_block:    { $ne: null, $exists: true } }),
+      User.distinct('assigned_district', { assigned_district: { $ne: null, $exists: true } }),
+    ]);
+    // Combine unique location names for the dropdown
+    const locations = [...new Set([...blocks.filter(Boolean), ...districts.filter(Boolean)])].sort();
+    res.json({ success: true, data: locations });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/users/employees - all active employees for dropdown
+router.get('/employees', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    let filter = { role: 'employee', is_active: 1 };
+    // Managers only see their own team
+    if (req.user.role === 'manager') {
+      filter.manager_id = req.user.id;
+    }
+    const employees = await User
+      .find(filter)
+      .select('emp_id name email department assigned_block')
+      .sort({ name: 1 })
+      .lean();
+    res.json({ success: true, data: employees });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -123,7 +159,7 @@ router.post('/', authenticate, authorize('admin'), [
       console.error('[User Create] Firebase welcome email failed:', err.message)
     );
 
-    const user = await User.findById(id).lean();
+    const user = await User.findById(id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });
   } catch (err) {
     console.error(err);
@@ -135,7 +171,7 @@ router.post('/', authenticate, authorize('admin'), [
 router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
   console.log('[reset-password] called by', req.user?.id, 'for target', req.params.id);
   try {
-    const target = await User.findById(req.params.id).lean();
+    const target = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
     if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
@@ -222,7 +258,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
 // PUT /api/users/:id - Update user
 router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).lean();
+    const user = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     // Admin cannot edit admin or super_admin users — only Super Admin can
@@ -298,7 +334,7 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
       }
     }
 
-    const updated = await User.findById(req.params.id).lean();
+    const updated = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     res.json({ success: true, message: 'User updated', data: formatUser(updated) });
   } catch (err) {
     console.error(err);

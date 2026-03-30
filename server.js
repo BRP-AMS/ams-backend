@@ -2,20 +2,53 @@ const dns = require('node:dns');
 dns.setServers(['8.8.8.8', '1.1.1.1']);
 // require('dns').setDefaultResultOrder('ipv4first');
 require('dotenv').config();
-const express  = require('express');
-const cors     = require('cors');
-const helmet   = require('helmet');
-const morgan   = require('morgan');
-const rateLimit = require('express-rate-limit');
-const path     = require('path');
-const fs       = require('fs');
-const cron     = require('node-cron');
+
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET must be set and at least 32 characters');
+  process.exit(1);
+}
+if (!process.env.MONGO_URI) {
+  console.error('FATAL: MONGO_URI environment variable is required');
+  process.exit(1);
+}
+
+const express       = require('express');
+const cors          = require('cors');
+const helmet        = require('helmet');
+const morgan        = require('morgan');
+const rateLimit     = require('express-rate-limit');
+const mongoSanitize = require('express-mongo-sanitize');
+const cron          = require('node-cron');
 
 const app  = express();
 const PORT = process.env.PORT ;
 
+// Render (and most hosts) use a reverse proxy — trust it for rate-limiting & IP detection
+app.set('trust proxy', 1);
+
 // ── Security & Middleware ─────────────────────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  noSniff: true,
+  xssFilter: true,
+  hidePoweredBy: true,
+  frameguard: { action: 'deny' },
+}));
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || 'http://localhost:3000',
   'http://localhost:3000',   // local dev
@@ -23,7 +56,6 @@ const ALLOWED_ORIGINS = [
   'capacitor://localhost',   // Android Capacitor app
   'http://localhost',        // Android WebView fallback
   'https://localhost',
-  null,                      // allow requests with no origin (mobile apps)
 ];
 app.use(cors({
   origin: (origin, cb) => {
@@ -32,21 +64,39 @@ app.use(cors({
   },
   credentials: true,
 }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+// Sanitize req.body against NoSQL injection ($, .)
+// Note: In Express 5, req.query and req.params are read-only (getter/Proxy).
+// Reassigning them breaks internal route matching. URL path params and query
+// strings don't need NoSQL sanitization — only user-supplied JSON bodies do.
+app.use((req, res, next) => {
+  if (req.body) req.body = mongoSanitize.sanitize(req.body, { replaceWith: '_' });
+  // Sanitize query params: strip any keys containing $ or . to prevent NoSQL injection
+  if (req.query && typeof req.query === 'object') {
+    for (const key of Object.keys(req.query)) {
+      if (typeof req.query[key] === 'string') {
+        req.query[key] = req.query[key].replace(/[$]/g, '');
+      }
+    }
+  }
+  next();
+});
 
-// Rate limiting — scaled for up to 200 concurrent users
-// 200 users × ~10 req/min × 2-min window = ~4,000 req; max:10000 gives 2.5× headroom
-const limiter     = rateLimit({ windowMs: 2 * 60 * 1000, max: 10000, standardHeaders: true, legacyHeaders: false });
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5000,  message: { success: false, message: 'Too many login attempts, please try again later.' } });
+// Global rate limit (prevents DDoS / scraping)
+const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
-app.use('/api/auth/login', authLimiter);
-
-// Static file serving for uploads
-const uploadDir = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-app.use('/uploads', express.static(path.resolve(uploadDir)));
 
 // ── Auto-checkout cron (23:58 every day) ─────────────────────────────────
 // Finds all Draft records (checked-in but not checked-out) for today and
@@ -104,6 +154,9 @@ const pruneRevokedTokens = async () => {
 connectionPromise.then(() => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
+
+  // SMTP verification happens automatically in src/utils/mailer.js on require()
+  require('./src/utils/mailer');
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -125,7 +178,9 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   if (err.code === 'LIMIT_FILE_SIZE')
     return res.status(400).json({ success: false, message: 'File too large (max 5MB)' });
-  res.status(err.status || 500).json({ success: false, message: err.message || 'Internal server error' });
+  const isProd = process.env.NODE_ENV === 'production';
+  const message = isProd ? 'Internal server error' : (err.message || 'Internal server error');
+  res.status(err.status || 500).json({ success: false, message });
 });
 
 app.listen(PORT, () => {

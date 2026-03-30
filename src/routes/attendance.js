@@ -1,58 +1,35 @@
 const express      = require('express');
 const router       = express.Router();
 const multer       = require('multer');
-const path         = require('path');
-const fs           = require('fs');
-const nodemailer   = require('nodemailer');
+const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { selfieUploader, reapplyUploader } = require('../config/cloudinary');
- 
-// ── Multer uploaders (Cloudinary) ────────────────────────────────────────
-const upload = selfieUploader;           // .single('selfie') or .single('checkoutSelfie')
-const uploadReapply = reapplyUploader;   // .array('reapplyDocs', 10)
+const { sendMail } = require('../utils/mailer');
+
 // ── IST time helpers (server may run in UTC) ─────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 
-// ── Email helper (graceful — no crash if SMTP not configured) ────────────
-const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
-  host:   process.env.SMTP_HOST,
-  port:   parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-}) : null;
-
-const sendMail = async (to, subject, html) => {
-  if (!mailer) return;
-  try {
-    await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
-  } catch (err) {
-    console.error('Email send error:', err.message);
+// Multer — memory storage (files uploaded to Cloudinary)
+const path = require('path');
+const upload = multer({
+  storage:    multer.memoryStorage(),
+  limits:     { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    // Validate MIME type
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only images allowed'));
+    // Validate file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+    if (!allowedExts.includes(ext)) return cb(new Error('Invalid file extension'));
+    // Validate extension matches MIME type
+    const extToMime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
+    if (extToMime[ext] && extToMime[ext] !== file.mimetype) return cb(new Error('File extension does not match file type'));
+    cb(null, true);
   }
-};
-
-// Multer config for selfie uploads
-// const uploadDir = process.env.UPLOAD_DIR || './uploads';
-// if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-// const storage = multer.diskStorage({
-//   destination: (req, file, cb) => cb(null, uploadDir),
-//   filename:    (req, file, cb) => {
-//     const ext = path.extname(file.originalname);
-//     cb(null, `selfie_${req.user.id}_${Date.now()}${ext}`);
-//   }
-// });
-// const upload = multer({
-//   storage,
-//   limits:     { fileSize: 5 * 1024 * 1024 },
-//   fileFilter: (req, file, cb) => {
-//     if (file.mimetype.startsWith('image/')) cb(null, true);
-//     else cb(new Error('Only images allowed'));
-//   }
-// });
+});
 
 // ── Helper: Notify user ──────────────────────────────────────────────────
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
@@ -210,6 +187,10 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : istTimeStr();
     const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
 
+    const selfiePath = req.file
+      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
+      : null;
+
     await AttendanceRecord.create({
       _id:              id,
       emp_id:           req.user.id,
@@ -218,7 +199,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       sector:           sector || null,
       description:      description || '',
       status:           'Draft',
-      selfie_path:      req.file ? req.file.path : null,   // ← Cloudinary URL
+      selfie_path:      selfiePath,
       latitude:         parseFloat(latitude),
       longitude:        parseFloat(longitude),
       location_address: locationAddress || '',
@@ -381,8 +362,9 @@ else {
 }
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
-  // ← Cloudinary URL (was: `/uploads/${req.file.filename}`)
-    const checkoutSelfiePath = req.file ? req.file.path : null;
+    const checkoutSelfiePath = req.file
+      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
+      : null;
 
     // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
     const timeRe = /^\d{2}:\d{2}$/;
@@ -657,8 +639,9 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
 
-    // ← Cloudinary URLs (was: f.filename local paths)
-    const docPaths = (req.files || []).map(f => f.path);
+    const docPaths = await Promise.all(
+      (req.files || []).map(f => uploadFile(f.buffer, 'ams/reapply-docs', f.originalname, f.mimetype))
+    );
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {

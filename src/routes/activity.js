@@ -2,35 +2,22 @@ const express = require('express');
 const router  = express.Router();
 const multer  = require('multer');
 const path    = require('path');
-const fs      = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { uploadFile } = require('../utils/storage');
 const { query, body, validationResult } = require('express-validator');
 const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { activityUploader, deleteFromCloudinary } = require('../config/cloudinary');
- 
-// ── Multer uploader (Cloudinary) ─────────────────────────────────────────
-const upload = activityUploader; // .array('documents', 10)
-// ── File Upload Config ────────────────────────────────────────────────────
-// const activityUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'activity');
-// if (!fs.existsSync(activityUploadDir)) fs.mkdirSync(activityUploadDir, { recursive: true });
 
-// const storage = multer.diskStorage({
-//   destination: (req, file, cb) => cb(null, activityUploadDir),
-//   filename:    (req, file, cb) => {
-//     const ext = path.extname(file.originalname);
-//     cb(null, `act_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-//   },
-// });
-// const upload = multer({
-//   storage,
-//   limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
-//   fileFilter: (req, file, cb) => {
-//     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-//     if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-//     else cb(new Error('File type not allowed'));
-//   },
-// });
+// ── File Upload Config (memory storage → Cloudinary) ─────────────────────
+const upload = multer({
+  storage:    multer.memoryStorage(),
+  limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
+    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
+    else cb(new Error('File type not allowed'));
+  },
+});
 
 // ── Validators ────────────────────────────────────────────────────────────
 const UDYAM_RE = /^UDYAM-[A-Z]{2}-\d{2}-\d{7}$/;
@@ -90,16 +77,17 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       resource_type: 'auto',
     });
 
-  // Save uploaded documents — file_path = Cloudinary URL
+    // Save uploaded documents to Cloudinary
     if (req.files?.length) {
-      await ActivityDocument.insertMany(req.files.map(f => ({
+      const uploaded = await Promise.all(
+        req.files.map(f => uploadFile(f.buffer, 'ams/activity-docs', f.originalname, f.mimetype))
+      );
+      await ActivityDocument.insertMany(uploaded.map((url, i) => ({
         _id:         uuidv4(),
         activity_id: id,
-        file_path:   f.path,          // ← Cloudinary URL
-        file_name:   f.originalname,
-        file_type:   f.mimetype,
-        public_id:   f.filename,      // ← Cloudinary public_id (for deletion)
-        resource_type: 'auto', // ✅ add this
+        file_path:   url,
+        file_name:   req.files[i].originalname,
+        file_type:   req.files[i].mimetype,
       })));
     }
 
@@ -122,6 +110,16 @@ router.get('/', authenticate, [
 ], validate, async (req, res) => {
   try {
     const { filter = 'monthly', startDate, endDate, block, sector, support_type, limit = 100, offset = 0 } = req.query;
+
+    // Validate query params: only allow alphanumeric chars, spaces, hyphens, and /
+    const safeParam = /^[a-zA-Z0-9 \-\/]*$/;
+    if (block && !safeParam.test(block))
+      return res.status(400).json({ success: false, message: 'Invalid block parameter' });
+    if (sector && !safeParam.test(sector))
+      return res.status(400).json({ success: false, message: 'Invalid sector parameter' });
+    if (support_type && !safeParam.test(support_type))
+      return res.status(400).json({ success: false, message: 'Invalid support_type parameter' });
+
     const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
 
     const matchFilter = { activity_date: { $gte: start, $lte: end } };

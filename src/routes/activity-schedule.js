@@ -2,8 +2,8 @@ const express  = require('express');
 const router   = express.Router();
 const multer   = require('multer');
 const path     = require('path');
-const fs       = require('fs');
 const XLSX     = require('xlsx');
+const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { ActivitySchedule, ScheduleDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
@@ -13,26 +13,16 @@ const { scheduleUploader, bulkExcelUploader, deleteFromCloudinary } = require('.
 const uploadAttach = scheduleUploader;   // .array('attachments', 10) — goes to Cloudinary
 const uploadBulk   = bulkExcelUploader; // .single('file')            — stays in memory
 
-// ── Upload directories ────────────────────────────────────────────────────
-// const scheduleUploadDir = path.join(process.env.UPLOAD_DIR || './uploads', 'schedule');
-// if (!fs.existsSync(scheduleUploadDir)) fs.mkdirSync(scheduleUploadDir, { recursive: true });
-
-// const attachStorage = multer.diskStorage({
-//   destination: (req, file, cb) => cb(null, scheduleUploadDir),
-//   filename:    (req, file, cb) => {
-//     const ext = path.extname(file.originalname);
-//     cb(null, `sched_${req.user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-//   },
-// });
-// const uploadAttach = multer({
-//   storage: attachStorage,
-//   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
-//   fileFilter: (req, file, cb) => {
-//     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-//     if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-//     else cb(new Error('File type not allowed'));
-//   },
-// });
+// For completion attachments (memory storage → Cloudinary)
+const uploadAttach = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
+    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
+    else cb(new Error('File type not allowed'));
+  },
+});
 
 // const uploadBulk = multer({
 //   storage: multer.memoryStorage(),
@@ -103,8 +93,24 @@ router.get('/', authenticate, async (req, res) => {
       .sort({ scheduled_date: 1, created_at: -1 })
       .lean();
 
-    const userMap = await resolveUsers(schedules);
+    // Populate creator, assigned_to, assigned_by, manager, initiated_by, completed_by names
+    const userIds = new Set();
+    schedules.forEach(s => {
+      if (s.created_by)   userIds.add(s.created_by);
+      if (s.assigned_to)  userIds.add(s.assigned_to);
+      if (s.assigned_by)  userIds.add(s.assigned_by);
+      if (s.manager_id)   userIds.add(s.manager_id);
+      if (s.initiated_by) userIds.add(s.initiated_by);
+      if (s.completed_by) userIds.add(s.completed_by);
+    });
 
+    const users = await User.find({ _id: { $in: [...userIds] } })
+      .select('_id name emp_id role')
+      .lean();
+    const userMap = {};
+    users.forEach(u => { userMap[u._id] = { name: u.name, emp_id: u.emp_id, role: u.role }; });
+
+    // Attach documents for completed schedules
     const completedIds = schedules.filter(s => s.status === 'Completed').map(s => s._id);
     const docs = completedIds.length
       ? await ScheduleDocument.find({ schedule_id: { $in: completedIds } }).lean()
@@ -115,21 +121,24 @@ router.get('/', authenticate, async (req, res) => {
       docsMap[d.schedule_id].push(d);
     });
 
-    const result = schedules.map(s => ({
-      ...s,
-      id:                 s._id,
-      manager_name:       userMap[s.manager_id]?.name    || null,
-      manager_empid:      userMap[s.manager_id]?.emp_id  || null,
-      created_by_name:    userMap[s.created_by]?.name    || null,
-      created_by_empid:   userMap[s.created_by]?.emp_id  || null,
-      assigned_to_name:   userMap[s.assigned_to]?.name   || null,
-      assigned_to_empid:  userMap[s.assigned_to]?.emp_id || null,
-      initiated_by_name:  userMap[s.initiated_by]?.name  || null,
-      initiated_by_empid: userMap[s.initiated_by]?.emp_id|| null,
-      completed_by_name:  userMap[s.completed_by]?.name  || null,
-      completed_by_empid: userMap[s.completed_by]?.emp_id|| null,
-      documents:          docsMap[s._id] || [],
-    }));
+    const rl = (r) => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+    const result = schedules.map(s => {
+      const assignerUser = userMap[s.assigned_by] || userMap[s.created_by];
+      return {
+        ...s,
+        id:                s._id,
+        created_by_name:   userMap[s.created_by]?.name   || null,
+        assigned_to_name:  userMap[s.assigned_to]?.name  || null,
+        assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
+        assigned_by_name:  s.assigned_by_name || (assignerUser ? `${assignerUser.name} (${rl(assignerUser.role)})` : null),
+        assigned_by_empid: assignerUser?.emp_id || null,
+        manager_name:      userMap[s.manager_id]?.name   || null,
+        manager_empid:     userMap[s.manager_id]?.emp_id  || null,
+        initiated_by_name: userMap[s.initiated_by]?.name || null,
+        completed_by_name: userMap[s.completed_by]?.name || null,
+        documents:         docsMap[s._id] || [],
+      };
+    });
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -209,9 +218,9 @@ router.get('/template', authenticate, authorize('manager', 'admin', 'hr', 'super
 // ── POST /activity-schedule ───────────────────────────────────────────────
 router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
-    const { title, description, scheduled_date, location, assigned_emp_id, manager_id } = req.body;
-    if (!title?.trim())  return res.status(422).json({ success: false, message: 'Title is required' });
-    if (!scheduled_date) return res.status(422).json({ success: false, message: 'Scheduled date is required' });
+    const { title, description, scheduled_date, location, assigned_emp_id, assigned_to: assignedToId, manager_id } = req.body;
+    if (!title?.trim())      return res.status(422).json({ success: false, message: 'Title is required' });
+    if (!scheduled_date)     return res.status(422).json({ success: false, message: 'Scheduled date is required' });
 
     // Resolve employee
     let assigned_to = null;
@@ -221,24 +230,28 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
       }).select('_id').lean();
       if (!emp) return res.status(404).json({ success: false, message: `Employee ${assigned_emp_id} not found` });
       assigned_to = emp._id;
+    } else if (assignedToId) {
+      const emp = await User.findById(assignedToId).select('_id').lean();
+      if (!emp) return res.status(404).json({ success: false, message: 'Assigned employee not found' });
+      assigned_to = emp._id;
     }
 
-    // Resolve manager — use provided manager_id or look up from assigned employee
-    let resolvedManagerId = manager_id || null;
-    if (!resolvedManagerId && assigned_to) {
-      const empUser = await User.findById(assigned_to).select('manager_id').lean();
-      resolvedManagerId = empUser?.manager_id || null;
-    }
+    // Resolve assigned_by name from current user
+    const creator = await User.findById(req.user.id).select('name role emp_id').lean();
+    const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[creator?.role] || '';
+    const assignedByName = creator ? `${creator.name} (${roleLabel})` : null;
 
     const schedule = await ActivitySchedule.create({
-      _id:         uuidv4(),
-      title:       title.trim(),
-      description: description?.trim() || null,
+      _id:              uuidv4(),
+      title:            title.trim(),
+      description:      description?.trim() || null,
       scheduled_date,
-      location:    location?.trim() || null,
+      location:         location?.trim() || null,
       assigned_to,
-      manager_id:  resolvedManagerId,
-      created_by:  req.user.id,
+      created_by:       req.user.id,
+      assigned_by:      req.user.id,
+      assigned_by_name: assignedByName,
+      manager_id:       manager_id || null,
     });
 
     res.status(201).json({ success: true, data: { ...schedule.toObject(), id: schedule._id } });
@@ -381,16 +394,18 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
     schedule.work_description = work_description.trim();
     schedule.remarks          = remarks?.trim() || null;
     await schedule.save();
-  // Save attachments — file_path = Cloudinary URL
+
+    // Save attachments to Cloudinary
     if (req.files?.length) {
-      await ScheduleDocument.insertMany(req.files.map(f => ({
+      const urls = await Promise.all(
+        req.files.map(f => uploadFile(f.buffer, 'ams/schedule-docs', f.originalname, f.mimetype))
+      );
+      await ScheduleDocument.insertMany(urls.map((url, i) => ({
         _id:         uuidv4(),
         schedule_id: schedule._id,
-        file_path:   f.path,        // ← Cloudinary URL
-        file_name:   f.originalname,
-        file_type:   f.mimetype,
-        public_id:   f.filename,    // ← Cloudinary public_id (for deletion)
-         resource_type: 'auto', // ✅ add this
+        file_path:   url,
+        file_name:   req.files[i].originalname,
+        file_type:   req.files[i].mimetype,
       })));
     }
 
@@ -407,9 +422,8 @@ router.delete('/:id', authenticate, authorize('manager', 'admin', 'hr', 'super_a
   try {
     const schedule = await ActivitySchedule.findById(req.params.id);
     if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
-    const docs = await ScheduleDocument.find({ schedule_id: req.params.id }).lean();
-   // Delete files from Cloudinary
-    await Promise.all(docs.map(d => deleteFromCloudinary(d.public_id || d.file_path)));
+
+    // Files are on Cloudinary — just remove DB records
     await ScheduleDocument.deleteMany({ schedule_id: req.params.id });
     await schedule.deleteOne();
     res.json({ success: true, message: 'Schedule deleted' });

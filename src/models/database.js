@@ -1,7 +1,10 @@
 const mongoose = require('mongoose');
 
 const MONGO_URI = process.env.MONGO_URI;
-
+if (!MONGO_URI) {
+  console.error('FATAL: MONGO_URI environment variable is required');
+  process.exit(1);
+}
 // ── Schemas ───────────────────────────────────────────────────────────────
 
 const userSchema = new mongoose.Schema({
@@ -17,8 +20,25 @@ const userSchema = new mongoose.Schema({
   is_active:         { type: Number, default: 1 },
   assigned_block:    { type: String, default: null },
   assigned_district: { type: String, default: null },
-  email_verified:    { type: Boolean, default: false },
-  phone_verified:    { type: Boolean, default: false },
+  // ── Email verification ───────────────────────────────────────────────
+  email_verified:       { type: Boolean, default: false },
+  email_verify_token:   { type: String,  default: null },  // hashed token
+  email_verify_expires: { type: Date,    default: null },
+  // ── Password reset ───────────────────────────────────────────────────
+  pwd_reset_token:      { type: String,  default: null },  // hashed token
+  pwd_reset_expires:    { type: Date,    default: null },
+  // ── Password reset OTP ───────────────────────────────────────────────
+  pwd_reset_otp:        { type: String,  default: null },  // hashed OTP
+  pwd_reset_otp_expires:{ type: Date,    default: null },
+  // ── Password changed timestamp (for global logout) ─────────────────
+  pwd_changed_at:       { type: Date,    default: null },
+  // ── Phone OTP ────────────────────────────────────────────────────────
+  phone_otp:            { type: String,  default: null },  // hashed OTP
+  phone_otp_expires:    { type: Date,    default: null },
+  phone_verified:       { type: Boolean, default: false },
+  // ── Account lockout ─────────────────────────────────────────────────
+  failed_login_attempts: { type: Number, default: 0 },
+  login_locked_until:    { type: Date, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });
@@ -168,6 +188,9 @@ const activityScheduleSchema = new mongoose.Schema({
   assigned_to:      { type: String, ref: 'User', default: null },
   manager_id:       { type: String, ref: 'User', default: null },
   created_by:       { type: String, ref: 'User', required: true },
+  assigned_by:      { type: String, ref: 'User', default: null }, // who assigned this activity
+  assigned_by_name: { type: String, default: null },               // quick-display name
+  manager_id:       { type: String, ref: 'User', default: null }, // selected manager
   status:           { type: String, enum: ['Pending', 'Initiated', 'Completed'], default: 'Pending' },
   initiated_by:     { type: String, ref: 'User', default: null },
   initiated_at:     { type: Date, default: null },

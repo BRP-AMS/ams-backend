@@ -3,26 +3,13 @@ const router     = express.Router();
 const bcrypt     = require('bcryptjs');
 const multer     = require('multer');
 const XLSX       = require('xlsx');
-const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { sendMail } = require('../utils/mailer');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-
-// ── Email helper ─────────────────────────────────────────────────────────
-const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({
-  host:   process.env.SMTP_HOST,
-  port:   parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-}) : null;
-const sendMail = async (to, subject, html) => {
-  if (!mailer) return;
-  try { await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html }); }
-  catch (err) { console.error('Email error:', err.message); }
-};
 
 const validate = (req, res, next) => {
   const errs = validationResult(req);
@@ -55,8 +42,8 @@ router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, r
   }
 });
 
-// GET /api/users/managers - for admin/hr/super_admin dropdown
-router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res) => {
+// GET /api/users/managers - dropdown for manager selection
+router.get('/managers', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const managers = await User
       .find({ role: 'manager', is_active: 1 })
@@ -69,17 +56,56 @@ router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res)
   }
 });
 
+// GET /api/users/locations - distinct blocks & districts for dropdown
+router.get('/locations', authenticate, async (req, res) => {
+  try {
+    const [blocks, districts] = await Promise.all([
+      User.distinct('assigned_block',    { assigned_block:    { $ne: null, $exists: true } }),
+      User.distinct('assigned_district', { assigned_district: { $ne: null, $exists: true } }),
+    ]);
+    // Combine unique location names for the dropdown
+    const locations = [...new Set([...blocks.filter(Boolean), ...districts.filter(Boolean)])].sort();
+    res.json({ success: true, data: locations });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/users/employees - active employees for dropdown (optionally filter by manager_id)
+router.get('/employees', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    let filter = { role: 'employee', is_active: 1 };
+    // If manager_id query param provided, filter by that manager
+    if (req.query.manager_id) {
+      filter.manager_id = req.query.manager_id;
+    } else if (req.user.role === 'manager') {
+      // Managers see only their own team by default
+      filter.manager_id = req.user.id;
+    }
+    const employees = await User
+      .find(filter)
+      .select('emp_id name email department assigned_block manager_id')
+      .sort({ name: 1 })
+      .lean();
+    res.json({ success: true, data: employees });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // POST /api/users - Admin / Super Admin creates user
 router.post('/', authenticate, authorize('admin'), [
   body('name').notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
   body('empId').notEmpty().withMessage('Employee ID is required'),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+  // password is now auto-generated — no longer required from the client
   body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']).withMessage('Invalid role'),
   body('department').notEmpty().withMessage('Department is required'),
 ], validate, async (req, res) => {
   try {
-    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
+    const { name, email, empId, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
     // Admin cannot create admin or super_admin accounts — only Super Admin can
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
@@ -92,23 +118,52 @@ router.post('/', authenticate, authorize('admin'), [
     const existingEmpId = await User.findOne({ emp_id: empId }).lean();
     if (existingEmpId) return res.status(409).json({ success: false, message: 'Employee ID already exists' });
 
+    const crypto     = require('crypto');
+    const genToken   = () => crypto.randomBytes(32).toString('hex');
+    const hashToken  = (t) => crypto.createHash('sha256').update(t).digest('hex');
+
+    // Email verification token (24h — user needs time to check email)
+    const rawVerifyToken   = genToken();
+    const hashedVerifyTok  = hashToken(rawVerifyToken);
+    const verifyExpires    = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    // Password-set token (24h) — so user sets their own password on first login
+    const rawResetToken    = genToken();
+    const hashedResetTok   = hashToken(rawResetToken);
+    const resetExpires     = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    // Temporary locked password — user must set their own via the reset link
+    const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
+
     const id = uuidv4();
     await User.create({
-      _id:               id,
-      emp_id:            empId,
+      _id:                  id,
+      emp_id:               empId,
       name,
       email,
-      password_hash:     bcrypt.hashSync(password, 10),
+      password_hash:        bcrypt.hashSync(tempPassword, 12),
       role,
       department,
-      manager_id:        managerId        || null,
-      phone:             phone            || null,
-      assigned_block:    assignedBlock    || null,
-      assigned_district: assignedDistrict || null,
+      manager_id:           managerId        || null,
+      phone:                phone            || null,
+      assigned_block:       assignedBlock    || null,
+      assigned_district:    assignedDistrict || null,
+      email_verified:       false,
+      email_verify_token:   hashedVerifyTok,
+      email_verify_expires: verifyExpires,
+      pwd_reset_token:      hashedResetTok,
+      pwd_reset_expires:    resetExpires,
     });
 
-    const user = await User.findById(id).lean();
-    res.status(201).json({ success: true, message: 'User created successfully', data: formatUser(user) });
+    // Send ONE Firebase password reset email — serves as both verification + password setup
+    // When user clicks the link and sets password, they prove email ownership (= verified)
+    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+    sendPasswordResetEmail(email, tempPassword).catch(err =>
+      console.error('[User Create] Firebase welcome email failed:', err.message)
+    );
+
+    const user = await User.findById(id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
+    res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -116,11 +171,10 @@ router.post('/', authenticate, authorize('admin'), [
 });
 
 // PUT /api/users/:id/reset-password — must be before PUT /:id to avoid route shadowing
-const DEFAULT_PASSWORD = 'R@m%Brp@26';
-router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
+router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   console.log('[reset-password] called by', req.user?.id, 'for target', req.params.id);
   try {
-    const target = await User.findById(req.params.id).lean();
+    const target = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
     if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
@@ -130,20 +184,74 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     }
 
-    const hash = bcrypt.hashSync(DEFAULT_PASSWORD, 10);
-    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: hash } });
+    // Generate a secure reset token (5 min expiry) and send email
+    const crypto     = require('crypto');
+    const genToken   = () => crypto.randomBytes(32).toString('hex');
+    const hashToken  = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
-    // Notify user — don't let notification failure block the response
+    const rawResetToken  = genToken();
+    const hashedResetTok = hashToken(rawResetToken);
+    const resetExpires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
+
+    // Set a temporary locked password + reset token so user MUST use the link
+    const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
+    await User.findByIdAndUpdate(req.params.id, {
+      $set: {
+        password_hash:     bcrypt.hashSync(tempPassword, 12),
+        pwd_reset_token:   hashedResetTok,
+        pwd_reset_expires: resetExpires,
+      }
+    });
+
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
+
+    // Send reset email
+    await sendMail(target.email, '[BRP AMS] Password Reset — Set Your New Password',
+      `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+      <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
+      <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+        style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+      <tr><td style="background:#0b1e3b;padding:28px 32px;">
+        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
+        <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
+      </td></tr>
+      <tr><td style="padding:32px;">
+        <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Password Reset by Admin</h2>
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${target.name}</strong>, your password has been reset by an administrator.
+          Click the button below to set a new password.
+        </p>
+        <p style="color:#dc2626;font-size:13px;font-weight:700;">
+          ⚠️ This link expires in <strong>5 minutes</strong>. Act quickly!
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <a href="${resetUrl}"
+            style="background:#1e3a8a;color:#fff;padding:14px 32px;border-radius:8px;
+                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+            🔑 Set New Password
+          </a>
+        </div>
+        <p style="color:#94a3b8;font-size:11px;word-break:break-all;">Or copy: ${resetUrl}</p>
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 16px;">
+        <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
+      </td></tr></table>
+      </td></tr></table></body></html>`
+    );
+
+    // In-app notification as well
     try {
       await Notification.create({
         _id: uuidv4(), user_id: target._id,
         title: 'Password Reset by Admin',
-        message: 'Your password has been reset to the default by an administrator. Please log in and change it immediately.',
+        message: 'Your password has been reset by an administrator. Check your email for the reset link (expires in 5 minutes).',
         type: 'warning', is_read: 0,
       });
     } catch (_) {}
 
-    res.json({ success: true, message: `Password reset to default for ${target.name}` });
+    res.json({ success: true, message: `Password reset email sent to ${target.name} (${target.email})` });
   } catch (err) {
     console.error('[reset-password]', err);
     res.status(500).json({ success: false, message: 'Server error: ' + err.message });
@@ -151,9 +259,9 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
 });
 
 // PUT /api/users/:id - Update user
-router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
+router.put('/:id', authenticate, authorize('admin','super_admin'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).lean();
+    const user = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     // Admin cannot edit admin or super_admin users — only Super Admin can
@@ -229,7 +337,7 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
       }
     }
 
-    const updated = await User.findById(req.params.id).lean();
+    const updated = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     res.json({ success: true, message: 'User updated', data: formatUser(updated) });
   } catch (err) {
     console.error(err);

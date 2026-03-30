@@ -33,8 +33,7 @@ yarn-error.*
 
 # local env files — NEVER commit credentials
 .env
-.env.local
-.env.*.local
+
 !.env.example
 
 # typescript

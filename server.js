@@ -177,23 +177,26 @@ app.get('/api/health', (req, res) => {
 app.post('/api/admin/seed', async (req, res) => {
   try {
     const bcrypt = require('bcryptjs');
+    const validator = require('validator');
     const { User } = require('./src/models/database');
     const hash = (pw) => bcrypt.hashSync(pw, 10);
     const pw = 'R@m%Brp@26';
+    // normalizeEmail strips dots from Gmail — login does the same
+    const norm = (e) => validator.normalizeEmail(e);
 
     const mgr1Id = uuidv4();
     const mgr2Id = uuidv4();
 
     const users = [
-      { emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', assigned_block: null, assigned_district: null },
-      { emp_id: 'ADM001',  name: 'Admin User',  email: 'ajay.rges@gmail.com', role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', assigned_block: null, assigned_district: null },
-      { emp_id: 'HR001',   name: 'HR Manager',  email: 'hr.brpams@gmail.com', role: 'hr', department: 'Human Resources', manager_id: null, phone: '9000000003', assigned_block: null, assigned_district: null },
-      { emp_id: 'MGR001',  name: 'Rajesh Kumar',  email: 'mgr1.brpams@gmail.com', role: 'manager', department: 'Field Operations', manager_id: null, phone: '9000000004', assigned_block: 'Agartala', assigned_district: 'West Tripura', _forceId: mgr1Id },
-      { emp_id: 'MGR002',  name: 'Priya Sharma',  email: 'mgr2.brpams@gmail.com', role: 'manager', department: 'Marketing', manager_id: null, phone: '9000000005', assigned_block: 'Udaipur', assigned_district: 'South Tripura', _forceId: mgr2Id },
-      { emp_id: 'EMP001',  name: 'Amit Das',      email: 'emp1.brpams@gmail.com', role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000006', assigned_block: 'Agartala', assigned_district: 'West Tripura' },
-      { emp_id: 'EMP002',  name: 'Suman Deb',     email: 'emp2.brpams@gmail.com', role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000007', assigned_block: 'Block A', assigned_district: 'West Tripura' },
-      { emp_id: 'EMP003',  name: 'Ritu Nath',     email: 'emp3.brpams@gmail.com', role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000008', assigned_block: 'Udaipur', assigned_district: 'South Tripura' },
-      { emp_id: 'EMP004',  name: 'Bikram Reang',  email: 'emp4.brpams@gmail.com', role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000009', assigned_block: 'District 1', assigned_district: 'South Tripura' },
+      { emp_id: 'SADM001', name: 'Super Admin', email: norm('ajay.s@raminfo.com'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', assigned_block: null, assigned_district: null },
+      { emp_id: 'ADM001',  name: 'Admin User',  email: norm('ajay.rges@gmail.com'), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', assigned_block: null, assigned_district: null },
+      { emp_id: 'HR001',   name: 'HR Manager',  email: norm('hr.brpams@gmail.com'), role: 'hr', department: 'Human Resources', manager_id: null, phone: '9000000003', assigned_block: null, assigned_district: null },
+      { emp_id: 'MGR001',  name: 'Rajesh Kumar',  email: norm('mgr1.brpams@gmail.com'), role: 'manager', department: 'Field Operations', manager_id: null, phone: '9000000004', assigned_block: 'Agartala', assigned_district: 'West Tripura', _forceId: mgr1Id },
+      { emp_id: 'MGR002',  name: 'Priya Sharma',  email: norm('mgr2.brpams@gmail.com'), role: 'manager', department: 'Marketing', manager_id: null, phone: '9000000005', assigned_block: 'Udaipur', assigned_district: 'South Tripura', _forceId: mgr2Id },
+      { emp_id: 'EMP001',  name: 'Amit Das',      email: norm('emp1.brpams@gmail.com'), role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000006', assigned_block: 'Agartala', assigned_district: 'West Tripura' },
+      { emp_id: 'EMP002',  name: 'Suman Deb',     email: norm('emp2.brpams@gmail.com'), role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000007', assigned_block: 'Block A', assigned_district: 'West Tripura' },
+      { emp_id: 'EMP003',  name: 'Ritu Nath',     email: norm('emp3.brpams@gmail.com'), role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000008', assigned_block: 'Udaipur', assigned_district: 'South Tripura' },
+      { emp_id: 'EMP004',  name: 'Bikram Reang',  email: norm('emp4.brpams@gmail.com'), role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000009', assigned_block: 'District 1', assigned_district: 'South Tripura' },
     ];
 
     const results = [];
@@ -201,23 +204,22 @@ app.post('/api/admin/seed', async (req, res) => {
       const existing = await User.findOne({ emp_id: u.emp_id });
       const forceId = u._forceId; delete u._forceId;
       if (existing) {
-        await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: existing.password_hash } });
-        // If this is a manager, update the ID reference for employees
+        // Reset password for existing users too
+        await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: hash(pw) } });
         if (forceId) {
-          results.push({ emp_id: u.emp_id, action: 'updated', _id: existing._id });
-          // Fix: remap manager_id for subsequent employees
+          results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
           users.forEach(eu => { if (eu.manager_id === forceId) eu.manager_id = existing._id; });
         } else {
-          results.push({ emp_id: u.emp_id, action: 'updated', _id: existing._id });
+          results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
         }
       } else {
         const newId = forceId || uuidv4();
         await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
-        results.push({ emp_id: u.emp_id, action: 'created', _id: newId });
+        results.push({ emp_id: u.emp_id, email: u.email, action: 'created', _id: newId });
       }
     }
 
-    res.json({ success: true, message: `Seed complete`, data: results, password: 'R@m%Brp@26' });
+    res.json({ success: true, message: 'Seed complete', data: results, password: pw });
   } catch (err) {
     console.error('Seed error:', err);
     res.status(500).json({ success: false, message: err.message });

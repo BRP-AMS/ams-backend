@@ -1,26 +1,50 @@
 /**
  * Shared email sender.
  *
- * Priority order (SMTP first for branded emails):
- *   1. SMTP_HOST set        → sends via nodemailer SMTP (branded from noreply.brpams@gmail.com)
- *   2. RESEND_API_KEY set   → sends via Resend HTTP API
- *   3. FIREBASE_API_KEY set → sends via Firebase Auth REST API (fallback)
+ * Priority order:
+ *   1. GMAIL_RELAY_URL set  → sends via Google Apps Script relay (HTTPS, port 443 — works everywhere)
+ *   2. SMTP_HOST set        → sends via nodemailer SMTP (works locally, NOT on Render)
+ *   3. FIREBASE_API_KEY set → Firebase Auth REST API (password reset / verify only)
  *
- * SMTP on port 587 (STARTTLS) works on most hosts including local dev.
- * Firebase is kept as fallback for Render free-tier (blocks SMTP ports).
+ * Render free-tier silently drops SMTP traffic. The Google Apps Script relay
+ * sends via Gmail's own infrastructure over HTTPS — always works.
  */
 
 const nodemailer = require('nodemailer');
 
-// ── FROM address (sanitised) ─────────────────────────────────────────────────
+// ── FROM address ─────────────────────────────────────────────────────────────
 const rawFrom = (process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@example.com')
   .replace(/^"|"$/g, '').trim();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 1 — Nodemailer SMTP (preferred — branded emails)
+//  MODE 1 — Google Apps Script Email Relay (HTTPS, always works)
+// ═══════════════════════════════════════════════════════════════════════════════
+const GMAIL_RELAY_URL = process.env.GMAIL_RELAY_URL;
+
+const sendViaGmailRelay = async (to, subject, html) => {
+  if (!GMAIL_RELAY_URL) throw new Error('GMAIL_RELAY_URL not set');
+  console.log(`[Email/GmailRelay] Sending "${subject}" → ${to}`);
+  const res = await fetch(GMAIL_RELAY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, subject, html }),
+    redirect: 'follow',
+  });
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { raw: text }; }
+  if (body.success === false) {
+    console.error('[Email/GmailRelay] ❌ FAILED:', JSON.stringify(body));
+    throw new Error(body.error || 'Gmail relay failed');
+  }
+  console.log('[Email/GmailRelay] ✅ Sent OK');
+  return body;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MODE 2 — Nodemailer SMTP (works locally, NOT on Render)
 // ═══════════════════════════════════════════════════════════════════════════════
 let transporter = null;
-let smtpVerified = false;
 
 if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   const smtpPort   = parseInt(process.env.SMTP_PORT || '587');
@@ -39,17 +63,6 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     greetingTimeout:   5000,
     socketTimeout:     10000,
   });
-  transporter.verify()
-    .then(() => {
-      smtpVerified = true;
-      console.log('✅ SMTP mailer ready  |  from:', rawFrom);
-    })
-    .catch(err => {
-      smtpVerified = false;
-      transporter = null; // Disable SMTP so fallback is instant
-      console.error('❌ SMTP verify FAILED:', err.message, '| code:', err.code,
-        '— SMTP disabled, using Firebase/Resend fallback');
-    });
 }
 
 const sendViaSMTP = async (to, subject, html) => {
@@ -61,44 +74,17 @@ const sendViaSMTP = async (to, subject, html) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 2 — Resend HTTP API
-// ═══════════════════════════════════════════════════════════════════════════════
-const RESEND_KEY = process.env.RESEND_API_KEY;
-
-const sendViaResend = async (to, subject, html) => {
-  console.log(`[Email/Resend] Sending "${subject}" → ${to}`);
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${RESEND_KEY}`,
-      'Content-Type':  'application/json',
-    },
-    body: JSON.stringify({ from: rawFrom, to: [to], subject, html }),
-  });
-  const body = await res.json();
-  if (!res.ok) {
-    console.error('[Email/Resend] ❌ FAILED:', JSON.stringify(body));
-    throw new Error(body.message || `Resend API error ${res.status}`);
-  }
-  console.log('[Email/Resend] ✅ Sent OK. id:', body.id);
-  return body;
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 3 — Firebase Auth REST API (fallback)
+//  MODE 3 — Firebase Auth REST API (fallback for password reset / verify)
 // ═══════════════════════════════════════════════════════════════════════════════
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
 const { sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser } =
   require('./firebaseMailer');
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Unified sendMail — SMTP first, then Resend, then Firebase fallback
+//  Unified sendMail
 // ═══════════════════════════════════════════════════════════════════════════════
-const primaryMode = transporter ? 'smtp' : RESEND_KEY ? 'resend' : FIREBASE_API_KEY ? 'firebase' : 'none';
+const primaryMode = GMAIL_RELAY_URL ? 'gmail_relay' : transporter ? 'smtp' : FIREBASE_API_KEY ? 'firebase' : 'none';
 console.log(`[Mailer] Primary mode: ${primaryMode.toUpperCase()}  |  from: ${rawFrom}`);
-if (FIREBASE_API_KEY && primaryMode !== 'firebase') {
-  console.log(`[Mailer] Firebase available as fallback`);
-}
 
 /**
  * Send an email.
@@ -108,7 +94,16 @@ if (FIREBASE_API_KEY && primaryMode !== 'firebase') {
  * @param {object} options  - { type: 'VERIFY_EMAIL' | 'PASSWORD_RESET', password: '...' }
  */
 const sendMail = async (to, subject, html, options = {}) => {
-  // ── Try SMTP first (branded emails from noreply.brpams@gmail.com) ──
+  // ── Try Google Apps Script relay first (HTTPS, works on Render) ──
+  if (GMAIL_RELAY_URL) {
+    try {
+      return await sendViaGmailRelay(to, subject, html);
+    } catch (err) {
+      console.error('[Email/GmailRelay] ❌ Failed:', err.message, '— trying fallback...');
+    }
+  }
+
+  // ── Try SMTP (works locally) ──
   if (transporter) {
     try {
       return await sendViaSMTP(to, subject, html);
@@ -117,22 +112,12 @@ const sendMail = async (to, subject, html, options = {}) => {
     }
   }
 
-  // ── Try Resend ──
-  if (RESEND_KEY) {
-    try {
-      return await sendViaResend(to, subject, html);
-    } catch (err) {
-      console.error('[Email/Resend] ❌ Failed:', err.message, '— trying fallback...');
-    }
-  }
-
-  // ── Firebase fallback ──
+  // ── Firebase fallback (password reset / verify only) ──
   if (FIREBASE_API_KEY) {
     const type = options.type
       || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
           ? 'VERIFY_EMAIL'
           : 'PASSWORD_RESET');
-
     if (type === 'VERIFY_EMAIL') {
       return sendVerificationEmail(to, options.password);
     }

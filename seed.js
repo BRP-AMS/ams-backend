@@ -24,7 +24,6 @@ const seed = async () => {
   // ── IDs ──────────────────────────────────────────────────────────────
   const superAdminId = uuidv4();
   const adminId      = uuidv4();
-  const HRId      = uuidv4();
  
 
   // ── Users ─────────────────────────────────────────────────────────────
@@ -35,10 +34,6 @@ const seed = async () => {
     
     // Admin (Make sure there is no stray ' above this line)
     { _id: adminId, emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmail.com', password_hash: hash(pw), role: 'admin', department: 'Head Office Operations', manager_id: null, phone: '9000000002' },
- 
-    // HR (Make sure there is no stray ' above this line)
-    { _id: HRId, emp_id: 'ADM001', name: 'Admin User', email: 'ajaysiriyapu@gmail.com', password_hash: hash(pw), role: 'HR', department: 'Head Office Operations', manager_id: null, phone: '9000000003' },
- 
   ]);
 
  

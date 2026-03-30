@@ -267,19 +267,8 @@ router.post('/forgot-password', forgotLimiter, [
 
     if (!user) return res.json(OK);
 
-    // Try Firebase first (sends reset email via Firebase's SMTP relay)
-    if (FIREBASE_API_KEY) {
-      try {
-        const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
-        await sendPasswordResetEmail(user.email);
-        await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
-        return res.json(OK);
-      } catch (err) {
-        console.error('[Auth] Firebase reset email failed, falling back to custom:', err.message);
-      }
-    }
-
-    // Fallback: custom token flow (for local dev / non-Firebase setups)
+    // Always use custom token flow with SMTP (branded email from noreply.brpams@gmail.com)
+    // SMTP → Resend → Firebase fallback is handled inside sendMail()
     const rawToken  = generateToken();
     const hashedTok = hashToken(rawToken);
     const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min

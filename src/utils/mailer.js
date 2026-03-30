@@ -1,13 +1,13 @@
 /**
  * Shared email sender.
  *
- * Supports THREE modes (auto-detected, first match wins):
- *   1. FIREBASE_API_KEY set → sends via Firebase Auth REST API (works on Render)
- *   2. RESEND_API_KEY set   → sends via Resend HTTP API (works on Render)
- *   3. SMTP_HOST set        → sends via nodemailer SMTP  (works locally / non-Render)
+ * Priority order (SMTP first for branded emails):
+ *   1. SMTP_HOST set        → sends via nodemailer SMTP (branded from noreply.brpams@gmail.com)
+ *   2. RESEND_API_KEY set   → sends via Resend HTTP API
+ *   3. FIREBASE_API_KEY set → sends via Firebase Auth REST API (fallback)
  *
- * Render free-tier blocks ALL outbound SMTP (ports 25, 465, 587).
- * Firebase Auth REST API uses HTTPS (port 443) — always works.
+ * SMTP on port 587 (STARTTLS) works on most hosts including local dev.
+ * Firebase is kept as fallback for Render free-tier (blocks SMTP ports).
  */
 
 const nodemailer = require('nodemailer');
@@ -17,11 +17,47 @@ const rawFrom = (process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@exam
   .replace(/^"|"$/g, '').trim();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 1 — Firebase Auth REST API  (preferred on Render)
+//  MODE 1 — Nodemailer SMTP (preferred — branded emails)
 // ═══════════════════════════════════════════════════════════════════════════════
-const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
-const { sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser } =
-  require('./firebaseMailer');
+let transporter = null;
+let smtpVerified = false;
+
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+  const smtpPort   = parseInt(process.env.SMTP_PORT || '587');
+  const smtpSecure = process.env.SMTP_SECURE != null
+    ? process.env.SMTP_SECURE === 'true'
+    : smtpPort === 465;
+
+  console.log('[Mailer] SMTP mode →', process.env.SMTP_HOST + ':' + smtpPort, smtpSecure ? '(SSL)' : '(STARTTLS)');
+  transporter = nodemailer.createTransport({
+    host:   process.env.SMTP_HOST,
+    port:   smtpPort,
+    secure: smtpSecure,
+    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    tls:    { rejectUnauthorized: false },
+    connectionTimeout: 15000,
+    greetingTimeout:   15000,
+    socketTimeout:     20000,
+  });
+  transporter.verify()
+    .then(() => {
+      smtpVerified = true;
+      console.log('✅ SMTP mailer ready  |  from:', rawFrom);
+    })
+    .catch(err => {
+      smtpVerified = false;
+      console.error('❌ SMTP verify FAILED:', err.message, '| code:', err.code,
+        '— will fall back to Firebase/Resend');
+    });
+}
+
+const sendViaSMTP = async (to, subject, html) => {
+  if (!transporter) throw new Error('SMTP not configured');
+  console.log(`[Email/SMTP] Sending "${subject}" → ${to}  (from: ${rawFrom})`);
+  const info = await transporter.sendMail({ from: rawFrom, to, subject, html });
+  console.log('[Email/SMTP] ✅ Sent OK. MessageId:', info.messageId);
+  return info;
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MODE 2 — Resend HTTP API
@@ -48,55 +84,49 @@ const sendViaResend = async (to, subject, html) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 3 — Nodemailer SMTP  (local / non-Render)
+//  MODE 3 — Firebase Auth REST API (fallback)
 // ═══════════════════════════════════════════════════════════════════════════════
-let transporter = null;
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const { sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser } =
+  require('./firebaseMailer');
 
-if (!FIREBASE_API_KEY && !RESEND_KEY && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-  const smtpPort   = parseInt(process.env.SMTP_PORT || '465');
-  const smtpSecure = process.env.SMTP_SECURE != null
-    ? process.env.SMTP_SECURE === 'true'
-    : smtpPort === 465;
-
-  console.log('[Mailer] SMTP mode →', process.env.SMTP_HOST + ':' + smtpPort, smtpSecure ? '(SSL)' : '(STARTTLS)');
-  transporter = nodemailer.createTransport({
-    host:   process.env.SMTP_HOST,
-    port:   smtpPort,
-    secure: smtpSecure,
-    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    tls:    { rejectUnauthorized: false },
-    connectionTimeout: 15000,
-    greetingTimeout:   15000,
-    socketTimeout:     20000,
-  });
-  transporter.verify()
-    .then(() => console.log('✅ SMTP mailer ready  |  from:', rawFrom))
-    .catch(err => console.error('❌ SMTP verify FAILED:', err.message, '| code:', err.code));
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Unified sendMail — SMTP first, then Resend, then Firebase fallback
+// ═══════════════════════════════════════════════════════════════════════════════
+const primaryMode = transporter ? 'smtp' : RESEND_KEY ? 'resend' : FIREBASE_API_KEY ? 'firebase' : 'none';
+console.log(`[Mailer] Primary mode: ${primaryMode.toUpperCase()}  |  from: ${rawFrom}`);
+if (FIREBASE_API_KEY && primaryMode !== 'firebase') {
+  console.log(`[Mailer] Firebase available as fallback`);
 }
-
-const sendViaSMTP = async (to, subject, html) => {
-  console.log(`[Email/SMTP] Sending "${subject}" → ${to}  (from: ${rawFrom})`);
-  const info = await transporter.sendMail({ from: rawFrom, to, subject, html });
-  console.log('[Email/SMTP] ✅ Sent OK. MessageId:', info.messageId);
-  return info;
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Unified sendMail
-// ═══════════════════════════════════════════════════════════════════════════════
-const mode = FIREBASE_API_KEY ? 'firebase' : RESEND_KEY ? 'resend' : transporter ? 'smtp' : 'none';
-console.log(`[Mailer] Active mode: ${mode.toUpperCase()}  |  from: ${rawFrom}`);
 
 /**
  * Send an email.
  * @param {string} to       - recipient email
  * @param {string} subject  - email subject
- * @param {string} html     - HTML body (used by SMTP/Resend; Firebase uses its own templates)
+ * @param {string} html     - HTML body
  * @param {object} options  - { type: 'VERIFY_EMAIL' | 'PASSWORD_RESET', password: '...' }
  */
 const sendMail = async (to, subject, html, options = {}) => {
-  if (mode === 'firebase') {
-    // Firebase sends its own templated emails — determine type from subject/options
+  // ── Try SMTP first (branded emails from noreply.brpams@gmail.com) ──
+  if (transporter) {
+    try {
+      return await sendViaSMTP(to, subject, html);
+    } catch (err) {
+      console.error('[Email/SMTP] ❌ Failed:', err.message, '— trying fallback...');
+    }
+  }
+
+  // ── Try Resend ──
+  if (RESEND_KEY) {
+    try {
+      return await sendViaResend(to, subject, html);
+    } catch (err) {
+      console.error('[Email/Resend] ❌ Failed:', err.message, '— trying fallback...');
+    }
+  }
+
+  // ── Firebase fallback ──
+  if (FIREBASE_API_KEY) {
     const type = options.type
       || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
           ? 'VERIFY_EMAIL'
@@ -108,10 +138,7 @@ const sendMail = async (to, subject, html, options = {}) => {
     return sendPasswordResetEmail(to);
   }
 
-  if (mode === 'resend') return sendViaResend(to, subject, html);
-  if (mode === 'smtp')   return sendViaSMTP(to, subject, html);
-
-  console.error('[Email] ⚠️  No email provider configured! Set FIREBASE_API_KEY, RESEND_API_KEY, or SMTP_HOST. Skipping:', subject, '→', to);
+  console.error('[Email] ⚠️  No email provider available! Skipping:', subject, '→', to);
 };
 
-module.exports = { sendMail, transporter, mode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };
+module.exports = { sendMail, transporter, mode: primaryMode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };

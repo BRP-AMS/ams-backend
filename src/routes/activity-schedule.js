@@ -50,20 +50,22 @@ router.get('/', authenticate, async (req, res) => {
       .sort({ scheduled_date: 1, created_at: -1 })
       .lean();
 
-    // Populate creator, assigned_to, initiated_by, completed_by names
+    // Populate creator, assigned_to, assigned_by, manager, initiated_by, completed_by names
     const userIds = new Set();
     schedules.forEach(s => {
       if (s.created_by)   userIds.add(s.created_by);
       if (s.assigned_to)  userIds.add(s.assigned_to);
+      if (s.assigned_by)  userIds.add(s.assigned_by);
+      if (s.manager_id)   userIds.add(s.manager_id);
       if (s.initiated_by) userIds.add(s.initiated_by);
       if (s.completed_by) userIds.add(s.completed_by);
     });
 
     const users = await User.find({ _id: { $in: [...userIds] } })
-      .select('_id name emp_id')
+      .select('_id name emp_id role')
       .lean();
     const userMap = {};
-    users.forEach(u => { userMap[u._id] = { name: u.name, emp_id: u.emp_id }; });
+    users.forEach(u => { userMap[u._id] = { name: u.name, emp_id: u.emp_id, role: u.role }; });
 
     // Attach documents for completed schedules
     const completedIds = schedules.filter(s => s.status === 'Completed').map(s => s._id);
@@ -76,16 +78,24 @@ router.get('/', authenticate, async (req, res) => {
       docsMap[d.schedule_id].push(d);
     });
 
-    const result = schedules.map(s => ({
-      ...s,
-      id:                s._id,
-      created_by_name:   userMap[s.created_by]?.name   || null,
-      assigned_to_name:  userMap[s.assigned_to]?.name  || null,
-      assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
-      initiated_by_name: userMap[s.initiated_by]?.name || null,
-      completed_by_name: userMap[s.completed_by]?.name || null,
-      documents:         docsMap[s._id] || [],
-    }));
+    const rl = (r) => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+    const result = schedules.map(s => {
+      const assignerUser = userMap[s.assigned_by] || userMap[s.created_by];
+      return {
+        ...s,
+        id:                s._id,
+        created_by_name:   userMap[s.created_by]?.name   || null,
+        assigned_to_name:  userMap[s.assigned_to]?.name  || null,
+        assigned_to_empid: userMap[s.assigned_to]?.emp_id || null,
+        assigned_by_name:  s.assigned_by_name || (assignerUser ? `${assignerUser.name} (${rl(assignerUser.role)})` : null),
+        assigned_by_empid: assignerUser?.emp_id || null,
+        manager_name:      userMap[s.manager_id]?.name   || null,
+        manager_empid:     userMap[s.manager_id]?.emp_id  || null,
+        initiated_by_name: userMap[s.initiated_by]?.name || null,
+        completed_by_name: userMap[s.completed_by]?.name || null,
+        documents:         docsMap[s._id] || [],
+      };
+    });
 
     res.json({ success: true, data: result });
   } catch (err) {
@@ -121,7 +131,7 @@ router.get('/my-completed', authenticate, async (req, res) => {
 // ── POST /activity-schedule — create single (manager/admin) ───────────────
 router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
-    const { title, description, scheduled_date, location, assigned_emp_id, assigned_to: assignedToId } = req.body;
+    const { title, description, scheduled_date, location, assigned_emp_id, assigned_to: assignedToId, manager_id } = req.body;
     if (!title?.trim())      return res.status(422).json({ success: false, message: 'Title is required' });
     if (!scheduled_date)     return res.status(422).json({ success: false, message: 'Scheduled date is required' });
 
@@ -131,20 +141,27 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
       if (!emp) return res.status(404).json({ success: false, message: `Employee ${assigned_emp_id} not found` });
       assigned_to = emp._id;
     } else if (assignedToId) {
-      // Accept user _id directly (from mobile / dropdown)
       const emp = await User.findById(assignedToId).select('_id').lean();
       if (!emp) return res.status(404).json({ success: false, message: 'Assigned employee not found' });
       assigned_to = emp._id;
     }
 
+    // Resolve assigned_by name from current user
+    const creator = await User.findById(req.user.id).select('name role emp_id').lean();
+    const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[creator?.role] || '';
+    const assignedByName = creator ? `${creator.name} (${roleLabel})` : null;
+
     const schedule = await ActivitySchedule.create({
-      _id:            uuidv4(),
-      title:          title.trim(),
-      description:    description?.trim() || null,
+      _id:              uuidv4(),
+      title:            title.trim(),
+      description:      description?.trim() || null,
       scheduled_date,
-      location:       location?.trim() || null,
+      location:         location?.trim() || null,
       assigned_to,
-      created_by:     req.user.id,
+      created_by:       req.user.id,
+      assigned_by:      req.user.id,
+      assigned_by_name: assignedByName,
+      manager_id:       manager_id || null,
     });
 
     res.status(201).json({ success: true, data: { ...schedule.toObject(), id: schedule._id } });

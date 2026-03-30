@@ -169,6 +169,9 @@ const activityScheduleSchema = new mongoose.Schema({
   location:         { type: String, default: null },
   assigned_to:      { type: String, ref: 'User', default: null }, // null = all employees
   created_by:       { type: String, ref: 'User', required: true },
+  assigned_by:      { type: String, ref: 'User', default: null }, // who assigned this activity
+  assigned_by_name: { type: String, default: null },               // quick-display name
+  manager_id:       { type: String, ref: 'User', default: null }, // selected manager
   status:           { type: String, enum: ['Pending', 'Initiated', 'Completed'], default: 'Pending' },
   initiated_by:     { type: String, ref: 'User', default: null },
   initiated_at:     { type: Date, default: null },

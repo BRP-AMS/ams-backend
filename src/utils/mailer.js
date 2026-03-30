@@ -35,9 +35,9 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     secure: smtpSecure,
     auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     tls:    { rejectUnauthorized: false },
-    connectionTimeout: 15000,
-    greetingTimeout:   15000,
-    socketTimeout:     20000,
+    connectionTimeout: 5000,
+    greetingTimeout:   5000,
+    socketTimeout:     10000,
   });
   transporter.verify()
     .then(() => {
@@ -46,8 +46,9 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     })
     .catch(err => {
       smtpVerified = false;
+      transporter = null; // Disable SMTP so fallback is instant
       console.error('❌ SMTP verify FAILED:', err.message, '| code:', err.code,
-        '— will fall back to Firebase/Resend');
+        '— SMTP disabled, using Firebase/Resend fallback');
     });
 }
 

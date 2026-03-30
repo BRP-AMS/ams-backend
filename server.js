@@ -173,6 +173,94 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
+// ── Temporary seed endpoint (remove after use) ───────────────────────────
+app.post('/api/admin/seed', async (req, res) => {
+  try {
+    const bcrypt = require('bcryptjs');
+    const { User } = require('./src/models/database');
+    const hash = (pw) => bcrypt.hashSync(pw, 10);
+    const pw = 'R@m%Brp@26';
+
+    const mgr1Id = uuidv4();
+    const mgr2Id = uuidv4();
+
+    const users = [
+      { emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', assigned_block: null, assigned_district: null },
+      { emp_id: 'ADM001',  name: 'Admin User',  email: 'ajay.rges@gmail.com', role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', assigned_block: null, assigned_district: null },
+      { emp_id: 'HR001',   name: 'HR Manager',  email: 'hr.brpams@gmail.com', role: 'hr', department: 'Human Resources', manager_id: null, phone: '9000000003', assigned_block: null, assigned_district: null },
+      { emp_id: 'MGR001',  name: 'Rajesh Kumar',  email: 'mgr1.brpams@gmail.com', role: 'manager', department: 'Field Operations', manager_id: null, phone: '9000000004', assigned_block: 'Agartala', assigned_district: 'West Tripura', _forceId: mgr1Id },
+      { emp_id: 'MGR002',  name: 'Priya Sharma',  email: 'mgr2.brpams@gmail.com', role: 'manager', department: 'Marketing', manager_id: null, phone: '9000000005', assigned_block: 'Udaipur', assigned_district: 'South Tripura', _forceId: mgr2Id },
+      { emp_id: 'EMP001',  name: 'Amit Das',      email: 'emp1.brpams@gmail.com', role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000006', assigned_block: 'Agartala', assigned_district: 'West Tripura' },
+      { emp_id: 'EMP002',  name: 'Suman Deb',     email: 'emp2.brpams@gmail.com', role: 'employee', department: 'Field Operations', manager_id: mgr1Id, phone: '9000000007', assigned_block: 'Block A', assigned_district: 'West Tripura' },
+      { emp_id: 'EMP003',  name: 'Ritu Nath',     email: 'emp3.brpams@gmail.com', role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000008', assigned_block: 'Udaipur', assigned_district: 'South Tripura' },
+      { emp_id: 'EMP004',  name: 'Bikram Reang',  email: 'emp4.brpams@gmail.com', role: 'employee', department: 'Marketing', manager_id: mgr2Id, phone: '9000000009', assigned_block: 'District 1', assigned_district: 'South Tripura' },
+    ];
+
+    const results = [];
+    for (const u of users) {
+      const existing = await User.findOne({ emp_id: u.emp_id });
+      const forceId = u._forceId; delete u._forceId;
+      if (existing) {
+        await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: existing.password_hash } });
+        // If this is a manager, update the ID reference for employees
+        if (forceId) {
+          results.push({ emp_id: u.emp_id, action: 'updated', _id: existing._id });
+          // Fix: remap manager_id for subsequent employees
+          users.forEach(eu => { if (eu.manager_id === forceId) eu.manager_id = existing._id; });
+        } else {
+          results.push({ emp_id: u.emp_id, action: 'updated', _id: existing._id });
+        }
+      } else {
+        const newId = forceId || uuidv4();
+        await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
+        results.push({ emp_id: u.emp_id, action: 'created', _id: newId });
+      }
+    }
+
+    res.json({ success: true, message: `Seed complete`, data: results, password: 'R@m%Brp@26' });
+  } catch (err) {
+    console.error('Seed error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── Temporary email debug endpoint (remove after testing) ─────────────────
+app.post('/api/admin/test-email', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: 'email required' });
+  const results = {};
+
+  // Test 1: Firebase password reset
+  try {
+    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+    if (FIREBASE_API_KEY) {
+      const fbRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
+      });
+      const fbData = await fbRes.json();
+      results.firebase = { status: fbRes.status, ok: fbRes.ok, data: fbData };
+    } else {
+      results.firebase = { status: 'skipped', reason: 'no FIREBASE_API_KEY' };
+    }
+  } catch (err) {
+    results.firebase = { error: err.message };
+  }
+
+  // Test 2: SMTP
+  try {
+    const { sendMail, mode } = require('./src/utils/mailer');
+    results.mailer_mode = mode;
+    await sendMail(email, '[BRP AMS] Email Test', '<h2>BRP-AMS Email Test</h2><p>This confirms email delivery is working. Time: ' + new Date().toISOString() + '</p>');
+    results.smtp = { status: 'sent' };
+  } catch (err) {
+    results.smtp = { error: err.message };
+  }
+
+  res.json({ success: true, results });
+});
+
 // ── Error Handler ─────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);

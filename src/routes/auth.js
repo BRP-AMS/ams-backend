@@ -83,14 +83,34 @@ const emailLayout = (title, bodyHtml) => `
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────
 router.post('/login', loginLimiter, [
-  body('email').isEmail().normalizeEmail(),
-  body('password').notEmpty(),
+  body('email').notEmpty().withMessage('Email or Employee ID is required'),
+  body('password').notEmpty().withMessage('Password is required'),
 ], validate, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email, is_active: 1 }).lean();
+    let { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ success: false, message: 'Email/ID and password required' });
+    
+    const identifier = email.trim().toLowerCase();
+    console.log(`[Login] Attempt for: "${identifier}"`);
 
-    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    // Search by email OR emp_id (case-insensitive for both)
+    const user = await User.findOne({
+      $or: [
+        { email: identifier }, 
+        { emp_id: { $regex: new RegExp('^' + identifier + '$', 'i') } }
+      ],
+      is_active: 1
+    }).lean();
+
+    if (!user) {
+      console.log(`[Login] FAILED: User not found for identifier "${identifier}"`);
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    }
+
+    const isMatch = bcrypt.compareSync(password, user.password_hash);
+    console.log(`[Login] User found: ${user.emp_id} | Password match: ${isMatch}`);
+
+    if (!isMatch) {
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
@@ -221,7 +241,7 @@ router.put('/change-password', authenticate, [
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
 // SECURITY FIX: token sent via email only — never returned in response
 router.post('/forgot-password', forgotLimiter, [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }).withMessage('Valid email required'),
 ], validate, async (req, res) => {
   try {
     const { email } = req.body;
@@ -447,6 +467,49 @@ router.post('/verify-phone-otp', authenticate, [
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'PHONE_VERIFIED', ip_address: req.ip });
     res.json({ success: true, message: 'Phone verified successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/set-password ──────────────────────────────────────────
+// Used by new users to set their password for the first time via invite link
+router.post('/set-password', [
+  body('token').notEmpty().withMessage('Token is required'),
+  body('password')
+    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
+    .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
+    .matches(/[0-9]/).withMessage('Must contain at least one number'),
+], validate, async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    const hashedTok = hashToken(token);
+
+    const user = await User.findOne({
+      pwd_reset_token:   hashedTok,
+      pwd_reset_expires: { $gt: new Date() },
+      is_active: 1,
+    }).lean();
+
+    if (!user)
+      return res.status(400).json({ success: false, message: 'Invite link is invalid or has expired.' });
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: {
+        password_hash:     bcrypt.hashSync(password, 12),
+        pwd_reset_token:   null,
+        pwd_reset_expires: null,
+        // Mark as verified since they clicked the set-password link (which implies email access)
+        email_verified:    true,
+        email_verify_token:   null,
+        email_verify_expires: null,
+      }
+    });
+    
+    await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'SET_INITIAL_PASSWORD', ip_address: req.ip });
+
+    res.json({ success: true, message: 'Password set successfully! Your account is now active.' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });

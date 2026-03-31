@@ -392,15 +392,18 @@ document.getElementById('resetForm').addEventListener('submit', async function(e
     if (data.success) {
       document.getElementById('resetForm').style.display = 'none';
       document.getElementById('successMsg').style.display = 'block';
+      alert('SUCCESS! Password has been reset. You can now login with your new password.');
     } else {
       err.textContent = (data.message || 'Reset failed') + ' (HTTP ' + res.status + ')';
       err.style.display = 'block';
       btn.disabled = false; btn.textContent = 'Reset Password';
+      alert('ERROR: ' + (data.message || 'Reset failed') + ' (HTTP ' + res.status + ')');
     }
   } catch(e) {
     err.textContent = 'Network error: ' + e.message;
     err.style.display = 'block';
     btn.disabled = false; btn.textContent = 'Reset Password';
+    alert('NETWORK ERROR: ' + e.message);
   }
 });
 </script>

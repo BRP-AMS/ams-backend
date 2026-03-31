@@ -184,62 +184,9 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     }
 
-    // Generate a secure reset token (5 min expiry) and send email
-    const crypto     = require('crypto');
-    const genToken   = () => crypto.randomBytes(32).toString('hex');
-    const hashToken  = (t) => crypto.createHash('sha256').update(t).digest('hex');
-
-    const rawResetToken  = genToken();
-    const hashedResetTok = hashToken(rawResetToken);
-    const resetExpires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
-
-    // Set a temporary locked password + reset token so user MUST use the link
-    const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
-    await User.findByIdAndUpdate(req.params.id, {
-      $set: {
-        password_hash:     bcrypt.hashSync(tempPassword, 12),
-        pwd_reset_token:   hashedResetTok,
-        pwd_reset_expires: resetExpires,
-      }
-    });
-
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
-    const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
-
-    // Send reset email
-    await sendMail(target.email, '[BRP AMS] Password Reset — Set Your New Password',
-      `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-      <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
-      <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-        style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
-      <tr><td style="background:#0b1e3b;padding:28px 32px;">
-        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
-        <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
-      </td></tr>
-      <tr><td style="padding:32px;">
-        <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Password Reset by Admin</h2>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${target.name}</strong>, your password has been reset by an administrator.
-          Click the button below to set a new password.
-        </p>
-        <p style="color:#dc2626;font-size:13px;font-weight:700;">
-          ⚠️ This link expires in <strong>5 minutes</strong>. Act quickly!
-        </p>
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${resetUrl}"
-            style="background:#1e3a8a;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            🔑 Set New Password
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:11px;word-break:break-all;">Or copy: ${resetUrl}</p>
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 16px;">
-        <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
-      </td></tr></table>
-      </td></tr></table></body></html>`
-    );
+    // Send Firebase password reset email — user clicks Firebase's hosted reset page
+    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+    await sendPasswordResetEmail(target.email);
 
     // In-app notification as well
     try {

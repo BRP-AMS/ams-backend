@@ -148,6 +148,7 @@ router.post('/', authenticate, authorize('admin'), [
       phone:                phone            || null,
       assigned_block:       assignedBlock    || null,
       assigned_district:    assignedDistrict || null,
+      is_active:            1,
       email_verified:       false,
       email_verify_token:   hashedVerifyTok,
       email_verify_expires: verifyExpires,

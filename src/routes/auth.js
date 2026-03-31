@@ -305,7 +305,6 @@ router.get('/reset-password-page', async (req, res) => {
   const user = await User.findOne({
     pwd_reset_token:   hashedTok,
     pwd_reset_expires: { $gt: new Date() },
-    is_active: 1,
   }).lean();
 
   if (!user) {
@@ -421,7 +420,6 @@ router.post('/reset-password', [
     const user = await User.findOne({
       pwd_reset_token:   hashedTok,
       pwd_reset_expires: { $gt: new Date() },
-      is_active: 1,
     }).lean();
 
     if (!user)
@@ -433,6 +431,7 @@ router.post('/reset-password', [
         pwd_reset_token:   null,
         pwd_reset_expires: null,
         pwd_changed_at:    new Date(),
+        is_active:         1,
       }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });

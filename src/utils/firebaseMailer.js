@@ -12,7 +12,7 @@
 
 const crypto = require('crypto');
 
-const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyDCV0A6HA-ux0D7FCjN9Lq1uripmspnTuY';
 const FIREBASE_REST    = 'https://identitytoolkit.googleapis.com/v1';
 
 // Shadow password for Firebase-only users (not used for actual auth)

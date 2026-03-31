@@ -253,8 +253,8 @@ router.put('/change-password', authenticate, [
 });
 
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
-// Sends reset email via Gmail Relay (HTTPS, works on Render).
-// Email contains link to /reset-password?token=xxx on frontend.
+// Firebase Auth handles everything — sends reset email, hosts reset page.
+// On next login, password syncs back to MongoDB via Firebase verification.
 router.post('/forgot-password', forgotLimiter, [
   body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }).withMessage('Valid email required'),
 ], validate, async (req, res) => {
@@ -265,40 +265,8 @@ router.post('/forgot-password', forgotLimiter, [
     const OK = { success: true, message: 'If that email is registered you will receive a password reset email shortly.' };
     if (!user) return res.json(OK);
 
-    const rawToken  = generateToken();
-    const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 15 * 60 * 1000); // 15 min
-
-    await User.findByIdAndUpdate(user._id, {
-      $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
-    });
-
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
-    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
-    await sendMail(user.email, '[BRP AMS] Reset Your Password',
-      emailLayout('Password Reset Request', `
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
-        </p>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Click the button below. This link expires in <strong>15 minutes</strong>.
-        </p>
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${resetUrl}"
-            style="background:#1E3A8A;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Reset Password
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
-          Or copy: ${resetUrl}
-        </p>
-        <p style="color:#dc2626;font-size:13px;">
-          If you didn't request this, ignore this email. Your password won't change.
-        </p>
-      `),
-      { type: 'PASSWORD_RESET' }
-    );
+    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+    await sendPasswordResetEmail(user.email);
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
     res.json(OK);

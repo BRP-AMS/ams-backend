@@ -578,7 +578,7 @@ router.post('/resend-verification', authenticate, async (req, res) => {
       $set: { email_verify_token: hashedTok, email_verify_expires: expires }
     });
 
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
+    const BACKEND =  'https://ams-backend-3it1.onrender.com/api';
     const verifyUrl = `${BACKEND}/api/auth/verify-email/${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Verify Your Email',
       emailLayout('Verify Your Email Address', `

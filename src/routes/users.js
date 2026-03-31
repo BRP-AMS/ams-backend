@@ -171,7 +171,7 @@ router.post('/', authenticate, authorize('admin'), [
 });
 
 // PUT /api/users/:id/reset-password — must be before PUT /:id to avoid route shadowing
-router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
+router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
   console.log('[reset-password] called by', req.user?.id, 'for target', req.params.id);
   try {
     const target = await User.findById(req.params.id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
@@ -203,7 +203,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'
       }
     });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const FRONTEND = 'https://ams-frontend-web-q2lw.onrender.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
     // Send reset email

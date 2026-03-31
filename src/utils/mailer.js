@@ -112,19 +112,23 @@ const sendMail = async (to, subject, html, options = {}) => {
     }
   }
 
-  // ── Firebase fallback (password reset / verify only) ──
+  // ── Firebase fallback (verify email only — NOT password reset) ──
+  // Password reset must use our own email with our token link.
+  // Firebase sends its own reset link which doesn't work with our system.
   if (FIREBASE_API_KEY) {
     const type = options.type
       || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
           ? 'VERIFY_EMAIL'
-          : 'PASSWORD_RESET');
+          : null);
     if (type === 'VERIFY_EMAIL') {
       return sendVerificationEmail(to, options.password);
     }
-    return sendPasswordResetEmail(to);
   }
 
-  console.error('[Email] ⚠️  No email provider available! Skipping:', subject, '→', to);
+  // If we get here, all providers failed — throw so caller knows
+  const err = new Error('All email providers failed');
+  console.error('[Email] ⚠️  ' + err.message + ':', subject, '→', to);
+  throw err;
 };
 
 module.exports = { sendMail, transporter, mode: primaryMode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };

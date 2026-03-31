@@ -381,21 +381,25 @@ document.getElementById('resetForm').addEventListener('submit', async function(e
   btn.disabled = true; btn.textContent = 'Resetting...';
 
   try {
-    const res = await fetch('/api/auth/reset-password', {
+    const res = await fetch(window.location.origin + '/api/auth/reset-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: '${token}', newPassword: pw })
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch(_) { data = { success: false, message: 'Bad response: ' + text.substring(0, 100) }; }
     if (data.success) {
       document.getElementById('resetForm').style.display = 'none';
       document.getElementById('successMsg').style.display = 'block';
     } else {
-      err.textContent = data.message || 'Reset failed'; err.style.display = 'block';
+      err.textContent = (data.message || 'Reset failed') + ' (HTTP ' + res.status + ')';
+      err.style.display = 'block';
       btn.disabled = false; btn.textContent = 'Reset Password';
     }
   } catch(e) {
-    err.textContent = 'Network error. Please try again.'; err.style.display = 'block';
+    err.textContent = 'Network error: ' + e.message;
+    err.style.display = 'block';
     btn.disabled = false; btn.textContent = 'Reset Password';
   }
 });

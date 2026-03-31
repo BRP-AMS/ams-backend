@@ -253,8 +253,7 @@ router.put('/change-password', authenticate, [
 });
 
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
-// Uses Firebase to send password reset email (works on Render via HTTPS)
-// Falls back to custom token flow if Firebase is not configured
+// Custom token flow — sends branded email via Gmail Relay → SMTP fallback
 router.post('/forgot-password', forgotLimiter, [
   body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }).withMessage('Valid email required'),
 ], validate, async (req, res) => {
@@ -270,7 +269,7 @@ router.post('/forgot-password', forgotLimiter, [
     // Custom token flow — uses sendMail which routes through Gmail Relay → SMTP → Firebase
     const rawToken  = generateToken();
     const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
+    const expires   = new Date(Date.now() + 15 * 60 * 1000); // 15 min
 
     await User.findByIdAndUpdate(user._id, {
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
@@ -284,7 +283,7 @@ router.post('/forgot-password', forgotLimiter, [
           Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
         </p>
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Click the button below. This link expires in <strong>5 minutes</strong>.
+          Click the button below. This link expires in <strong>15 minutes</strong>.
         </p>
         <div style="text-align:center;margin:28px 0;">
           <a href="${resetUrl}"

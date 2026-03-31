@@ -10,13 +10,13 @@ const seed = async () => {
   await connectionPromise;
   console.log('🌱 Seeding database...');
 
-  // Clear existing data
-  await Promise.all([
-    AuditLog.deleteMany({}),
-    Notification.deleteMany({}),
-    AttendanceRecord.deleteMany({}),
-    User.deleteMany({}),
-  ]);
+//   // Clear existing data
+//   // await Promise.all([
+//   //   AuditLog.deleteMany({}),
+//   //   Notification.deleteMany({}),
+//   //   AttendanceRecord.deleteMany({}),
+//   //   User.deleteMany({}),
+//   // ]);
 
   const hash = (pw) => bcrypt.hashSync(pw, 10);
   const pw = 'R@m%Brp@26';
@@ -37,9 +37,6 @@ const seed = async () => {
   ]);
 
  
-
-  
-
   console.log('✅ Database seeded successfully!');
   console.log('\n📋 Login Credentials (all passwords: R@m%Brp@26)');
   console.log('─────────────────────────────────────────────────');
@@ -47,8 +44,6 @@ const seed = async () => {
   console.log('  Admin:        ajay.rges@gmal.com      (ADM001)');
   
   console.log('─────────────────────────────────────────────────');
-
-  process.exit(0);
 };
 
 seed().catch(err => { console.error(err); process.exit(1); });

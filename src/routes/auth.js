@@ -351,7 +351,8 @@ router.post('/forgot-password', forgotLimiter, [
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
     });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+
+    const FRONTEND = process.env.FRONTEND_URL;
     const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Reset Your Password',
       emailLayout('Password Reset Request', `
@@ -505,8 +506,7 @@ router.post('/reset-password', [
 // Called when user clicks the verification link in their welcome email.
 // Returns a self-contained HTML page — no redirect, no FRONTEND_URL needed.
 router.get('/verify-email/:token', async (req, res) => {
-  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
-
+  const FRONTEND = process.env.FRONTEND_URL ;
   const page = (success, title, message) => `<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

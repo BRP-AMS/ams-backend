@@ -458,6 +458,56 @@ router.post('/reset-password', [
   }
 });
 
+// ── GET /api/auth/test-reset-flow — TEMPORARY DEBUG (remove after testing) ──
+// Tests the full password reset flow end-to-end on the server itself
+router.get('/test-reset-flow', async (req, res) => {
+  const testEmail = req.query.email;
+  if (!testEmail) return res.json({ error: 'Pass ?email=xxx' });
+
+  const results = {};
+  try {
+    // Step 1: Find user
+    const user = await User.findOne({ email: testEmail }).lean();
+    if (!user) return res.json({ error: 'User not found', email: testEmail });
+    results.step1_user = { id: user._id, email: user.email, is_active: user.is_active, has_pwd_hash: !!user.password_hash };
+
+    // Step 2: Create a reset token (same as forgot-password does)
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedTok = hashToken(rawToken);
+    const expires = new Date(Date.now() + 30 * 60 * 1000);
+    await User.findByIdAndUpdate(user._id, { $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires } });
+    results.step2_token_saved = true;
+
+    // Step 3: Verify token can be found (same as reset-password POST does)
+    const found = await User.findOne({ pwd_reset_token: hashedTok, pwd_reset_expires: { $gt: new Date() } }).lean();
+    results.step3_token_found = !!found;
+
+    // Step 4: Hash new password and save (same as reset-password POST does)
+    const newPwd = 'TestReset@999';
+    const newHash = bcrypt.hashSync(newPwd, 12);
+    await User.findByIdAndUpdate(user._id, {
+      $set: { password_hash: newHash, pwd_reset_token: null, pwd_reset_expires: null, pwd_changed_at: new Date(), is_active: 1 }
+    });
+    results.step4_password_saved = true;
+
+    // Step 5: Read back and verify
+    const after = await User.findOne({ email: testEmail }).lean();
+    results.step5_new_pwd_matches = bcrypt.compareSync(newPwd, after.password_hash);
+    results.step5_old_pwd_matches = bcrypt.compareSync('Pass@123', after.password_hash);
+    results.step5_token_cleared = after.pwd_reset_token === null;
+
+    // Step 6: Restore original password
+    await User.findByIdAndUpdate(user._id, {
+      $set: { password_hash: bcrypt.hashSync('Pass@123', 12), pwd_reset_token: null, pwd_reset_expires: null }
+    });
+    results.step6_restored = true;
+
+    res.json({ success: true, results });
+  } catch (err) {
+    res.json({ success: false, error: err.message, stack: err.stack, results });
+  }
+});
+
 // ── Helper: error page HTML ──────────────────────────────────────────────
 function errorPage(title, message, frontendUrl) {
   return `<!DOCTYPE html>

@@ -104,10 +104,12 @@ async function sendPasswordResetEmail(email, password) {
   // Ensure user exists — Firebase silently skips non-existent users
   await ensureFirebaseUser(email, password);
 
+  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
   console.log(`[Firebase] Sending PASSWORD_RESET → ${email}`);
   const result = await firebasePost('accounts:sendOobCode', {
     requestType: 'PASSWORD_RESET',
     email,
+    continueUrl: `${FRONTEND}/login`,
   });
   console.log(`[Firebase] ✅ Password reset email queued for ${email}`);
   return result;

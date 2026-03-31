@@ -253,9 +253,8 @@ router.put('/change-password', authenticate, [
 });
 
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
-// Uses Firebase Auth to send password reset email.
-// Firebase hosts its own reset page — user sets new password there.
-// On next login, the login route syncs the Firebase password back to MongoDB.
+// Sends reset email via Gmail Relay (HTTPS, works on Render).
+// Email contains link to /reset-password?token=xxx on frontend.
 router.post('/forgot-password', forgotLimiter, [
   body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }).withMessage('Valid email required'),
 ], validate, async (req, res) => {
@@ -263,14 +262,43 @@ router.post('/forgot-password', forgotLimiter, [
     const { email } = req.body;
     const user = await User.findOne({ email, is_active: 1 }).lean();
 
-    // Always same response — prevents email enumeration
     const OK = { success: true, message: 'If that email is registered you will receive a password reset email shortly.' };
-
     if (!user) return res.json(OK);
 
-    // Send via Firebase — it handles the reset link + hosted reset page
-    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
-    await sendPasswordResetEmail(user.email);
+    const rawToken  = generateToken();
+    const hashedTok = hashToken(rawToken);
+    const expires   = new Date(Date.now() + 15 * 60 * 1000); // 15 min
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
+    });
+
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
+    await sendMail(user.email, '[BRP AMS] Reset Your Password',
+      emailLayout('Password Reset Request', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
+        </p>
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Click the button below. This link expires in <strong>15 minutes</strong>.
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <a href="${resetUrl}"
+            style="background:#1E3A8A;color:#fff;padding:14px 32px;border-radius:8px;
+                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+            Reset Password
+          </a>
+        </div>
+        <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
+          Or copy: ${resetUrl}
+        </p>
+        <p style="color:#dc2626;font-size:13px;">
+          If you didn't request this, ignore this email. Your password won't change.
+        </p>
+      `),
+      { type: 'PASSWORD_RESET' }
+    );
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
     res.json(OK);
@@ -331,9 +359,9 @@ router.post('/reset-password-otp', otpLimiter, [
 });
 
 // ── POST /api/auth/reset-password ────────────────────────────────────────
+// Accepts token + newPassword (no OTP required)
 router.post('/reset-password', [
   body('token').notEmpty().withMessage('Reset token is required'),
-  body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
   body('newPassword')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
@@ -341,7 +369,7 @@ router.post('/reset-password', [
     .matches(/[!@#$%^&*(),.?":{}|<>]/).withMessage('Must contain at least one special character'),
 ], validate, async (req, res) => {
   try {
-    const { token, otp, newPassword } = req.body;
+    const { token, newPassword } = req.body;
     const hashedTok = hashToken(token);
 
     const user = await User.findOne({
@@ -353,23 +381,11 @@ router.post('/reset-password', [
     if (!user)
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
 
-    // Validate OTP
-    if (!user.pwd_reset_otp || !user.pwd_reset_otp_expires)
-      return res.status(400).json({ success: false, message: 'No OTP found. Please request an OTP first.' });
-
-    if (new Date() > user.pwd_reset_otp_expires)
-      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
-
-    if (hashToken(otp) !== user.pwd_reset_otp)
-      return res.status(400).json({ success: false, message: 'Invalid OTP' });
-
     await User.findByIdAndUpdate(user._id, {
       $set: {
         password_hash:         bcrypt.hashSync(newPassword, 12),
         pwd_reset_token:       null,
         pwd_reset_expires:     null,
-        pwd_reset_otp:         null,
-        pwd_reset_otp_expires: null,
         pwd_changed_at:        new Date(),
       }
     });

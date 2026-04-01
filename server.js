@@ -51,6 +51,7 @@ app.use(helmet({
 }));
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || 'http://localhost:3000',
+  process.env.BACKEND_URL  || 'https://ams-backend-1-yvgm.onrender.com', // self-hosted pages (reset password)
   'http://localhost:3000',   // local dev
   'http://localhost:3001',   // local dev fallback
   'capacitor://localhost',   // Android Capacitor app
@@ -171,6 +172,117 @@ app.use('/api/activity-schedule', require('./src/routes/activity-schedule'));
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
+});
+
+// ── Temporary seed endpoint (remove after use) ───────────────────────────
+app.post('/api/admin/seed', async (req, res) => {
+  try {
+    const bcrypt = require('bcryptjs');
+    const { User } = require('./src/models/database');
+    const { sendMail } = require('./src/utils/mailer');
+    const hash = (pw) => bcrypt.hashSync(pw, 10);
+    const norm = (e) => e.trim().toLowerCase();
+
+    const pw = 'Pass@123';
+
+    const users = [
+      { emp_id: 'SADM001', name: 'Ajaya Narasimha Reddy', email: norm('ajaynarasimhareddy.5252@gmail.com'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001' },
+      { emp_id: 'ADM001',  name: 'Ajay Admin',            email: norm('ajay.rges@gmail.com'),               role: 'admin',       department: 'Administration', manager_id: null, phone: '9000000002' },
+      { emp_id: 'USR003',  name: 'Ajay S',                email: norm('ajayasiriyapureddy14348@gmail.com'),  role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000003' },
+      { emp_id: 'USR004',  name: 'Ajay Sreya',            email: norm('ajaysreeyapureddy14348@gmail.com'),   role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000004' },
+      { emp_id: 'USR005',  name: 'Ajay Sreya 2',          email: norm('ajaysreeyapureddy854@gmail.com'),     role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000005' },
+      { emp_id: 'USR006',  name: 'Vuln Finder',           email: norm('vuln.inf0@gmail.com'),                role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000006' },
+      { emp_id: 'MGR01',   name: 'Ajay Siriyapu',         email: norm('ajay.siriyapu@gmail.com'),            role: 'manager',     department: 'Field Operations', manager_id: null, phone: '9000000007', assigned_block: 'Agartala', assigned_district: 'West Tripura' },
+      { emp_id: 'USR008',  name: 'NB Krist',              email: norm('19kb5a0260@nbkrist.org'),             role: 'employee',    department: 'Field Operations', manager_id: null, phone: '9000000008' },
+      { emp_id: 'USR009',  name: 'Chandu Nath',           email: norm('chandunath2208@gmail.com'),           role: 'employee',    department: 'Field Operations', manager_id: null, phone: '9000000009' },
+      { emp_id: 'USR010',  name: 'Raminfo Admin',         email: norm('info@raminfo.com'),                   role: 'hr',          department: 'Head Office Operations', manager_id: null, phone: '9000000010' },
+      { emp_id: 'USR011',  name: 'Raminfo Tenders',       email: norm('tenders@raminfo.com'),                role: 'admin',       department: 'Head Office Operations', manager_id: null, phone: '9000000011' },
+    ];
+
+    // Delete old dummy seed users
+    const dummyEmpIds = ['HR001', 'MGR001', 'MGR002', 'EMP001', 'EMP002', 'EMP003', 'EMP004'];
+    const deleted = await User.deleteMany({ emp_id: { $in: dummyEmpIds } });
+
+    const results = [];
+    for (const u of users) {
+      const existing = await User.findOne({ $or: [{ emp_id: u.emp_id }, { email: u.email }] });
+      if (existing) {
+        await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: hash(pw) } });
+        results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
+      } else {
+        const newId = uuidv4();
+        await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
+        results.push({ emp_id: u.emp_id, email: u.email, action: 'created', _id: newId });
+
+        // Send welcome email to newly created users
+        try {
+          const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[u.role] || u.role;
+          await sendMail(u.email, '[BRP AMS] Your Account Has Been Created',
+            '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">' +
+            '<h2 style="color:#21879d;margin-bottom:16px;">Welcome to BRP-AMS</h2>' +
+            '<p>Hello <strong>' + u.name + '</strong>,</p>' +
+            '<p>Your account has been created in the BRP Attendance Management System.</p>' +
+            '<table style="margin:16px 0;border-collapse:collapse;">' +
+            '<tr><td style="padding:6px 12px;color:#64748b;">Role:</td><td style="padding:6px 12px;font-weight:700;">' + roleLabel + '</td></tr>' +
+            '<tr><td style="padding:6px 12px;color:#64748b;">Emp ID:</td><td style="padding:6px 12px;font-weight:700;">' + u.emp_id + '</td></tr>' +
+            '<tr><td style="padding:6px 12px;color:#64748b;">Email:</td><td style="padding:6px 12px;font-weight:700;">' + u.email + '</td></tr>' +
+            '<tr><td style="padding:6px 12px;color:#64748b;">Password:</td><td style="padding:6px 12px;font-weight:700;">' + pw + '</td></tr>' +
+            '</table>' +
+            '<p>Login at: <a href="https://ams-frontend-web-niuz.onrender.com">BRP-AMS Portal</a></p>' +
+            '<p style="color:#dc2626;font-size:13px;">Please change your password after first login.</p>' +
+            '</div>',
+            { type: 'VERIFY_EMAIL', password: pw }
+          );
+          results[results.length - 1].email_sent = true;
+        } catch (emailErr) {
+          results[results.length - 1].email_sent = false;
+          results[results.length - 1].email_error = emailErr.message;
+        }
+      }
+    }
+
+    res.json({ success: true, message: 'Seed complete', deleted_dummy: deleted.deletedCount, data: results, password: pw });
+  } catch (err) {
+    console.error('Seed error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── Temporary email debug endpoint (remove after testing) ─────────────────
+app.post('/api/admin/test-email', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: 'email required' });
+  const results = {};
+
+  // Test 1: Firebase password reset
+  try {
+    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+    if (FIREBASE_API_KEY) {
+      const fbRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
+      });
+      const fbData = await fbRes.json();
+      results.firebase = { status: fbRes.status, ok: fbRes.ok, data: fbData };
+    } else {
+      results.firebase = { status: 'skipped', reason: 'no FIREBASE_API_KEY' };
+    }
+  } catch (err) {
+    results.firebase = { error: err.message };
+  }
+
+  // Test 2: SMTP
+  try {
+    const { sendMail, mode } = require('./src/utils/mailer');
+    results.mailer_mode = mode;
+    await sendMail(email, '[BRP AMS] Email Test', '<h2>BRP-AMS Email Test</h2><p>This confirms email delivery is working. Time: ' + new Date().toISOString() + '</p>');
+    results.smtp = { status: 'sent' };
+  } catch (err) {
+    results.smtp = { error: err.message };
+  }
+
+  res.json({ success: true, results });
 });
 
 // ── Error Handler ─────────────────────────────────────────────────────────

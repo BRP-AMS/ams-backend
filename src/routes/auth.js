@@ -10,9 +10,10 @@ const { User, AuditLog, RevokedToken } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-const generateToken = () => crypto.randomBytes(32).toString('hex');
+// ── Secure token helpers ──────────────────────────────────────────────────
+const generateToken = () => crypto.randomBytes(32).toString('hex');           // 64-char hex
 const hashToken     = (t) => crypto.createHash('sha256').update(t).digest('hex');
+const generateOTP   = () => Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit
 
 // ── Rate limiters ─────────────────────────────────────────────────────────
 const loginLimiter = rateLimit({
@@ -22,6 +23,10 @@ const loginLimiter = rateLimit({
 const forgotLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many password reset requests. Try again in 1 hour.' },
+});
+const otpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  message: { success: false, message: 'Too many OTP requests. Try again in 10 minutes.' },
 });
 
 const validate = (req, res, next) => {
@@ -40,7 +45,7 @@ const emailLayout = (title, bodyHtml) => `
 <table width="560" cellpadding="0" cellspacing="0"
   style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
 <tr><td style="background:#0b1e3b;padding:28px 32px;">
-  <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP &middot; AMS</h1>
+  <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
   <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
 </td></tr>
 <tr><td style="padding:32px;">
@@ -48,13 +53,13 @@ const emailLayout = (title, bodyHtml) => `
   ${bodyHtml}
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;">
   <p style="margin:0;color:#94a3b8;font-size:12px;">
-    Do not reply to this email &middot; BRP AMS Automated System
+    Do not reply to this email · BRP AMS Automated System
   </p>
 </td></tr>
 </table>
 </td></tr></table></body></html>`;
 
-// ── Firebase Auth helper (for password sync on login) ───────────────────
+// ── Firebase Auth helper (for password sync) ────────────────────────────────
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
 const verifyWithFirebase = async (email, password) => {
   if (!FIREBASE_API_KEY) return false;
@@ -147,7 +152,7 @@ if (existingSuperAdmin) {
 });
 // ── POST /api/auth/login ──────────────────────────────────────────────────
 router.post('/login', loginLimiter, [
-  body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
+  body('email').isEmail().normalizeEmail(),
   body('password').notEmpty(),
 ], validate, async (req, res) => {
   try {
@@ -165,8 +170,10 @@ router.post('/login', loginLimiter, [
     if (!passwordValid && user && FIREBASE_API_KEY) {
       const firebaseOk = await verifyWithFirebase(email, password);
       if (firebaseOk) {
+        // Password valid in Firebase — sync back to MongoDB + auto-verify email
         console.log(`[Auth] Firebase password sync for: ${email}`);
         const syncUpdate = { password_hash: bcrypt.hashSync(password, 12) };
+        // If user set password via Firebase, they proved email ownership = verified
         if (!user.email_verified) {
           syncUpdate.email_verified = true;
           console.log(`[Auth] Auto-verified email for: ${email}`);
@@ -177,6 +184,7 @@ router.post('/login', loginLimiter, [
     }
 
     if (!user || !passwordValid) {
+      // Audit log for failed login
       if (user) {
         await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'LOGIN_FAILED', ip_address: req.ip });
         const attempts = (user.failed_login_attempts || 0) + 1;
@@ -189,6 +197,7 @@ router.post('/login', loginLimiter, [
       return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
+    // Reset failed login attempts on successful login
     await User.findByIdAndUpdate(user._id, { $set: { failed_login_attempts: 0, login_locked_until: null } });
 
     const token = jwt.sign(
@@ -317,33 +326,39 @@ router.put('/change-password', authenticate, [
 });
 
 // ── POST /api/auth/forgot-password ───────────────────────────────────────
-// Generates reset token, sends email via Gmail relay (which works), link goes
-// to backend-hosted reset page. No Firebase email needed.
+// Uses Firebase to send password reset email (works on Render via HTTPS)
+// Falls back to custom token flow if Firebase is not configured
 router.post('/forgot-password', forgotLimiter, [
-  body('email').isEmail().normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }).withMessage('Valid email required'),
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
 ], validate, async (req, res) => {
   try {
     const { email } = req.body;
     const user = await User.findOne({ email, is_active: 1 }).lean();
 
+    // Always same response — prevents email enumeration
     const OK = { success: true, message: 'If that email is registered you will receive a password reset email shortly.' };
+
     if (!user) return res.json(OK);
 
+    // Always use custom token flow with SMTP (branded email from noreply.brpams@gmail.com)
+    // SMTP → Resend → Firebase fallback is handled inside sendMail()
     const rawToken  = generateToken();
     const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
 
     await User.findByIdAndUpdate(user._id, {
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
     });
 
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
-    const resetUrl = `${BACKEND}/api/auth/reset-password-page?token=${rawToken}`;
-
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Reset Your Password',
-      emailLayout('Reset Your Password', `
+      emailLayout('Password Reset Request', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, we received a request to reset your password.
+          Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
+        </p>
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Click the button below. This link expires in <strong>5 minutes</strong>.
         </p>
         <div style="text-align:center;margin:28px 0;">
           <a href="${resetUrl}"
@@ -352,8 +367,14 @@ router.post('/forgot-password', forgotLimiter, [
             Reset Password
           </a>
         </div>
-        <p style="color:#94a3b8;font-size:12px;">This link expires in 30 minutes. If you did not request this, ignore this email.</p>
-      `)
+        <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
+          Or copy: ${resetUrl}
+        </p>
+        <p style="color:#dc2626;font-size:13px;">
+          If you didn't request this, ignore this email. Your password won't change.
+        </p>
+      `),
+      { type: 'PASSWORD_RESET' }
     );
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
@@ -364,129 +385,60 @@ router.post('/forgot-password', forgotLimiter, [
   }
 });
 
-// ── GET /api/auth/reset-password-page ────────────────────────────────────
-// Backend-hosted password reset form. User clicks link in email → sees this page.
-router.get('/reset-password-page', async (req, res) => {
-  const { token } = req.query;
-  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
-
-  if (!token) {
-    return res.status(400).send(errorPage('Invalid Link', 'No reset token provided.', FRONTEND));
-  }
-
-  const hashedTok = hashToken(token);
-  const user = await User.findOne({
-    pwd_reset_token:   hashedTok,
-    pwd_reset_expires: { $gt: new Date() },
-  }).lean();
-
-  if (!user) {
-    return res.status(400).send(errorPage('Link Expired', 'This reset link is invalid or has expired. Please request a new one.', FRONTEND));
-  }
-
-  // Serve the reset form
-  res.send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Reset Password - BRP AMS</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{min-height:100vh;display:flex;align-items:center;justify-content:center;
-       background:#f2f6f8;font-family:Arial,sans-serif;padding:24px}
-  .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);
-        padding:40px 36px;max-width:440px;width:100%;text-align:center}
-  h1{color:#0b1e3b;font-size:22px;margin-bottom:8px}
-  .sub{color:#64748b;font-size:14px;margin-bottom:28px}
-  label{display:block;text-align:left;color:#334155;font-size:13px;font-weight:600;margin-bottom:6px}
-  input{width:100%;padding:12px 14px;border:2px solid #e2e8f0;border-radius:8px;
-        font-size:15px;margin-bottom:16px;transition:border .2s}
-  input:focus{outline:none;border-color:#21879d}
-  .btn{width:100%;padding:14px;background:#0b1e3b;color:#fff;border:none;border-radius:10px;
-       font-size:16px;font-weight:700;cursor:pointer;transition:background .2s}
-  .btn:hover{background:#1e3a5f}
-  .btn:disabled{background:#94a3b8;cursor:not-allowed}
-  .error{color:#dc2626;font-size:13px;margin-bottom:12px;display:none}
-  .success{color:#16a34a;font-size:14px;margin:16px 0}
-  .rules{text-align:left;color:#64748b;font-size:12px;margin-bottom:20px;padding-left:16px}
-  .rules li{margin-bottom:4px}
-  .brand{color:#0b1e3b;font-size:12px;margin-top:24px;opacity:.5}
-</style></head>
-<body>
-<div class="card">
-  <h1>Reset Password</h1>
-  <p class="sub">Hi <strong>${user.name}</strong>, set your new password below.</p>
-  <form id="resetForm">
-    <input type="hidden" name="token" value="${token}">
-    <label for="pw">New Password</label>
-    <input type="password" id="pw" name="newPassword" placeholder="Enter new password" required minlength="8">
-    <label for="pw2">Confirm Password</label>
-    <input type="password" id="pw2" placeholder="Confirm new password" required>
-    <ul class="rules">
-      <li>At least 8 characters</li>
-      <li>At least one uppercase letter (A-Z)</li>
-      <li>At least one number (0-9)</li>
-      <li>At least one special character (!@#$%...)</li>
-    </ul>
-    <div class="error" id="err"></div>
-    <button type="submit" class="btn" id="submitBtn">Reset Password</button>
-  </form>
-  <div id="successMsg" style="display:none">
-    <div class="success">Password reset successfully!</div>
-    <a href="${FRONTEND}/login" class="btn" style="display:inline-block;text-decoration:none;margin-top:12px;padding:13px 32px;">Go to Login</a>
-  </div>
-  <div class="brand">BRP &middot; AMS | Attendance Management System</div>
-</div>
-<script>
-document.getElementById('resetForm').addEventListener('submit', async function(e) {
-  e.preventDefault();
-  const err = document.getElementById('err');
-  const pw = document.getElementById('pw').value;
-  const pw2 = document.getElementById('pw2').value;
-  err.style.display = 'none';
-
-  if (pw !== pw2) { err.textContent = 'Passwords do not match'; err.style.display = 'block'; return; }
-  if (pw.length < 8) { err.textContent = 'Password must be at least 8 characters'; err.style.display = 'block'; return; }
-  if (!/[A-Z]/.test(pw)) { err.textContent = 'Must contain an uppercase letter'; err.style.display = 'block'; return; }
-  if (!/[0-9]/.test(pw)) { err.textContent = 'Must contain a number'; err.style.display = 'block'; return; }
-  if (!/[!@#$%^&*(),.?":{}|<>]/.test(pw)) { err.textContent = 'Must contain a special character'; err.style.display = 'block'; return; }
-
-  const btn = document.getElementById('submitBtn');
-  btn.disabled = true; btn.textContent = 'Resetting...';
-
+// ── POST /api/auth/reset-password-otp ─────────────────────────────────
+// After user clicks the reset link, the frontend calls this to send an OTP
+// to the user's email for additional verification before allowing password change.
+router.post('/reset-password-otp', otpLimiter, [
+  body('token').notEmpty().withMessage('Reset token is required'),
+], validate, async (req, res) => {
   try {
-    const res = await fetch(window.location.origin + '/api/auth/reset-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: '${token}', newPassword: pw })
+    const { token } = req.body;
+    const hashedTok = hashToken(token);
+
+    const user = await User.findOne({
+      pwd_reset_token:   hashedTok,
+      pwd_reset_expires: { $gt: new Date() },
+      is_active: 1,
+    }).lean();
+
+    if (!user)
+      return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
+
+    const otp       = generateOTP();
+    const hashedOtp = hashToken(otp);
+    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { pwd_reset_otp: hashedOtp, pwd_reset_otp_expires: expires }
     });
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch(_) { data = { success: false, message: 'Bad response: ' + text.substring(0, 100) }; }
-    if (data.success) {
-      document.getElementById('resetForm').style.display = 'none';
-      document.getElementById('successMsg').style.display = 'block';
-      alert('SUCCESS! Password has been reset. You can now login with your new password.');
-    } else {
-      err.textContent = (data.message || 'Reset failed') + ' (HTTP ' + res.status + ')';
-      err.style.display = 'block';
-      btn.disabled = false; btn.textContent = 'Reset Password';
-      alert('ERROR: ' + (data.message || 'Reset failed') + ' (HTTP ' + res.status + ')');
-    }
-  } catch(e) {
-    err.textContent = 'Network error: ' + e.message;
-    err.style.display = 'block';
-    btn.disabled = false; btn.textContent = 'Reset Password';
-    alert('NETWORK ERROR: ' + e.message);
+
+    await sendMail(user.email, '[BRP AMS] Password Reset OTP',
+      emailLayout('Password Reset Verification Code', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, enter this code to verify your identity before resetting your password.
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <span style="font-size:42px;font-weight:900;letter-spacing:14px;color:#0b1e3b;">${otp}</span>
+        </div>
+        <p style="color:#475569;font-size:13px;text-align:center;">
+          This code expires in <strong>5 minutes</strong>.
+        </p>
+        <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
+      `),
+      { type: 'PASSWORD_RESET' }
+    );
+
+    res.json({ success: true, message: 'OTP sent to your email' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
-});
-</script>
-</body></html>`);
 });
 
 // ── POST /api/auth/reset-password ────────────────────────────────────────
-// Called by the reset form above
 router.post('/reset-password', [
   body('token').notEmpty().withMessage('Reset token is required'),
+  body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
   body('newPassword')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
@@ -494,38 +446,52 @@ router.post('/reset-password', [
     .matches(/[!@#$%^&*(),.?":{}|<>]/).withMessage('Must contain at least one special character'),
 ], validate, async (req, res) => {
   try {
-    const { token, newPassword } = req.body;
+    const { token, otp, newPassword } = req.body;
     const hashedTok = hashToken(token);
 
     const user = await User.findOne({
       pwd_reset_token:   hashedTok,
       pwd_reset_expires: { $gt: new Date() },
+      is_active: 1,
     }).lean();
 
     if (!user)
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
 
+    // Validate OTP
+    if (!user.pwd_reset_otp || !user.pwd_reset_otp_expires)
+      return res.status(400).json({ success: false, message: 'No OTP found. Please request an OTP first.' });
+
+    if (new Date() > user.pwd_reset_otp_expires)
+      return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
+
+    if (hashToken(otp) !== user.pwd_reset_otp)
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+
     await User.findByIdAndUpdate(user._id, {
       $set: {
-        password_hash:     bcrypt.hashSync(newPassword, 12),
-        pwd_reset_token:   null,
-        pwd_reset_expires: null,
-        pwd_changed_at:    new Date(),
-        is_active:         1,
+        password_hash:         bcrypt.hashSync(newPassword, 12),
+        pwd_reset_token:       null,
+        pwd_reset_expires:     null,
+        pwd_reset_otp:         null,
+        pwd_reset_otp_expires: null,
+        pwd_changed_at:        new Date(),
       }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });
 
-    // Also update Firebase Auth shadow user so login sync stays in sync
-    if (FIREBASE_API_KEY) {
-      try {
-        const { ensureFirebaseUser } = require('../utils/firebaseMailer');
-        await ensureFirebaseUser(user.email, newPassword);
-        console.log(`[Auth] Firebase shadow user updated for: ${user.email}`);
-      } catch (e) {
-        console.error('[Auth] Firebase sync failed (non-critical):', e.message);
-      }
-    }
+    // Password changed notification — fire-and-forget
+    sendMail(user.email, '[BRP AMS] Password Changed',
+      emailLayout('Password Changed Successfully', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, your AMS password was changed successfully.
+        </p>
+        <p style="color:#dc2626;font-size:13px;">
+          If you did not do this, contact your administrator immediately.
+        </p>
+      `),
+      { type: 'PASSWORD_RESET' }
+    ).catch(err => console.error('[Auth] Password changed email failed:', err.message));
 
     res.json({ success: true, message: 'Password reset successfully. Please log in.' });
   } catch (err) {
@@ -534,81 +500,173 @@ router.post('/reset-password', [
   }
 });
 
-// ── GET /api/auth/test-reset-flow — TEMPORARY DEBUG (remove after testing) ──
-// Tests the full password reset flow end-to-end on the server itself
-router.get('/test-reset-flow', async (req, res) => {
-  const testEmail = req.query.email;
-  if (!testEmail) return res.json({ error: 'Pass ?email=xxx' });
+// ── GET /api/auth/verify-email/:token ────────────────────────────────────
+// Called when user clicks the verification link in their welcome email.
+// Returns a self-contained HTML page — no redirect, no FRONTEND_URL needed.
+router.get('/verify-email/:token', async (req, res) => {
+  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
 
-  const results = {};
-  try {
-    // Step 1: Find user
-    const user = await User.findOne({ email: testEmail }).lean();
-    if (!user) return res.json({ error: 'User not found', email: testEmail });
-    results.step1_user = { id: user._id, email: user.email, is_active: user.is_active, has_pwd_hash: !!user.password_hash };
-
-    // Step 2: Create a reset token (same as forgot-password does)
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedTok = hashToken(rawToken);
-    const expires = new Date(Date.now() + 30 * 60 * 1000);
-    await User.findByIdAndUpdate(user._id, { $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires } });
-    results.step2_token_saved = true;
-
-    // Step 3: Verify token can be found (same as reset-password POST does)
-    const found = await User.findOne({ pwd_reset_token: hashedTok, pwd_reset_expires: { $gt: new Date() } }).lean();
-    results.step3_token_found = !!found;
-
-    // Step 4: Hash new password and save (same as reset-password POST does)
-    const newPwd = 'TestReset@999';
-    const newHash = bcrypt.hashSync(newPwd, 12);
-    await User.findByIdAndUpdate(user._id, {
-      $set: { password_hash: newHash, pwd_reset_token: null, pwd_reset_expires: null, pwd_changed_at: new Date(), is_active: 1 }
-    });
-    results.step4_password_saved = true;
-
-    // Step 5: Read back and verify
-    const after = await User.findOne({ email: testEmail }).lean();
-    results.step5_new_pwd_matches = bcrypt.compareSync(newPwd, after.password_hash);
-    results.step5_old_pwd_matches = bcrypt.compareSync('Pass@123', after.password_hash);
-    results.step5_token_cleared = after.pwd_reset_token === null;
-
-    // Step 6: Restore original password
-    await User.findByIdAndUpdate(user._id, {
-      $set: { password_hash: bcrypt.hashSync('Pass@123', 12), pwd_reset_token: null, pwd_reset_expires: null }
-    });
-    results.step6_restored = true;
-
-    res.json({ success: true, results });
-  } catch (err) {
-    res.json({ success: false, error: err.message, stack: err.stack, results });
-  }
-});
-
-// ── Helper: error page HTML ──────────────────────────────────────────────
-function errorPage(title, message, frontendUrl) {
-  return `<!DOCTYPE html>
+  const page = (success, title, message) => `<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title} - BRP AMS</title>
+<title>${title} — BRP AMS</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{min-height:100vh;display:flex;align-items:center;justify-content:center;
        background:#f2f6f8;font-family:Arial,sans-serif;padding:24px}
   .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.1);
         padding:40px 36px;max-width:440px;width:100%;text-align:center}
+  .icon{font-size:52px;margin-bottom:20px}
   h1{color:#0b1e3b;font-size:22px;margin-bottom:12px}
   p{color:#475569;font-size:14px;line-height:1.7;margin-bottom:28px}
-  a.btn{display:inline-block;background:#64748b;color:#fff;
+  a.btn{display:inline-block;background:${success ? '#21879d' : '#64748b'};color:#fff;
         padding:13px 32px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px}
+  a.btn:hover{opacity:.9}
   .brand{color:#0b1e3b;font-size:12px;margin-top:24px;opacity:.5}
 </style></head>
 <body><div class="card">
-  <div style="font-size:52px;margin-bottom:20px">&#10060;</div>
+  <div class="icon">${success ? '✅' : '❌'}</div>
   <h1>${title}</h1>
   <p>${message}</p>
-  <a class="btn" href="${frontendUrl}/login">Go to Login</a>
-  <div class="brand">BRP &middot; AMS | Attendance Management System</div>
+  <a class="btn" href="${FRONTEND}/login">Go to Login</a>
+  <div class="brand">BRP · AMS &nbsp;|&nbsp; Attendance Management System</div>
 </div></body></html>`;
-}
+
+  try {
+    const hashedTok = hashToken(req.params.token);
+    const user = await User.findOne({
+      email_verify_token:   hashedTok,
+      email_verify_expires: { $gt: new Date() },
+    }).lean();
+
+    if (!user) {
+      return res.status(400).send(page(false,
+        'Link Invalid or Expired',
+        'This verification link is no longer valid. It may have already been used or expired (links are valid for 24 hours).<br><br>Please log in and request a new verification email from your profile.'
+      ));
+    }
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { email_verified: true, email_verify_token: null, email_verify_expires: null }
+    });
+    await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'EMAIL_VERIFIED', ip_address: req.ip });
+
+    const safeName = user.name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    res.send(page(true,
+      'Email Verified!',
+      `Your email has been verified successfully, <strong>${safeName}</strong>.<br><br>Your account is now active. Click below to sign in.`
+    ));
+  } catch (err) {
+    console.error(err);
+    res.status(500).send(page(false, 'Server Error', 'Something went wrong. Please try again later.'));
+  }
+});
+
+// ── POST /api/auth/resend-verification ───────────────────────────────────
+router.post('/resend-verification', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).lean();
+    if (!user)           return res.status(404).json({ success: false, message: 'User not found' });
+    if (user.email_verified) return res.json({ success: true, message: 'Email already verified' });
+
+    const rawToken  = generateToken();
+    const hashedTok = hashToken(rawToken);
+    const expires   = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { email_verify_token: hashedTok, email_verify_expires: expires }
+    });
+
+    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
+    const verifyUrl = `${BACKEND}/api/auth/verify-email/${rawToken}`;
+    await sendMail(user.email, '[BRP AMS] Verify Your Email',
+      emailLayout('Verify Your Email Address', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, please verify your email address by clicking below.
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <a href="${verifyUrl}"
+            style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
+                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+            Verify Email
+          </a>
+        </div>
+        <p style="color:#94a3b8;font-size:12px;">This link expires in 24 hours.</p>
+      `),
+      { type: 'VERIFY_EMAIL' }
+    );
+    res.json({ success: true, message: 'Verification email sent' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/send-phone-otp ─────────────────────────────────────────
+// Sends a 6-digit OTP to the user's registered email
+// (Replace sendMail with Twilio SMS when you add a SIM/Twilio account)
+router.post('/send-phone-otp', otpLimiter, authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).lean();
+    if (!user)        return res.status(404).json({ success: false, message: 'User not found' });
+    if (!user.phone)  return res.status(400).json({ success: false, message: 'No phone on your account. Update your profile first.' });
+    if (user.phone_verified) return res.json({ success: true, message: 'Phone already verified' });
+
+    const otp       = generateOTP();
+    const hashed    = hashToken(otp);
+    const expires   = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { phone_otp: hashed, phone_otp_expires: expires }
+    });
+
+    await sendMail(user.email, '[BRP AMS] Your Verification Code',
+      emailLayout('Phone Verification Code', `
+        <p style="color:#475569;font-size:14px;line-height:1.6;">
+          Hi <strong>${user.name}</strong>, your verification code for phone number <strong>${user.phone}</strong> is:
+        </p>
+        <div style="text-align:center;margin:28px 0;">
+          <span style="font-size:42px;font-weight:900;letter-spacing:14px;color:#0b1e3b;">${otp}</span>
+        </div>
+        <p style="color:#475569;font-size:13px;text-align:center;">
+          This code expires in <strong>10 minutes</strong>.
+        </p>
+        <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
+      `),
+      { type: 'VERIFY_EMAIL' }
+    );
+
+    res.json({ success: true, message: 'OTP sent to your registered email' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /api/auth/verify-phone-otp ──────────────────────────────────────
+router.post('/verify-phone-otp', authenticate, [
+  body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
+], validate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).lean();
+    if (!user?.phone_otp || !user?.phone_otp_expires)
+      return res.status(400).json({ success: false, message: 'No pending OTP. Request a new one.' });
+
+    if (new Date() > user.phone_otp_expires)
+      return res.status(400).json({ success: false, message: 'OTP expired. Request a new one.' });
+
+    if (hashToken(req.body.otp) !== user.phone_otp)
+      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+
+    await User.findByIdAndUpdate(user._id, {
+      $set: { phone_verified: true, phone_otp: null, phone_otp_expires: null }
+    });
+    await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'PHONE_VERIFIED', ip_address: req.ip });
+    res.json({ success: true, message: 'Phone verified successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 module.exports = router;

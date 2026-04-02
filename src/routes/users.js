@@ -148,7 +148,6 @@ router.post('/', authenticate, authorize('admin'), [
       phone:                phone            || null,
       assigned_block:       assignedBlock    || null,
       assigned_district:    assignedDistrict || null,
-      is_active:            1,
       email_verified:       false,
       email_verify_token:   hashedVerifyTok,
       email_verify_expires: verifyExpires,
@@ -156,41 +155,12 @@ router.post('/', authenticate, authorize('admin'), [
       pwd_reset_expires:    resetExpires,
     });
 
-    // Send welcome email with password-set link via Gmail relay (which works reliably)
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
-    const resetUrl = `${BACKEND}/api/auth/reset-password-page?token=${rawResetToken}`;
-    sendMail(email, '[BRP AMS] Welcome — Set Your Password',
-      `<!DOCTYPE html><html><head><meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-      <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
-      <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-        style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
-      <tr><td style="background:#0b1e3b;padding:28px 32px;">
-        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP &middot; AMS</h1>
-        <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
-      </td></tr>
-      <tr><td style="padding:32px;">
-        <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Welcome to BRP AMS!</h2>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${name}</strong>, your account has been created. Click the button below to set your password and get started.
-        </p>
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${resetUrl}"
-            style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Set Your Password
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:12px;">This link expires in 24 hours.</p>
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;">
-        <p style="margin:0;color:#94a3b8;font-size:12px;">
-          Do not reply to this email &middot; BRP AMS Automated System
-        </p>
-      </td></tr></table>
-      </td></tr></table></body></html>`
-    ).catch(err => console.error('[User Create] Welcome email failed:', err.message));
+    // Send ONE Firebase password reset email — serves as both verification + password setup
+    // When user clicks the link and sets password, they prove email ownership (= verified)
+    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
+    sendPasswordResetEmail(email, tempPassword).catch(err =>
+      console.error('[User Create] Firebase welcome email failed:', err.message)
+    );
 
     const user = await User.findById(id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });
@@ -214,15 +184,16 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     }
 
-    // Generate reset token and send via Gmail relay
+    // Generate a secure reset token (5 min expiry) and send email
     const crypto     = require('crypto');
     const genToken   = () => crypto.randomBytes(32).toString('hex');
     const hashToken  = (t) => crypto.createHash('sha256').update(t).digest('hex');
 
     const rawResetToken  = genToken();
     const hashedResetTok = hashToken(rawResetToken);
-    const resetExpires   = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+    const resetExpires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
 
+    // Set a temporary locked password + reset token so user MUST use the link
     const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
     await User.findByIdAndUpdate(req.params.id, {
       $set: {
@@ -232,10 +203,11 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       }
     });
 
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
-    const resetUrl = `${BACKEND}/api/auth/reset-password-page?token=${rawResetToken}`;
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
-    await sendMail(target.email, '[BRP AMS] Password Reset by Admin',
+    // Send reset email
+    await sendMail(target.email, '[BRP AMS] Password Reset — Set Your New Password',
       `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
       <body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
@@ -243,7 +215,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       <table width="560" cellpadding="0" cellspacing="0"
         style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
       <tr><td style="background:#0b1e3b;padding:28px 32px;">
-        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP &middot; AMS</h1>
+        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
         <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
       </td></tr>
       <tr><td style="padding:32px;">
@@ -252,26 +224,29 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
           Hi <strong>${target.name}</strong>, your password has been reset by an administrator.
           Click the button below to set a new password.
         </p>
+        <p style="color:#dc2626;font-size:13px;font-weight:700;">
+          ⚠️ This link expires in <strong>5 minutes</strong>. Act quickly!
+        </p>
         <div style="text-align:center;margin:28px 0;">
           <a href="${resetUrl}"
             style="background:#1e3a8a;color:#fff;padding:14px 32px;border-radius:8px;
                    text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Set New Password
+            🔑 Set New Password
           </a>
         </div>
-        <p style="color:#94a3b8;font-size:12px;">This link expires in 30 minutes.</p>
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0 16px;">
-        <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System &middot; Do not reply</p>
+        <p style="color:#94a3b8;font-size:11px;word-break:break-all;">Or copy: ${resetUrl}</p>
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 16px;">
+        <p style="color:#94a3b8;font-size:12px;">BRP AMS Automated System · Do not reply</p>
       </td></tr></table>
       </td></tr></table></body></html>`
     );
 
-    // In-app notification
+    // In-app notification as well
     try {
       await Notification.create({
         _id: uuidv4(), user_id: target._id,
         title: 'Password Reset by Admin',
-        message: 'Your password has been reset by an administrator. Check your email for the reset link (expires in 30 minutes).',
+        message: 'Your password has been reset by an administrator. Check your email for the reset link (expires in 5 minutes).',
         type: 'warning', is_read: 0,
       });
     } catch (_) {}

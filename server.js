@@ -118,7 +118,10 @@ cron.schedule('58 23 * * *', async () => {
           submitted_at:      new Date(),
           is_auto_checkout:  true,
           checkout_remarks:  'Auto checkout – employee did not check out before end of day',
-          worked_hours:      null,
+        worked_hours:     workedHours > 0 ? workedHours : null,
+          // Leave type based on hours worked
+          leave_type:       workedHours < 4 ? 'Half Day' : null,
+          leave_status:     workedHours < 4 ? 'Pending'  : null,
         }
       });
       if (record.manager_id) {

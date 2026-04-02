@@ -341,7 +341,9 @@ if (isEmergency) {
   else if (hoursElapsed < 4) {
     leaveType = "Half Day";
   }
-
+if (hoursElapsed < 6) {
+    leaveType = 'Half Day';       // 4–6 hours = Half Day
+  }
 }
 
 // Normal checkout

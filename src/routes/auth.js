@@ -350,7 +350,7 @@ router.post('/forgot-password', forgotLimiter, [
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
     });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-q2lw.onrender.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Reset Your Password',
       emailLayout('Password Reset Request', `
@@ -504,7 +504,7 @@ router.post('/reset-password', [
 // Called when user clicks the verification link in their welcome email.
 // Returns a self-contained HTML page — no redirect, no FRONTEND_URL needed.
 router.get('/verify-email/:token', async (req, res) => {
-  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
+  const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-q2lw.onrender.com';
 
   const page = (success, title, message) => `<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
@@ -577,7 +577,7 @@ router.post('/resend-verification', authenticate, async (req, res) => {
       $set: { email_verify_token: hashedTok, email_verify_expires: expires }
     });
 
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
+    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-3it1.onrender.com/api';
     const verifyUrl = `${BACKEND}/api/auth/verify-email/${rawToken}`;
     await sendMail(user.email, '[BRP AMS] Verify Your Email',
       emailLayout('Verify Your Email Address', `

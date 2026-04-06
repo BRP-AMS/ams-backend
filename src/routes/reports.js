@@ -247,19 +247,83 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
 
     // ── Excel Export ─────────────────────────────────────────────────
     if (format === 'excel') {
+      // Build day range
+      const rangeStart = startDate ? new Date(startDate + 'T00:00:00') : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const rangeEnd   = endDate   ? new Date(endDate   + 'T00:00:00') : new Date();
+      const days = [];
+      for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) days.push(new Date(d));
+
+      // Group records by employee
+      const empMap = {};
+      records.forEach(r => {
+        const key = String(r.emp_id);
+        if (!empMap[key]) empMap[key] = { empCode: r.emp_id_code || '', empName: r.employee_name || '', byDate: {} };
+        empMap[key].byDate[r.date] = r;
+      });
+
+      // Attendance code per day
+      const getCode = (dayObj, rec) => {
+        if (!rec) return dayObj.getDay() === 0 ? 'WO' : 'O';
+        if (rec.duty_type === 'Office Duty') return 'P';
+        if (rec.duty_type === 'On Duty')     return 'OD';
+        if (rec.duty_type === 'Leave')       return 'L';
+        return 'P';
+      };
+
+      const ord = n => n + ([,'st','nd','rd'][((n%100)-10)%90>>3?n%10:0]||'th');
+      const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const dateLabel = `for the month of ${ord(rangeStart.getDate())} ${MONTHS[rangeStart.getMonth()]}- ${rangeStart.getFullYear()} To ${ord(rangeEnd.getDate())} ${MONTHS[rangeEnd.getMonth()]} ${rangeEnd.getFullYear()}`;
+
+      const isSingleEmp = req.user.role === 'employee' || !!matchFilter.emp_id;
+      const employees   = Object.values(empMap);
+
       const wsData = [
-        ['Date', 'Emp ID', 'Employee Name', 'Department', 'Duty Type', 'Sector', 'Check-In', 'Check-Out', 'Location', 'Description', 'Status', 'Manager', 'Remark', 'Actioned At'],
-        ...records.map(r => [
-          r.date,               r.emp_id_code,        r.employee_name,      r.dept,
-          r.duty_type,          r.sector        || '', r.checkin_time  || '', r.checkout_time  || '',
-          r.location_address || '', r.description || '', r.status,
-          r.manager_name     || '', r.manager_remark || '', r.actioned_at || '',
-        ])
+        [null, null, 'Attendance details of BRP'],
+        [null, null, dateLabel],
+        [null, null, 'Location Name: Tripura', null, null, null, null, null, null, null, null, 'Project Name: Block Resource Person'],
+        [null, 'Emp code', 'Employee Name', ...days.map(d => d.getDate())],
       ];
+
+      employees.forEach(emp => {
+        wsData.push([null, emp.empCode, emp.empName,
+          ...days.map(d => getCode(d, emp.byDate[d.toISOString().split('T')[0]]))]);
+      });
+
+      // Summary
+      wsData.push([]);
+      if (isSingleEmp) {
+        wsData.push([null, null, 'Self  Summary report']);
+        const emp = employees[0];
+        let workingDays = 0, present = 0, leaves = 0, holidays = 0, weekoffs = 0;
+        if (emp) {
+          days.forEach(d => {
+            const code = getCode(d, emp.byDate[d.toISOString().split('T')[0]]);
+            if (code === 'WO') weekoffs++;
+            else if (code === 'H') holidays++;
+            else { workingDays++; if (code === 'P' || code === 'OD') present++; else if (code === 'L') leaves++; }
+          });
+        }
+        wsData.push([null, null, 'No of Working days',         workingDays]);
+        wsData.push([null, null, 'No of Present / worked (P)', present]);
+        wsData.push([null, null, 'No of Leaves (L)',           leaves]);
+        wsData.push([null, null, 'No of Holidays (H)',         holidays]);
+        wsData.push([null, null, 'No of Weekoff (WO)',         weekoffs]);
+      } else {
+        wsData.push([null, null, 'Total Summary']);
+        wsData.push([null, null, 'No of Working days', days.filter(d => d.getDay() !== 0).length]);
+        wsData.push([null, null, 'No of Holidays (H)', 0]);
+        wsData.push([null, null, 'No of Weekoff (WO)',  days.filter(d => d.getDay() === 0).length]);
+        wsData.push([null, null, 'No of present/ Worked']);
+        employees.forEach(emp => {
+          const present = days.filter(d => { const c = getCode(d, emp.byDate[d.toISOString().split('T')[0]]); return c === 'P' || c === 'OD'; }).length;
+          wsData.push([null, null, emp.empName, present]);
+        });
+      }
+
       const ws = XLSX.utils.aoa_to_sheet(wsData);
-      ws['!cols'] = wsData[0].map((_, i) => ({ wch: [12, 10, 20, 15, 12, 10, 10, 10, 25, 30, 12, 20, 25, 18][i] }));
+      ws['!cols'] = [{ wch: 2 }, { wch: 10 }, { wch: 22 }, ...days.map(() => ({ wch: 4 }))];
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Attendance Report');
+      XLSX.utils.book_append_sheet(wb, ws, isSingleEmp ? 'Self report' : 'All emp Reports');
       const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' });
       res.setHeader('Content-Disposition', `attachment; filename="attendance_report_${Date.now()}.xlsx"`);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

@@ -8,6 +8,7 @@ const { query, body, validationResult } = require('express-validator');
 const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
+const storage = multer.memoryStorage();
 // ── File Upload Config (memory storage → Cloudinary) ─────────────────────
 const upload = multer({
   storage,

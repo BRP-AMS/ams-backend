@@ -292,7 +292,7 @@ router.get('/stats/compliance', authenticate, authorize('admin', 'manager'), asy
 });
 
 // ── GET /api/activity/report/excel ────────────────────────────────────
-router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee'), [
+router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
   query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
@@ -300,13 +300,18 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
   try {
     const XLSX = require('xlsx');
     const { filter = 'monthly', startDate, endDate } = req.query;
-    const isEmployee = req.user.role === 'employee';
-
-    const matchFilter = isEmployee ? { user_id: req.user.id } : {};
+    const matchFilter = {};
     if (filter !== 'all') {
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
+    if (req.user.role === 'employee') {
+      matchFilter.user_id = req.user.id;
+    } else if (req.user.role === 'manager') {
+      const teamMembersExcel = await User.find({ manager_id: req.user.id, is_active: 1 }).distinct('_id');
+      matchFilter.user_id = { $in: teamMembersExcel };
+    }
+    // hr / super_admin / admin: see all
 
     const rows = await Activity.aggregate([
       { $match: matchFilter },
@@ -366,7 +371,7 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
 });
 
 // ── GET /api/activity/report/pdf ──────────────────────────────────────
-router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'), [
+router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
   query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
@@ -374,13 +379,18 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
   try {
     const PDFDocument = require('pdfkit');
     const { filter = 'monthly', startDate, endDate } = req.query;
-    const isEmployee = req.user.role === 'employee';
-
-    const matchFilter = isEmployee ? { user_id: req.user.id } : {};
+    const matchFilter = {};
     if (filter !== 'all') {
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
+    if (req.user.role === 'employee') {
+      matchFilter.user_id = req.user.id;
+    } else if (req.user.role === 'manager') {
+      const teamMembersPdf = await User.find({ manager_id: req.user.id, is_active: 1 }).distinct('_id');
+      matchFilter.user_id = { $in: teamMembersPdf };
+    }
+    // hr / super_admin / admin: see all
 
     const rows = await Activity.aggregate([
       { $match: matchFilter },
@@ -406,7 +416,8 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
 
     // Header
     doc.fontSize(18).font('Helvetica-Bold').text('BRP — Activity Report', { align: 'center' });
-    doc.fontSize(11).font('Helvetica').text(`Period: ${start} to ${end}`, { align: 'center' });
+    const periodLabel = matchFilter.activity_date ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}` : 'All time';
+    doc.fontSize(11).font('Helvetica').text(`Period: ${periodLabel}`, { align: 'center' });
     doc.moveDown(0.5);
     doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
     doc.moveDown(0.5);

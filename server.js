@@ -105,40 +105,54 @@ app.use('/api/', limiter);
 const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
 const { v4: uuidv4 } = require('uuid');
 
-cron.schedule('58 23 * * *', async () => {
+cron.schedule('28 18 * * *', async () => {   // 18:28 UTC = 23:58 IST
+  console.log('[AutoCheckout] Nightly cron triggered');
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const unchecked = await AttendanceRecord.find({ date: today, status: 'Draft', checkout_time: null }).lean();
-    console.log(`[AutoCheckout] ${unchecked.length} unchecked records for ${today}`);
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const unchecked = await AttendanceRecord.find({
+      date: today,
+      status: 'Draft',
+      checkout_time: null,
+    }).lean();
+ 
+    console.log(`[AutoCheckout] ${unchecked.length} unchecked for ${today}`);
+ 
     for (const record of unchecked) {
+      const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+      const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
+      const workedHrs  = Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100;
+ 
       await AttendanceRecord.findByIdAndUpdate(record._id, {
         $set: {
-          checkout_time:     '23:59',
-          status:            'Pending',
-          submitted_at:      new Date(),
-          is_auto_checkout:  true,
-          checkout_remarks:  'Auto checkout – employee did not check out before end of day',
-        worked_hours:     workedHours > 0 ? workedHours : null,
-          // Leave type based on hours worked
-          leave_type:       workedHours < 4 ? 'Half Day' : null,
-          leave_status:     workedHours < 4 ? 'Pending'  : null,
-        }
+          checkout_time:    '23:58',
+          status:           'Approved',    // ← KEY: was causing Draft to stay
+          submitted_at:     new Date(),
+          is_auto_checkout: true,
+          checkout_remarks: 'Auto checkout — employee did not check out',
+          worked_hours:     workedHrs > 0 ? workedHrs : null,
+          leave_type:       workedHrs < 4 ? 'Half Day' : null,
+          leave_status:     workedHrs < 4 ? 'Pending'  : null,
+        },
       });
+ 
       if (record.manager_id) {
         const emp = await User.findById(record.emp_id).select('name').lean();
         await Notification.create({
           _id:               uuidv4(),
           user_id:           record.manager_id,
-          title:             '⚠️ Auto Checkout Alert',
-          message:           `${emp?.name || 'An employee'} forgot to check out on ${record.date}. Auto-checked out at 23:59. Review and approve/reject with valid proof.`,
+          title:             '⚠️ Auto Checkout',
+          message:           `${emp?.name || 'Employee'} was auto-checked out at 23:58 on ${record.date}. Please review.`,
           type:              'warning',
           related_record_id: record._id,
         });
       }
     }
+    console.log('[AutoCheckout] Done');
   } catch (err) {
     console.error('[AutoCheckout] Error:', err.message);
   }
+}, {
+  timezone: 'Asia/Kolkata'   // ← ADD THIS: tell node-cron to use IST
 });
 
 // ── Revoked-token pruning ─────────────────────────────────────────────────
@@ -155,17 +169,63 @@ const pruneRevokedTokens = async () => {
 };
 
 // Run once at startup (after DB connection), then hourly
-connectionPromise.then(() => {
+connectionPromise.then(async () => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
-
-  // SMTP verification happens automatically in src/utils/mailer.js on require()
   require('./src/utils/mailer');
+ 
+  // ── NEW: Process any Draft records missed while server was down (Render sleep) ─
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const missed = await AttendanceRecord.find({
+      date:          { $lt: todayIST },   // strictly before today
+      status:        'Draft',
+      checkout_time: null,
+      duty_type:     { $ne: 'Leave' },
+    }).lean();
+ 
+    if (missed.length > 0) {
+      console.log(`[Startup] Found ${missed.length} Draft records from previous days — auto-processing…`);
+      for (const record of missed) {
+        const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+        const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
+        const workedHrs  = Math.max(0, Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100);
+ 
+        await AttendanceRecord.findByIdAndUpdate(record._id, {
+          $set: {
+            checkout_time:    '23:58',
+            status:           'Approved',
+            submitted_at:     new Date(),
+            is_auto_checkout: true,
+            checkout_remarks: 'Auto checkout — server was offline during scheduled run',
+            worked_hours:     workedHrs > 0 ? workedHrs : null,
+            leave_type:       workedHrs < 4 ? 'Half Day' : null,
+            leave_status:     workedHrs < 4 ? 'Pending'  : null,
+          },
+        });
+ 
+        if (record.manager_id) {
+          const emp = await User.findById(record.emp_id).select('name').lean();
+          await Notification.create({
+            _id:               uuidv4(),
+            user_id:           record.manager_id,
+            title:             '⚠️ Missed Auto Checkout',
+            message:           `${emp?.name || 'Employee'} was auto-checked out (server recovery) on ${record.date}.`,
+            type:              'warning',
+            related_record_id: record._id,
+          });
+        }
+      }
+      console.log(`[Startup] Auto-processed ${missed.length} missed Draft records`);
+    }
+  } catch (err) {
+    console.error('[Startup] Missed checkout recovery error:', err.message);
+  }
 });
-
 // ── Routes ────────────────────────────────────────────────────────────────
-app.use('/api/auth',         require('./src/routes/auth'));
-app.use('/api/attendance',   require('./src/routes/attendance'));
+const attendanceRouter = require('./src/routes/attendance');
+app.use('/api/auth',              require('./src/routes/auth'));
+app.use('/api/attendance',        attendanceRouter);
 app.use('/api/users',        require('./src/routes/users'));
 app.use('/api/reports',      require('./src/routes/reports'));
 app.use('/api/notifications',require('./src/routes/notifications'));
@@ -178,78 +238,70 @@ app.get('/api/health', (req, res) => {
 });
 
 // ── Temporary seed endpoint (remove after use) ───────────────────────────
-app.post('/api/admin/seed', async (req, res) => {
-  try {
-    const bcrypt = require('bcryptjs');
-    const { User } = require('./src/models/database');
-    const { sendMail } = require('./src/utils/mailer');
-    const hash = (pw) => bcrypt.hashSync(pw, 10);
-    const norm = (e) => e.trim().toLowerCase();
+// app.post('/api/admin/seed', async (req, res) => {
+//   try {
+//     const bcrypt = require('bcryptjs');
+//     const { User } = require('./src/models/database');
+//     const { sendMail } = require('./src/utils/mailer');
+//     const hash = (pw) => bcrypt.hashSync(pw, 10);
+//     const norm = (e) => e.trim().toLowerCase();
 
-    const pw = 'Pass@123';
+//     const pw = 'Pass@123';
 
-    const users = [
-      { emp_id: 'SADM001', name: 'Ajaya Narasimha Reddy', email: norm('ajaynarasimhareddy.5252@gmail.com'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001' },
-      { emp_id: 'ADM001',  name: 'Ajay Admin',            email: norm('ajay.rges@gmail.com'),               role: 'admin',       department: 'Administration', manager_id: null, phone: '9000000002' },
-      { emp_id: 'USR003',  name: 'Ajay S',                email: norm('ajayasiriyapureddy14348@gmail.com'),  role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000003' },
-      { emp_id: 'USR004',  name: 'Ajay Sreya',            email: norm('ajaysreeyapureddy14348@gmail.com'),   role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000004' },
-      { emp_id: 'USR005',  name: 'Ajay Sreya 2',          email: norm('ajaysreeyapureddy854@gmail.com'),     role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000005' },
-      { emp_id: 'USR006',  name: 'Vuln Finder',           email: norm('vuln.inf0@gmail.com'),                role: 'employee',    department: 'Engineering',    manager_id: null, phone: '9000000006' },
-      { emp_id: 'MGR01',   name: 'Ajay Siriyapu',         email: norm('ajay.siriyapu@gmail.com'),            role: 'manager',     department: 'Field Operations', manager_id: null, phone: '9000000007', assigned_block: 'Agartala', assigned_district: 'West Tripura' },
-      { emp_id: 'USR008',  name: 'NB Krist',              email: norm('19kb5a0260@nbkrist.org'),             role: 'employee',    department: 'Field Operations', manager_id: null, phone: '9000000008' },
-      { emp_id: 'USR009',  name: 'Chandu Nath',           email: norm('chandunath2208@gmail.com'),           role: 'employee',    department: 'Field Operations', manager_id: null, phone: '9000000009' },
-      { emp_id: 'USR010',  name: 'Raminfo Admin',         email: norm('info@raminfo.com'),                   role: 'hr',          department: 'Head Office Operations', manager_id: null, phone: '9000000010' },
-      { emp_id: 'USR011',  name: 'Raminfo Tenders',       email: norm('tenders@raminfo.com'),                role: 'admin',       department: 'Head Office Operations', manager_id: null, phone: '9000000011' },
-    ];
+//     const users = [
+//       { emp_id: 'SADM001', name: 'Ajaya Narasimha Reddy', email: norm('ajaynarasimhareddy.5252@gmail.com'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001' },
+//       { emp_id: 'ADM001',  name: 'Ajay Admin',            email: norm('ajay.rges@gmail.com'),               role: 'admin',       department: 'Administration', manager_id: null, phone: '9000000002' },
+    
+//     ];
 
-    // Delete old dummy seed users
-    const dummyEmpIds = ['HR001', 'MGR001', 'MGR002', 'EMP001', 'EMP002', 'EMP003', 'EMP004'];
-    const deleted = await User.deleteMany({ emp_id: { $in: dummyEmpIds } });
+//     // Delete old dummy seed users
+//     const dummyEmpIds = ['HR001', 'MGR001', 'MGR002', 'EMP001', 'EMP002', 'EMP003', 'EMP004'];
+//     const deleted = await User.deleteMany({ emp_id: { $in: dummyEmpIds } });
 
-    const results = [];
-    for (const u of users) {
-      const existing = await User.findOne({ $or: [{ emp_id: u.emp_id }, { email: u.email }] });
-      if (existing) {
-        await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: hash(pw) } });
-        results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
-      } else {
-        const newId = uuidv4();
-        await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
-        results.push({ emp_id: u.emp_id, email: u.email, action: 'created', _id: newId });
+//     const results = [];
+//     for (const u of users) {
+//       const existing = await User.findOne({ $or: [{ emp_id: u.emp_id }, { email: u.email }] });
+//       if (existing) {
+//         await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: hash(pw) } });
+//         results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
+//       } else {
+//         const newId = uuidv4();
+//         await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
+//         results.push({ emp_id: u.emp_id, email: u.email, action: 'created', _id: newId });
 
-        // Send welcome email to newly created users
-        try {
-          const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[u.role] || u.role;
-          await sendMail(u.email, '[BRP AMS] Your Account Has Been Created',
-            '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">' +
-            '<h2 style="color:#21879d;margin-bottom:16px;">Welcome to BRP-AMS</h2>' +
-            '<p>Hello <strong>' + u.name + '</strong>,</p>' +
-            '<p>Your account has been created in the BRP Attendance Management System.</p>' +
-            '<table style="margin:16px 0;border-collapse:collapse;">' +
-            '<tr><td style="padding:6px 12px;color:#64748b;">Role:</td><td style="padding:6px 12px;font-weight:700;">' + roleLabel + '</td></tr>' +
-            '<tr><td style="padding:6px 12px;color:#64748b;">Emp ID:</td><td style="padding:6px 12px;font-weight:700;">' + u.emp_id + '</td></tr>' +
-            '<tr><td style="padding:6px 12px;color:#64748b;">Email:</td><td style="padding:6px 12px;font-weight:700;">' + u.email + '</td></tr>' +
-            '<tr><td style="padding:6px 12px;color:#64748b;">Password:</td><td style="padding:6px 12px;font-weight:700;">' + pw + '</td></tr>' +
-            '</table>' +
-            '<p>Login at: <a href="https://ams-frontend-web-niuz.onrender.com">BRP-AMS Portal</a></p>' +
-            '<p style="color:#dc2626;font-size:13px;">Please change your password after first login.</p>' +
-            '</div>',
-            { type: 'VERIFY_EMAIL', password: pw }
-          );
-          results[results.length - 1].email_sent = true;
-        } catch (emailErr) {
-          results[results.length - 1].email_sent = false;
-          results[results.length - 1].email_error = emailErr.message;
-        }
-      }
-    }
+//         // Send welcome email to newly created users
+//         try {
+//           const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[u.role] || u.role;
+//           await sendMail(u.email, '[BRP AMS] Your Account Has Been Created',
+//             '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">' +
+//             '<h2 style="color:#21879d;margin-bottom:16px;">Welcome to BRP-AMS</h2>' +
+//             '<p>Hello <strong>' + u.name + '</strong>,</p>' +
+//             '<p>Your account has been created in the BRP Attendance Management System.</p>' +
+//             '<table style="margin:16px 0;border-collapse:collapse;">' +
+//             '<tr><td style="padding:6px 12px;color:#64748b;">Role:</td><td style="padding:6px 12px;font-weight:700;">' + roleLabel + '</td></tr>' +
+//             '<tr><td style="padding:6px 12px;color:#64748b;">Emp ID:</td><td style="padding:6px 12px;font-weight:700;">' + u.emp_id + '</td></tr>' +
+//             '<tr><td style="padding:6px 12px;color:#64748b;">Email:</td><td style="padding:6px 12px;font-weight:700;">' + u.email + '</td></tr>' +
+//             '<tr><td style="padding:6px 12px;color:#64748b;">Password:</td><td style="padding:6px 12px;font-weight:700;">' + pw + '</td></tr>' +
+//             '</table>' +
+//             '<p>Login at: <a href="https://ams-frontend-web-niuz.onrender.com">BRP-AMS Portal</a></p>' +
+//             '<p style="color:#dc2626;font-size:13px;">Please change your password after first login.</p>' +
+//             '</div>',
+//             { type: 'VERIFY_EMAIL', password: pw }
+//           );
+//           results[results.length - 1].email_sent = true;
+//         } catch (emailErr) {
+//           results[results.length - 1].email_sent = false;
+//           results[results.length - 1].email_error = emailErr.message;
+//         }
+//       }
+//     }
 
-    res.json({ success: true, message: 'Seed complete', deleted_dummy: deleted.deletedCount, data: results, password: pw });
-  } catch (err) {
-    console.error('Seed error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+//     res.json({ success: true, message: 'Seed complete', deleted_dummy: deleted.deletedCount, data: results, password: pw });
+//   } catch (err) {
+//     console.error('Seed error:', err);
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
 
 // ── Temporary email debug endpoint (remove after testing) ─────────────────
 app.post('/api/admin/test-email', async (req, res) => {

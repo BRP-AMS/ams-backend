@@ -2,16 +2,14 @@ const express = require('express');
 const router  = express.Router();
 const multer  = require('multer');
 const path    = require('path');
-const fs      = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { uploadFile } = require('../utils/storage');
 const { query, body, validationResult } = require('express-validator');
 const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
-const storage = multer.memoryStorage();
-// ── File Upload Config (memory storage → Cloudinary) ─────────────────────
 const upload = multer({
-  storage,
+  storage:    multer.memoryStorage(),
   limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
@@ -61,21 +59,14 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       _id: id, user_id: req.user.id, msme_name, udyam_number, sector, support_type, block_name,
       latitude: latitude || null, longitude: longitude || null,
       location_address: location_address || null,
-      activity_date: typeof activity_date === 'string' ? activity_date : activity_date.toISOString().slice(0, 10),
-      remarks: remarks || null,
+      activity_date:    typeof activity_date === 'string' ? activity_date : activity_date.toISOString().slice(0, 10),
+      remarks:          remarks          || null,
     });
-
-    // Save uploaded documents to Cloudinary
     if (req.files?.length) {
-      const uploaded = await Promise.all(
-        req.files.map(f => uploadFile(f.buffer, 'ams/activity-docs', f.originalname, f.mimetype))
-      );
+      const uploaded = await Promise.all(req.files.map(f => uploadFile(f.buffer, 'ams/activity-docs', f.originalname, f.mimetype)));
       await ActivityDocument.insertMany(uploaded.map((url, i) => ({
-        _id:         uuidv4(),
-        activity_id: id,
-        file_path:   url,
-        file_name:   req.files[i].originalname,
-        file_type:   req.files[i].mimetype,
+        _id: uuidv4(), activity_id: id, file_path: url,
+        file_name: req.files[i].originalname, file_type: req.files[i].mimetype,
       })));
     }
     res.status(201).json({ success: true, data: { id } });
@@ -96,6 +87,16 @@ router.get('/', authenticate, [
 ], validate, async (req, res) => {
   try {
     const { filter = 'monthly', startDate, endDate, block, sector, support_type, limit = 100, offset = 0 } = req.query;
+
+    // Validate query params: only allow alphanumeric chars, spaces, hyphens, and /
+    const safeParam = /^[a-zA-Z0-9 \-\/]*$/;
+    if (block && !safeParam.test(block))
+      return res.status(400).json({ success: false, message: 'Invalid block parameter' });
+    if (sector && !safeParam.test(sector))
+      return res.status(400).json({ success: false, message: 'Invalid sector parameter' });
+    if (support_type && !safeParam.test(support_type))
+      return res.status(400).json({ success: false, message: 'Invalid support_type parameter' });
+
     const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
     const matchFilter = { activity_date: { $gte: start, $lte: end } };
     if (req.user.role === 'employee') matchFilter.user_id = req.user.id;
@@ -234,7 +235,7 @@ router.get('/stats/compliance', authenticate, authorize('admin', 'manager'), asy
 });
 
 // ── GET /api/activity/report/excel ────────────────────────────────────
-router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee'), [
+router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
   query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
@@ -243,14 +244,15 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
     const XLSX = require('xlsx');
     const { filter = 'monthly', startDate, endDate } = req.query;
     const isEmployee = req.user.role === 'employee';
+
     const matchFilter = isEmployee ? { user_id: req.user.id } : {};
-    let start, end;
     if (filter !== 'all') {
       ({ start, end } = dateRangeFromFilter(filter, startDate, endDate));
       matchFilter.activity_date = { $gte: start, $lte: end };
     } else {
       start = 'All'; end = 'All';
     }
+
     const rows = await Activity.aggregate([
       { $match: matchFilter },
       { $lookup: { from: 'users',             localField: 'user_id', foreignField: '_id', as: 'user' } },
@@ -298,7 +300,7 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
 });
 
 // ── GET /api/activity/report/pdf ──────────────────────────────────────
-router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'), [
+router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
   query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
@@ -307,14 +309,15 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
     const PDFDocument = require('pdfkit');
     const { filter = 'monthly', startDate, endDate } = req.query;
     const isEmployee = req.user.role === 'employee';
+
     const matchFilter = isEmployee ? { user_id: req.user.id } : {};
-    let start, end;
     if (filter !== 'all') {
       ({ start, end } = dateRangeFromFilter(filter, startDate, endDate));
       matchFilter.activity_date = { $gte: start, $lte: end };
     } else {
       start = 'All'; end = 'All';
     }
+
     const rows = await Activity.aggregate([
       { $match: matchFilter },
       { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
@@ -336,7 +339,8 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
     doc.pipe(res);
 
     doc.fontSize(18).font('Helvetica-Bold').text('BRP — Activity Report', { align: 'center' });
-    doc.fontSize(11).font('Helvetica').text(`Period: ${start} to ${end}`, { align: 'center' });
+    const periodLabel = matchFilter.activity_date ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}` : 'All time';
+    doc.fontSize(11).font('Helvetica').text(`Period: ${periodLabel}`, { align: 'center' });
     doc.moveDown(0.5);
     doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
     doc.moveDown(0.5);

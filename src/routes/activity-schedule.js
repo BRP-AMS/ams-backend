@@ -31,6 +31,67 @@ const uploadAttach = multer({
   },
 });
 
+
+const PDFDocument = require("pdfkit");
+
+router.get("/report/pdf", authenticate, async (req, res) => {
+  try {
+    const { filter } = req.query;
+
+    const query = {};
+
+    // apply filter
+    if (filter === "monthly") {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+      query.scheduled_date = {
+        $gte: start.toISOString().slice(0, 10),
+        $lte: end.toISOString().slice(0, 10),
+      };
+    }
+
+    const activities = await ActivitySchedule.find(query).lean();
+
+    const doc = new PDFDocument({ margin: 30 });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=activities.pdf"
+    );
+
+    doc.pipe(res);
+
+    doc.fontSize(18).text("Activity Report", { align: "center" });
+    doc.moveDown();
+
+    if (!activities.length) {
+      doc.fontSize(12).text("No activities found");
+    } else {
+      activities.forEach((a, i) => {
+        doc
+          .fontSize(12)
+          .text(`${i + 1}. ${a.title || "-"}`)
+          .text(`Location: ${a.location || "-"}`)
+          .text(`Date: ${a.scheduled_date || "-"}`)
+          .text(`Status: ${a.status || "-"}`)
+          .moveDown();
+      });
+    }
+
+    doc.end();
+  } catch (err) {
+    console.error("PDF export error:", err);
+
+    res.status(500).json({
+      success: false,
+      message: "PDF export failed",
+    });
+  }
+});
+
 const PDFDocument = require("pdfkit");
 
 // ── PDF REPORT ───────────────────────────────────────────────────────────
@@ -303,47 +364,10 @@ router.delete('/:id',
     await schedule.deleteOne();
     await ScheduleDocument.deleteMany({schedule_id:req.params.id});
 
-    res.json({success:true,message:'Schedule deleted'});
-
-  }catch(err){
-    res.status(500).json({success:false,message:'Server error'});
+    res.json({ success: true, message: 'Schedule deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
-
-// ── DOWNLOAD BULK TEMPLATE ─────────────────────────────────────
-router.get("/template", authenticate, (req, res) => {
-
-  const template = [
-    {
-      "Title": "",
-      "Description": "",
-      "Scheduled Date": "",
-      "Location": "",
-      "Manager": "",
-      "Assigned To (Employee)": "",
-      "Assigned By": ""
-    }
-  ];
-
-  const ws = XLSX.utils.json_to_sheet(template);
-  const wb = XLSX.utils.book_new();
-
-  XLSX.utils.book_append_sheet(wb, ws, "Schedule");
-
-  const buffer = XLSX.write(wb, {
-    type: "buffer",
-    bookType: "xlsx"
-  });
-
-  res.setHeader(
-    "Content-Disposition",
-    "attachment; filename=schedule_template.xlsx"
-  );
-
-  res.send(buffer);
-
-});
-
 
 module.exports = router;

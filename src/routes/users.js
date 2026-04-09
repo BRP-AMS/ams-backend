@@ -55,6 +55,56 @@ router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, r
   }
 });
 
+// GET /api/users/locations
+router.get('/locations', authenticate, async (req, res) => {
+  try {
+
+    const locations = await User.distinct("assigned_block");
+
+    res.json({
+      success: true,
+      data: locations.filter(Boolean)
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// GET /api/users/employees
+router.get('/employees', authenticate, async (req, res) => {
+  try {
+
+    const { manager_id } = req.query;
+
+    let filter = {
+      role: "employee",
+      is_active: 1
+    };
+
+    if (manager_id) {
+      filter.manager_id = manager_id;
+    }
+
+    const employees = await User.find(filter)
+      .select("_id name emp_id manager_id")
+      .lean();
+
+    res.json({
+      success: true,
+      data: employees
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
 // GET /api/users/managers - for admin/hr/super_admin dropdown
 router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res) => {
   try {
@@ -68,6 +118,42 @@ router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res)
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+
+// GET /api/users/employees
+router.get('/employees', authenticate, async (req, res) => {
+  try {
+
+    const { manager_id } = req.query;
+
+    let filter = {
+      role: "employee",
+      is_active: 1
+    };
+
+    if (manager_id) {
+      filter.manager_id = manager_id;
+    }
+
+    const employees = await User.find(filter)
+      .select("_id name emp_id manager_id")
+      .lean();
+
+    res.json({
+      success: true,
+      data: employees
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+});
+
+
 
 // POST /api/users - Admin / Super Admin creates user
 router.post('/', authenticate, authorize('admin'), [

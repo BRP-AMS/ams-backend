@@ -165,54 +165,65 @@ router.post('/bulk',
     const errors=[];
     const toInsert=[];
 
-    for(let i=0;i<rows.length;i++){
+   for (let i = 0; i < rows.length; i++) {
 
-      const row=rows[i];
-      const rowNum=i+2;
+  const row = rows[i];
+  const rowNum = i + 2;
 
-      const title = String(row['title'] || '').trim();
-      const dateRaw = String(row['scheduled_date'] || '').trim();
-      const location = String(row['location'] || '').trim() || null;
-      const description = String(row['description'] || '').trim() || null;
-      const assigned_emp_id = String(row['assigned_emp_id'] || '').trim() || null;
+  const title = String(row['Title'] || '').trim();
+  const description = String(row['Description'] || '').trim() || null;
+  const dateRaw = String(row['Scheduled Date'] || '').trim();
+  const location = String(row['Location'] || '').trim() || null;
+  const manager = String(row['Manager'] || '').trim() || null;
+  const assigned_emp_id = String(row['Assigned To (Employee)'] || '').trim() || null;
+  const assigned_by = String(row['Assigned By'] || '').trim() || null;
 
-      if(!title){ errors.push(`Row ${rowNum}: title required`); continue; }
-      if(!dateRaw){ errors.push(`Row ${rowNum}: scheduled_date required`); continue; }
+  if (!title) {
+    errors.push(`Row ${rowNum}: Title required`);
+    continue;
+  }
 
-      let scheduled_date=dateRaw;
+  if (!dateRaw) {
+    errors.push(`Row ${rowNum}: Scheduled Date required`);
+    continue;
+  }
 
-      if(!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)){
-        errors.push(`Row ${rowNum}: date must be YYYY-MM-DD`);
-        continue;
-      }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
+    errors.push(`Row ${rowNum}: date must be YYYY-MM-DD`);
+    continue;
+  }
 
-      let assigned_to=null;
-      let employee_name=null;
+  let scheduled_date = dateRaw;
 
-      if(assigned_emp_id){
-        const emp=await User.findOne({emp_id:assigned_emp_id}).lean();
-        if(!emp){
-          errors.push(`Row ${rowNum}: employee not found`);
-          continue;
-        }
-        assigned_to=emp._id;
-        employee_name=emp.name;
-      }
+  let assigned_to = null;
+  let employee_name = null;
 
-      toInsert.push({
-        _id:uuidv4(),
-        title,
-        description,
-        scheduled_date,
-        location,
-        assigned_to,
-        employee_name,
-        manager_name:req.user.name,
-        assigned_by:req.user.name,
-        created_by:req.user.id
-      });
+  if (assigned_emp_id) {
+    const emp = await User.findOne({ emp_id: assigned_emp_id }).lean();
 
-    } // ← FIX: loop properly closed
+    if (!emp) {
+      errors.push(`Row ${rowNum}: employee not found`);
+      continue;
+    }
+
+    assigned_to = emp._id;
+    employee_name = emp.name;
+  }
+
+  toInsert.push({
+    _id: uuidv4(),
+    title,
+    description,
+    scheduled_date,
+    location,
+    assigned_to,
+    employee_name,
+    manager_name: manager || req.user.name,
+    assigned_by: assigned_by || req.user.name,
+    created_by: req.user.id
+  });
+
+}
 
     let inserted=[];
     if(toInsert.length){
@@ -298,5 +309,41 @@ router.delete('/:id',
     res.status(500).json({success:false,message:'Server error'});
   }
 });
+
+
+// ── DOWNLOAD BULK TEMPLATE ─────────────────────────────────────
+router.get("/template", authenticate, (req, res) => {
+
+  const template = [
+    {
+      "Title": "",
+      "Description": "",
+      "Scheduled Date": "",
+      "Location": "",
+      "Manager": "",
+      "Assigned To (Employee)": "",
+      "Assigned By": ""
+    }
+  ];
+
+  const ws = XLSX.utils.json_to_sheet(template);
+  const wb = XLSX.utils.book_new();
+
+  XLSX.utils.book_append_sheet(wb, ws, "Schedule");
+
+  const buffer = XLSX.write(wb, {
+    type: "buffer",
+    bookType: "xlsx"
+  });
+
+  res.setHeader(
+    "Content-Disposition",
+    "attachment; filename=schedule_template.xlsx"
+  );
+
+  res.send(buffer);
+
+});
+
 
 module.exports = router;

@@ -43,7 +43,7 @@ const processMissedAutoCheckouts = async () => {
  
     // Find ALL Draft records where date < today (missed by the nightly cron)
     const missed = await AttendanceRecord.find({
-     date: { $lte: todayIST },
+     date: { $lt: todayIST },
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },

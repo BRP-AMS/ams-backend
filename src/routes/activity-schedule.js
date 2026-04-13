@@ -20,9 +20,8 @@ const uploadAttach = multer({
 });
 
 // For bulk Excel/CSV upload
-const bulkStorage = multer.memoryStorage();
-const uploadBulk  = multer({
-  storage: bulkStorage,
+const uploadBulk = multer({
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
     const allowed = /xlsx|xls|csv/;
@@ -31,15 +30,18 @@ const uploadBulk  = multer({
   },
 });
 
-// ── GET /activity-schedule — list all (employees see all) ─────────────────
+// ── GET /activity-schedule ────────────────────────────────────────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
     const { status, date_from, date_to, assigned_to, created_by } = req.query;
     const filter = {};
-
-    if (status)      filter.status         = status;
-    if (assigned_to) filter.assigned_to    = assigned_to;
-    if (created_by)  filter.created_by     = created_by;
+    if (status)      filter.status      = status;
+    if (assigned_to) filter.assigned_to = assigned_to;
+    // Employee: only see schedules assigned to them
+if (req.user.role === 'employee') {
+  filter.assigned_to = req.user.id;
+}
+    if (created_by)  filter.created_by  = created_by;
     if (date_from || date_to) {
       filter.scheduled_date = {};
       if (date_from) filter.scheduled_date.$gte = date_from;
@@ -50,35 +52,23 @@ router.get('/', authenticate, async (req, res) => {
       .sort({ scheduled_date: 1, created_at: -1 })
       .lean();
 
-    // Populate creator, assigned_to, assigned_by, manager, initiated_by, completed_by names
     const userIds = new Set();
     schedules.forEach(s => {
-      if (s.created_by)   userIds.add(s.created_by);
-      if (s.assigned_to)  userIds.add(s.assigned_to);
-      if (s.assigned_by)  userIds.add(s.assigned_by);
-      if (s.manager_id)   userIds.add(s.manager_id);
-      if (s.initiated_by) userIds.add(s.initiated_by);
-      if (s.completed_by) userIds.add(s.completed_by);
+      ['created_by','assigned_to','assigned_by','manager_id','initiated_by','completed_by']
+        .forEach(k => s[k] && userIds.add(s[k]));
     });
 
-    const users = await User.find({ _id: { $in: [...userIds] } })
-      .select('_id name emp_id role')
-      .lean();
+    const users = await User.find({ _id: { $in: [...userIds] } }).select('_id name emp_id role').lean();
     const userMap = {};
     users.forEach(u => { userMap[u._id] = { name: u.name, emp_id: u.emp_id, role: u.role }; });
 
-    // Attach documents for completed schedules
     const completedIds = schedules.filter(s => s.status === 'Completed').map(s => s._id);
-    const docs = completedIds.length
-      ? await ScheduleDocument.find({ schedule_id: { $in: completedIds } }).lean()
-      : [];
+    const docs = completedIds.length ? await ScheduleDocument.find({ schedule_id: { $in: completedIds } }).lean() : [];
     const docsMap = {};
-    docs.forEach(d => {
-      if (!docsMap[d.schedule_id]) docsMap[d.schedule_id] = [];
-      docsMap[d.schedule_id].push(d);
-    });
+    docs.forEach(d => { if (!docsMap[d.schedule_id]) docsMap[d.schedule_id] = []; docsMap[d.schedule_id].push(d); });
 
-    const rl = (r) => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+    const rl = r => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+
     const result = schedules.map(s => {
       const assignerUser = userMap[s.assigned_by] || userMap[s.created_by];
       return {
@@ -104,36 +94,26 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// ── GET /activity-schedule/my-completed — employee's completed schedules ──
+// ── GET /activity-schedule/my-completed ───────────────────────────────────────
 router.get('/my-completed', authenticate, async (req, res) => {
   try {
-    const schedules = await ActivitySchedule.find({ completed_by: req.user.id })
-      .sort({ completed_at: -1 })
-      .lean();
-
+    const schedules = await ActivitySchedule.find({ completed_by: req.user.id }).sort({ completed_at: -1 }).lean();
     const ids  = schedules.map(s => s._id);
-    const docs = ids.length
-      ? await ScheduleDocument.find({ schedule_id: { $in: ids } }).lean()
-      : [];
+    const docs = ids.length ? await ScheduleDocument.find({ schedule_id: { $in: ids } }).lean() : [];
     const docsMap = {};
-    docs.forEach(d => {
-      if (!docsMap[d.schedule_id]) docsMap[d.schedule_id] = [];
-      docsMap[d.schedule_id].push(d);
-    });
-
-    const result = schedules.map(s => ({ ...s, id: s._id, documents: docsMap[s._id] || [] }));
-    res.json({ success: true, data: result });
+    docs.forEach(d => { if (!docsMap[d.schedule_id]) docsMap[d.schedule_id] = []; docsMap[d.schedule_id].push(d); });
+    res.json({ success: true, data: schedules.map(s => ({ ...s, id: s._id, documents: docsMap[s._id] || [] })) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// ── POST /activity-schedule — create single (manager/admin) ───────────────
+// ── POST /activity-schedule — create single ────────────────────────────────────
 router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const { title, description, scheduled_date, location, assigned_emp_id, assigned_to: assignedToId, manager_id } = req.body;
-    if (!title?.trim())      return res.status(422).json({ success: false, message: 'Title is required' });
-    if (!scheduled_date)     return res.status(422).json({ success: false, message: 'Scheduled date is required' });
+    if (!title?.trim())  return res.status(422).json({ success: false, message: 'Title is required' });
+    if (!scheduled_date) return res.status(422).json({ success: false, message: 'Scheduled date is required' });
 
     let assigned_to = null;
     if (assigned_emp_id) {
@@ -146,10 +126,15 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
       assigned_to = emp._id;
     }
 
-    // Resolve assigned_by name from current user
     const creator = await User.findById(req.user.id).select('name role emp_id').lean();
-    const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[creator?.role] || '';
-    const assignedByName = creator ? `${creator.name} (${roleLabel})` : null;
+    const rl = r => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+    const assignedByName = creator ? `${creator.name} (${rl(creator.role)})` : null;
+
+    // Resolve manager_id: admin/super_admin pass it explicitly; manager uses own id
+    let resolvedManagerId = manager_id || null;
+    if (!resolvedManagerId && creator?.role === 'manager') {
+      resolvedManagerId = req.user.id;
+    }
 
     const schedule = await ActivitySchedule.create({
       _id:              uuidv4(),
@@ -161,7 +146,7 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
       created_by:       req.user.id,
       assigned_by:      req.user.id,
       assigned_by_name: assignedByName,
-      manager_id:       manager_id || null,
+      manager_id:       resolvedManagerId,
     });
 
     res.status(201).json({ success: true, data: { ...schedule.toObject(), id: schedule._id } });
@@ -171,7 +156,10 @@ router.post('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'
   }
 });
 
-// ── POST /activity-schedule/bulk — bulk upload via Excel/CSV ──────────────
+// ── POST /activity-schedule/bulk ───────────────────────────────────────────────
+// Handles TWO template formats:
+//   Manager template:    title | description | scheduled_date | location | assigned_emp_id
+//   Admin template:      title | description | scheduled_date | location | manager_emp_id | assigned_emp_id
 router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'),
   uploadBulk.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
@@ -180,28 +168,37 @@ router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_ad
       const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
       const sheet    = workbook.Sheets[workbook.SheetNames[0]];
       const rows     = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-
       if (!rows.length) return res.status(422).json({ success: false, message: 'Excel file is empty' });
+
+      // Determine if uploader is manager
+      const creator = await User.findById(req.user.id).select('name role emp_id').lean();
+      const rl = r => ({ employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[r] || '');
+      const assignedByName = creator ? `${creator.name} (${rl(creator.role)})` : null;
+      const isManagerUploader = creator?.role === 'manager';
 
       const errors   = [];
       const toInsert = [];
 
       for (let i = 0; i < rows.length; i++) {
         const row    = rows[i];
-        const rowNum = i + 2; // 1-indexed + header row
-        const title  = String(row['title'] || row['Title'] || '').trim();
-        const dateRaw = String(row['scheduled_date'] || row['Scheduled Date'] || row['date'] || '').trim();
-        const location       = String(row['location']        || row['Location']        || '').trim() || null;
-        const description    = String(row['description']     || row['Description']     || '').trim() || null;
+        const rowNum = i + 2;
+
+        const title           = String(row['title']          || row['Title']          || '').trim();
+        const dateRaw         = String(row['scheduled_date'] || row['Scheduled Date'] || row['date'] || '').trim();
+        const location        = String(row['location']       || row['Location']       || '').trim() || null;
+        const description     = String(row['description']    || row['Description']    || '').trim() || null;
         const assigned_emp_id = String(row['assigned_emp_id'] || row['Assigned Emp ID'] || row['emp_id'] || '').trim() || null;
+        // Admin template: manager_emp_id column -> resolve to manager_id in DB
+        const manager_emp_id  = String(row['manager_emp_id'] || row['Manager Emp ID'] || '').trim() || null;
+        // manager_name (manager template) and assigned_by (admin template) are informational display columns
+        // backend always derives these from req.user and DB lookups, so they are intentionally ignored here
 
         if (!title)   { errors.push(`Row ${rowNum}: title is required`);          continue; }
         if (!dateRaw) { errors.push(`Row ${rowNum}: scheduled_date is required`); continue; }
 
-        // Parse date — accept YYYY-MM-DD or Excel serial numbers
+        // Parse date
         let scheduled_date = dateRaw;
         if (/^\d{5}$/.test(dateRaw)) {
-          // Excel serial date
           const jsDate = XLSX.SSF.parse_date_code(Number(dateRaw));
           scheduled_date = `${jsDate.y}-${String(jsDate.m).padStart(2,'0')}-${String(jsDate.d).padStart(2,'0')}`;
         } else if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) {
@@ -209,6 +206,7 @@ router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_ad
           continue;
         }
 
+        // Resolve assigned_to
         let assigned_to = null;
         if (assigned_emp_id) {
           const emp = await User.findOne({ emp_id: assigned_emp_id }).select('_id').lean();
@@ -216,21 +214,31 @@ router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_ad
           assigned_to = emp._id;
         }
 
+        // Resolve manager_id:
+        // - Manager uploading → always use own id
+        // - Admin uploading with manager_emp_id column → look up that manager
+        let resolvedManagerId = isManagerUploader ? req.user.id : null;
+        if (!isManagerUploader && manager_emp_id) {
+          const mgr = await User.findOne({ emp_id: manager_emp_id, role: 'manager' }).select('_id').lean();
+          if (!mgr) { errors.push(`Row ${rowNum}: manager "${manager_emp_id}" not found`); continue; }
+          resolvedManagerId = mgr._id;
+        }
+
         toInsert.push({
-          _id:            uuidv4(),
+          _id:              uuidv4(),
           title,
           description,
           scheduled_date,
           location,
           assigned_to,
-          created_by:     req.user.id,
+          created_by:       req.user.id,
+          assigned_by:      req.user.id,
+          assigned_by_name: assignedByName,
+          manager_id:       resolvedManagerId,
         });
       }
 
-      let inserted = [];
-      if (toInsert.length) {
-        inserted = await ActivitySchedule.insertMany(toInsert);
-      }
+      const inserted = toInsert.length ? await ActivitySchedule.insertMany(toInsert) : [];
 
       res.json({
         success:  true,
@@ -246,14 +254,15 @@ router.post('/bulk', authenticate, authorize('manager', 'admin', 'hr', 'super_ad
   }
 );
 
-// ── GET /activity-schedule/template — download blank Excel template ────────
+// ── GET /activity-schedule/template ───────────────────────────────────────────
+// Returns the manager template (5 cols). Admin template is generated client-side.
 router.get('/template', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), (req, res) => {
   const ws = XLSX.utils.aoa_to_sheet([
     ['title', 'description', 'scheduled_date', 'location', 'assigned_emp_id'],
-    ['Block Visit - Araria', 'Awareness camp for MSMEs', '2025-04-10', 'Araria Block', 'EMP001'],
-    ['Training Workshop', 'Loan facilitation training', '2025-04-15', 'District HQ', ''],
+    ['Block Visit - Agartala', 'Awareness camp for MSMEs', '2025-06-10', 'Agartala', 'EMP001'],
+    ['Training Workshop',      'Loan facilitation training', '2025-06-15', 'Udaipur',  'EMP002'],
   ]);
-  ws['!cols'] = [{ wch: 30 }, { wch: 40 }, { wch: 18 }, { wch: 25 }, { wch: 18 }];
+  ws['!cols'] = [{ wch: 30 }, { wch: 40 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Schedules');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -262,31 +271,27 @@ router.get('/template', authenticate, authorize('manager', 'admin', 'hr', 'super
   res.send(buf);
 });
 
-// ── PUT /activity-schedule/:id/initiate — employee initiates ─────────────
+// ── PUT /activity-schedule/:id/initiate ──────────────────────────────────────
 router.put('/:id/initiate', authenticate, async (req, res) => {
   try {
     const schedule = await ActivitySchedule.findById(req.params.id);
     if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
     if (schedule.status !== 'Pending')
       return res.status(409).json({ success: false, message: 'Schedule is already initiated or completed' });
-
-    // If assigned to a specific employee, only that employee can initiate
-    if (schedule.assigned_to && schedule.assigned_to !== req.user.id) {
+    if (schedule.assigned_to && schedule.assigned_to.toString() !== req.user.id)
       return res.status(403).json({ success: false, message: 'This schedule is assigned to another employee' });
-    }
 
     schedule.status       = 'Initiated';
     schedule.initiated_by = req.user.id;
     schedule.initiated_at = new Date();
     await schedule.save();
-
     res.json({ success: true, data: { ...schedule.toObject(), id: schedule._id } });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// ── PUT /activity-schedule/:id/complete — employee completes ──────────────
+// ── PUT /activity-schedule/:id/complete ──────────────────────────────────────
 router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10), async (req, res) => {
   try {
     const schedule = await ActivitySchedule.findById(req.params.id);
@@ -309,17 +314,11 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
     schedule.remarks          = remarks?.trim() || null;
     await schedule.save();
 
-    // Save attachments to Cloudinary
     if (req.files?.length) {
-      const urls = await Promise.all(
-        req.files.map(f => uploadFile(f.buffer, 'ams/schedule-docs', f.originalname, f.mimetype))
-      );
+      const urls = await Promise.all(req.files.map(f => uploadFile(f.buffer, 'ams/schedule-docs', f.originalname, f.mimetype)));
       await ScheduleDocument.insertMany(urls.map((url, i) => ({
-        _id:         uuidv4(),
-        schedule_id: schedule._id,
-        file_path:   url,
-        file_name:   req.files[i].originalname,
-        file_type:   req.files[i].mimetype,
+        _id: uuidv4(), schedule_id: schedule._id,
+        file_path: url, file_name: req.files[i].originalname, file_type: req.files[i].mimetype,
       })));
     }
 
@@ -331,16 +330,13 @@ router.put('/:id/complete', authenticate, uploadAttach.array('attachments', 10),
   }
 });
 
-// ── DELETE /activity-schedule/:id — manager/admin deletes ────────────────
+// ── DELETE /activity-schedule/:id ────────────────────────────────────────────
 router.delete('/:id', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const schedule = await ActivitySchedule.findById(req.params.id);
     if (!schedule) return res.status(404).json({ success: false, message: 'Schedule not found' });
-
-    // Files are on Cloudinary — just remove DB records
     await ScheduleDocument.deleteMany({ schedule_id: req.params.id });
     await schedule.deleteOne();
-
     res.json({ success: true, message: 'Schedule deleted' });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });

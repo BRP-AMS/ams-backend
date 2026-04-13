@@ -122,8 +122,23 @@ router.get('/', authenticate, [
 
     const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
 
-    const matchFilter = { activity_date: { $gte: start, $lte: end } };
-    if (req.user.role === 'employee') matchFilter.user_id = req.user.id;
+  const matchFilter = { activity_date: { $gte: start, $lte: end } };
+
+if (req.user.role === 'employee') {
+  matchFilter.user_id = req.user.id;
+} else if (req.user.role === 'manager') {
+  const teamMembers = await User.find(
+    { manager_id: req.user.id, is_active: 1 },
+    { _id: 1 }
+  ).lean();
+
+  if (teamMembers.length === 0) {
+    // Manager has no team — return empty immediately
+    return res.json({ success: true, data: [], total: 0, start, end });
+  }
+
+  matchFilter.user_id = { $in: teamMembers.map(m => String(m._id)) };
+}
     if (block)        matchFilter.block_name   = block;
     if (sector)       matchFilter.sector       = sector;
     if (support_type) matchFilter.support_type = support_type;
@@ -157,12 +172,18 @@ router.get('/:id', authenticate, async (req, res) => {
   try {
     const rows = await Activity.aggregate([
       { $match: { _id: req.params.id } },
-      { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
-      { $addFields: {
-          user_name: { $arrayElemAt: ['$user.name',   0] },
-          emp_id:    { $arrayElemAt: ['$user.emp_id', 0] },
-      }},
-      { $project: { user: 0 } },
+     { $lookup: { from: 'users', localField: 'assigned_to',  foreignField: '_id', as: 'assignee' } },
+{ $lookup: { from: 'users', localField: 'created_by',   foreignField: '_id', as: 'creator'  } },
+{ $lookup: { from: 'users', localField: 'manager_id',   foreignField: '_id', as: 'mgr'      } },
+{ $addFields: {
+    assigned_to_name:   { $arrayElemAt: ['$assignee.name',   0] },
+    assigned_to_emp_id: { $arrayElemAt: ['$assignee.emp_id', 0] },
+    created_by_name:    { $arrayElemAt: ['$creator.name',    0] },
+    created_by_role:    { $arrayElemAt: ['$creator.role',    0] },
+    manager_name:       { $arrayElemAt: ['$mgr.name',        0] },
+    manager_emp_id:     { $arrayElemAt: ['$mgr.emp_id',      0] },
+}},
+{ $project: { assignee: 0, creator: 0, mgr: 0 } },
     ]);
 
     if (!rows.length) return res.status(404).json({ success: false, message: 'Not found' });
@@ -305,12 +326,15 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
-    if (req.user.role === 'employee') {
-      matchFilter.user_id = req.user.id;
-    } else if (req.user.role === 'manager') {
-      const teamMembersExcel = await User.find({ manager_id: req.user.id, is_active: 1 }).distinct('_id');
-      matchFilter.user_id = { $in: teamMembersExcel };
-    }
+    // In report/excel and report/pdf routes, replace:
+if (req.user.role === 'employee') {
+  matchFilter.user_id = req.user.id;
+} else if (req.user.role === 'manager') {
+  const teamMembersExcel = await User.find(
+    { manager_id: req.user.id, is_active: 1 }
+  ).distinct('_id');
+  matchFilter.user_id = { $in: teamMembersExcel };
+}
     // hr / super_admin / admin: see all
 
     const rows = await Activity.aggregate([
@@ -384,12 +408,14 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
-    if (req.user.role === 'employee') {
-      matchFilter.user_id = req.user.id;
-    } else if (req.user.role === 'manager') {
-      const teamMembersPdf = await User.find({ manager_id: req.user.id, is_active: 1 }).distinct('_id');
-      matchFilter.user_id = { $in: teamMembersPdf };
-    }
+   if (req.user.role === 'employee') {
+  matchFilter.user_id = req.user.id;
+} else if (req.user.role === 'manager') {
+  const teamMembersExcel = await User.find(
+    { manager_id: req.user.id, is_active: 1 }
+  ).distinct('_id');
+  matchFilter.user_id = { $in: teamMembersExcel };
+}
     // hr / super_admin / admin: see all
 
     const rows = await Activity.aggregate([

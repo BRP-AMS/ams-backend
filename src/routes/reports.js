@@ -358,23 +358,23 @@ if (role === 'employee') {
   empSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
 
   ws.getCell(r,8).value='Manager Sign:';
-  ws.getCell(r,8).font={bold:true,size:20,name:'Calibri',color:{argb:'FF1F3864'}};
-  mc(ws,r,9,r,13);
-  const mgrSigCell=ws.getCell(r,9);
+  ws.getCell(r,8).font={bold:true,size:15,name:'Calibri',color:{argb:'FF1F3864'}};
+  mc(ws,r,12,r,13);
+  const mgrSigCell=ws.getCell(r,12);
   mgrSigCell.value=mgrName?`(${mgrName})`:'';
   mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
   mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
   mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
 } else {
   // Manager / super_admin / hr / admin: only Manager sign
-  ws.getCell(r,2).value='Manager Sign:';
-  ws.getCell(r,2).font={bold:true,size:10,name:'Calibri',color:{argb:'FF1F3864'}};
-  mc(ws,r,3,r,8);
-  const mgrSigCell=ws.getCell(r,3);
-  mgrSigCell.value=mgrName?`(${mgrName})`:'';
-  mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
-  mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
-  mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
+  // ws.getCell(r,2).value='Manager Sign:';
+  // ws.getCell(r,2).font={bold:true,size:10,name:'Calibri',color:{argb:'FF1F3864'}};
+  // mc(ws,r,3,r,8);
+  // const mgrSigCell=ws.getCell(r,3);
+  // mgrSigCell.value=mgrName?`(${mgrName})`:'';
+  // mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
+  // mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
+  // mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
 }
 
         ws.views=[{state:'frozen',xSplit:3,ySplit:4}];
@@ -546,13 +546,13 @@ if (role === 'employee') {
   }
 } else {
   // Manager / super_admin / hr: only Manager sign
-  doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold')
-     .text('Manager Sign:',ML,sy);
-  doc.moveTo(ML+90,sy+12).lineTo(ML+90+sigLineW,sy+12).stroke('#1F3864');
-  if(managerName){
-    doc.fillColor('#555').fontSize(15).font('Helvetica-Oblique')
-       .text(`(${managerName})`,ML+90,sy+14,{width:sigLineW,align:'center'});
-  }
+  // doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold')
+  //    .text('Manager Sign:',ML,sy);
+  // doc.moveTo(ML+90,sy+12).lineTo(ML+90+sigLineW,sy+12).stroke('#1F3864');
+  // if(managerName){
+  //   doc.fillColor('#555').fontSize(15).font('Helvetica-Oblique')
+  //      .text(`(${managerName})`,ML+90,sy+14,{width:sigLineW,align:'center'});
+  // }
 }
 
       doc.end();
@@ -565,7 +565,332 @@ if (role === 'employee') {
     res.status(500).json({success:false,message:'Export failed',error:err.message});
   }
 });
+/**
+ * REPLACE the entire /leave-export route in src/routes/reports.js with this.
+ *
+ * Fixes (confirmed from DB schema):
+ *  1. NO endDate cap for leave exports — leaves are complete records (unlike attendance check-ins)
+ *     Attendance: cap to yesterday (today has no checkout yet)
+ *     Leaves: no cap — can be today or future
+ *  2. Correct snake_case field names from schema:
+ *     leave_type, leave_status, leave_reason, manager_remark, hr_override, hr_remark
+ *  3. empId filter priority — works for all roles
+ *  4. Status filter uses leave_status field
+ */
 
+router.get('/leave-export',
+  authenticate,
+  authorize('super_admin', 'admin', 'hr', 'manager', 'employee'),
+  async (req, res) => {
+  try {
+    const { format = 'excel', status, empId } = req.query;
+    const role = req.user.role;
+    let { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate)
+      return res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+
+    // ✅ FIX 1: NO cap to yesterday for leave reports
+    // Leaves are submitted as complete records and can be today or future
+    // (Unlike attendance check-ins which need yesterday cap for incomplete day)
+    if (startDate > endDate)
+      return res.status(400).json({ success: false, message: 'startDate must be before or equal to endDate' });
+
+    // ── Employee scope ─────────────────────────────────────────────────────
+    let employees = [];
+
+    if (role === 'employee') {
+      const me = await User.findById(req.user.id).select('_id name emp_id').lean();
+      if (me) employees = [me];
+
+    } else if (empId && empId.trim() !== '') {
+      // ✅ Specific employee selected — works for ALL roles
+      const specific = await User.findById(toObjId(empId)).select('_id name emp_id').lean();
+      if (specific) employees = [specific];
+      else return res.status(404).json({ success: false, message: 'Selected employee not found' });
+
+    } else if (role === 'manager') {
+      employees = await User.find({ manager_id: toObjId(req.user.id), is_active: { $ne: false } })
+        .select('_id name emp_id').sort({ emp_id: 1 }).lean();
+
+    } else {
+      // admin / hr / super_admin — all employees
+      employees = await User.find({ role: 'employee', is_active: { $ne: false } })
+        .select('_id name emp_id').sort({ emp_id: 1 }).lean();
+    }
+
+    if (!employees.length)
+      return res.status(404).json({ success: false, message: 'No employees found' });
+
+    // ── Fetch records in date range ────────────────────────────────────────
+    const allRecs = await AttendanceRecord.find({
+      date:   { $gte: startDate, $lte: endDate },
+      emp_id: { $in: employees.map(e => e._id) },
+    }).sort({ date: 1 }).lean();
+
+    // ✅ FIX 2: Use confirmed schema field names
+    // duty_type === 'Leave'  → leave created via leaveRequest flow
+    // leave_type is non-null → leave created via applyLeave flow
+    const leaveRecs = allRecs.filter(r =>
+      r.duty_type === 'Leave' ||
+      (r.leave_type && r.leave_type.trim() !== '')
+    );
+
+    // ✅ FIX 3: Status filter uses leave_status (the correct DB field)
+    const filtered = (status && status !== 'All')
+      ? leaveRecs.filter(r => r.leave_status === status)
+      : leaveRecs;
+
+    // Build emp lookup
+    const empMap = {};
+    for (const e of employees) empMap[String(e._id)] = e;
+
+    // ✅ FIX 4: All field names now match the schema exactly
+    const rows = filtered.map(r => ({
+      empCode:       empMap[String(r.emp_id)]?.emp_id || '',
+      empName:       empMap[String(r.emp_id)]?.name   || '',
+      date:          r.date         || '',
+      leaveType:     r.leave_type   || '',          // schema: leave_type
+      status:        r.leave_status || r.status || '',  // schema: leave_status
+      reason:        r.leave_reason || '',          // schema: leave_reason
+      managerRemark: r.manager_remark || '',        // schema: manager_remark
+      hrOverride:    r.hr_override ? 'Yes' : 'No', // schema: hr_override (Boolean)
+      hrRemark:      r.hr_remark   || '',           // schema: hr_remark
+    }));
+
+    const sd = new Date(startDate + 'T00:00:00+05:30');
+    const ed = new Date(endDate   + 'T00:00:00+05:30');
+    const rangeLabel =
+      `${ordinal(sd.getDate())} ${sd.toLocaleDateString('en-IN', { timeZone: IST, month: 'short' })} ${sd.getFullYear()}` +
+      ` To ` +
+      `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN', { timeZone: IST, month: 'long' })} ${ed.getFullYear()}`;
+
+    const reportTitle = employees.length === 1
+      ? `Leave Report – ${employees[0].name} (${employees[0].emp_id || '—'})`
+      : 'Leave Report – BRP (Block Resource Person)';
+
+    const approved = rows.filter(r => r.status === 'Approved').length;
+    const rejected = rows.filter(r => r.status === 'Rejected').length;
+    const pending  = rows.filter(r => r.status === 'Pending').length;
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  EXCEL
+    // ══════════════════════════════════════════════════════════════════════
+    if (format === 'excel') {
+      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
+      const ws = wb.addWorksheet('Leave Report');
+
+      const FILL_HDR     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
+      const FILL_SUB     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EDF4' } };
+      const FILL_EVEN    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+      const FILL_ODD     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7F7F7' } };
+      const FILL_APPROVE = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
+      const FILL_REJECT  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+      const FILL_PENDING = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9C4' } };
+      const CBDR = {
+        top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
+        bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+        left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
+        right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      };
+      const COLS = [
+        { key: 'empCode',       header: 'Emp Code',      width: 12 },
+        { key: 'empName',       header: 'Employee Name',  width: 22 },
+        { key: 'date',          header: 'Date',           width: 14 },
+        { key: 'leaveType',     header: 'Leave Type',     width: 18 },
+        { key: 'status',        header: 'Status',         width: 14 },
+        { key: 'reason',        header: 'Reason',         width: 32 },
+        { key: 'managerRemark', header: 'Manager Remark', width: 28 },
+        { key: 'hrOverride',    header: 'HR Override',    width: 13 },
+        { key: 'hrRemark',      header: 'HR Remark',      width: 28 },
+      ];
+      const NC = COLS.length;
+
+      ws.mergeCells(1, 1, 1, NC);
+      Object.assign(ws.getCell(1, 1), {
+        value: reportTitle,
+        font:  { bold: true, size: 14, color: { argb: 'FFFFFFFF' }, name: 'Calibri' },
+        fill:  FILL_HDR,
+        alignment: { horizontal: 'center', vertical: 'center' },
+      });
+      ws.getRow(1).height = 26;
+
+      ws.mergeCells(2, 1, 2, NC);
+      Object.assign(ws.getCell(2, 1), {
+        value: `Period: ${rangeLabel}`,
+        font:  { bold: true, size: 11, color: { argb: 'FF1F3864' }, name: 'Calibri' },
+        fill:  FILL_SUB,
+        alignment: { horizontal: 'center', vertical: 'center' },
+      });
+      ws.getRow(2).height = 18;
+
+      ws.mergeCells(3, 1, 3, NC);
+      Object.assign(ws.getCell(3, 1), {
+        value: `Total: ${rows.length}   |   Approved: ${approved}   |   Rejected: ${rejected}   |   Pending: ${pending}`,
+        font:  { size: 10, italic: true, color: { argb: 'FF444444' }, name: 'Calibri' },
+        fill:  FILL_SUB,
+        alignment: { horizontal: 'center', vertical: 'center' },
+      });
+      ws.getRow(3).height = 15;
+
+      ws.getRow(4).height = 18;
+      COLS.forEach((col, i) => {
+        ws.getColumn(i + 1).width = col.width;
+        const c = ws.getCell(4, i + 1);
+        c.value = col.header;
+        c.font  = { bold: true, size: 10, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
+        c.fill  = FILL_HDR;
+        c.border = CBDR;
+        c.alignment = { horizontal: 'center', vertical: 'center' };
+      });
+
+      if (rows.length === 0) {
+        ws.mergeCells(5, 1, 5, NC);
+        Object.assign(ws.getCell(5, 1), {
+          value: 'No leave records found for the selected period and filters.',
+          font:  { italic: true, size: 10, color: { argb: 'FF888888' } },
+          alignment: { horizontal: 'center', vertical: 'center' },
+        });
+        ws.getRow(5).height = 18;
+      } else {
+        rows.forEach((row, idx) => {
+          const rowN = 5 + idx;
+          ws.getRow(rowN).height = 15;
+          let rowFill = idx % 2 === 0 ? FILL_EVEN : FILL_ODD;
+          if      (row.status === 'Approved') rowFill = FILL_APPROVE;
+          else if (row.status === 'Rejected') rowFill = FILL_REJECT;
+          else if (row.status === 'Pending')  rowFill = FILL_PENDING;
+
+          COLS.forEach((col, i) => {
+            const c = ws.getCell(rowN, i + 1);
+            c.value  = row[col.key] || '';
+            c.fill   = rowFill;
+            c.border = CBDR;
+            c.font   = { size: 9, name: 'Calibri' };
+            c.alignment = {
+              horizontal: ['empCode','status','hrOverride'].includes(col.key) ? 'center' : 'left',
+              vertical:   'center',
+              wrapText:   ['reason','managerRemark','hrRemark'].includes(col.key),
+            };
+          });
+
+          const sc = ws.getCell(rowN, 5);
+          const statusColor =
+            row.status === 'Approved' ? 'FF047857' :
+            row.status === 'Rejected' ? 'FFB91C1C' : 'FFB45309';
+          sc.font = { bold: true, size: 9, name: 'Calibri', color: { argb: statusColor } };
+        });
+      }
+
+      ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 4 }];
+      ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: NC } };
+      ws.pageSetup = {
+        paperSize: 9, orientation: 'landscape',
+        fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+        printTitlesRow: '$1:$4',
+        margins: { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 },
+      };
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="Leave_Report_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  PDF
+    // ══════════════════════════════════════════════════════════════════════
+    if (format === 'pdf') {
+      const doc = new PDFDoc({
+        size: 'A3', layout: 'landscape',
+        margins: { top: 28, bottom: 28, left: 28, right: 28 },
+        autoFirstPage: true,
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Leave_Report_${startDate}_to_${endDate}.pdf"`);
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+      doc.pipe(res);
+
+      const ML      = 28;
+      const usableW = doc.page.width - ML * 2;
+      const colWidths = [55, 110, 62, 85, 65, 145, 130, 55, 130];
+      const colKeys   = ['empCode','empName','date','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
+      const colHdrs   = ['Emp Code','Employee Name','Date','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
+      const totalW    = colWidths.reduce((a, b) => a + b, 0);
+      const cw        = colWidths.map(w => (w / totalW) * usableW);
+      const RH = 14, HRH = 16;
+      let y = ML;
+
+      const drawPageHeader = (yy) => {
+        doc.rect(ML, yy, usableW, 20).fill('#1F3864');
+        doc.fillColor('#FFFFFF').fontSize(11).font('Helvetica-Bold')
+           .text(reportTitle, ML, yy + 5, { width: usableW, align: 'center' });
+        yy += 20;
+        doc.rect(ML, yy, usableW, 13).fill('#E8EDF4').stroke('#CCCCCC');
+        doc.fillColor('#1F3864').fontSize(8).font('Helvetica')
+           .text(
+             `Period: ${rangeLabel}   |   Total: ${rows.length}   Approved: ${approved}   Rejected: ${rejected}   Pending: ${pending}`,
+             ML + 4, yy + 3, { width: usableW - 8, align: 'center' }
+           );
+        yy += 13;
+        let cx = ML;
+        cw.forEach((w, i) => {
+          doc.rect(cx, yy, w, HRH).fill('#1F3864').stroke('#AAAAAA');
+          doc.fillColor('#FFFFFF').fontSize(6.5).font('Helvetica-Bold')
+             .text(colHdrs[i], cx + 2, yy + 4, { width: w - 4, align: 'center' });
+          cx += w;
+        });
+        return yy + HRH;
+      };
+
+      y = drawPageHeader(y);
+
+      if (rows.length === 0) {
+        doc.rect(ML, y, usableW, RH).fill('#FFFFFF').stroke('#CCCCCC');
+        doc.fillColor('#888888').fontSize(8).font('Helvetica-Oblique')
+           .text('No leave records found for the selected period and filters.', ML, y + 3, { width: usableW, align: 'center' });
+      } else {
+        rows.forEach((row, idx) => {
+          if (y + RH > doc.page.height - 40) {
+            doc.addPage({ size: 'A3', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+            y = drawPageHeader(28);
+          }
+          const bg =
+            row.status === 'Approved' ? '#D1FAE5' :
+            row.status === 'Rejected' ? '#FEE2E2' :
+            row.status === 'Pending'  ? '#FFF9C4' :
+            (idx % 2 === 0 ? '#FFFFFF' : '#F9F9F9');
+
+          doc.rect(ML, y, usableW, RH).fill(bg).stroke('#DDDDDD');
+          let cx = ML;
+          colKeys.forEach((key, i) => {
+            const val = String(row[key] || '');
+            const isCenter = ['empCode','status','hrOverride'].includes(key);
+            const textColor =
+              key === 'status'
+                ? (row.status === 'Approved' ? '#047857' : row.status === 'Rejected' ? '#B91C1C' : '#B45309')
+                : '#000000';
+            doc.rect(cx, y, cw[i], RH).stroke('#DDDDDD');
+            doc.fillColor(textColor).fontSize(6)
+               .font(key === 'status' ? 'Helvetica-Bold' : 'Helvetica')
+               .text(val, cx + 2, y + 3, { width: cw[i] - 4, align: isCenter ? 'center' : 'left', lineBreak: false, ellipsis: true });
+            cx += cw[i];
+          });
+          y += RH;
+        });
+      }
+
+      doc.end();
+      return;
+    }
+
+    res.status(400).json({ success: false, message: 'format must be excel or pdf' });
+  } catch (err) {
+    console.error('[LeaveExport]', err);
+    res.status(500).json({ success: false, message: 'Leave export failed', error: err.message });
+  }
+});
 // ── dashboard-stats ───────────────────────────────────────────────────────────
 router.get('/dashboard-stats', authenticate, async (req,res)=>{
   try{

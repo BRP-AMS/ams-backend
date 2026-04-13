@@ -105,7 +105,7 @@ app.use('/api/', limiter);
 const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
 const { v4: uuidv4 } = require('uuid');
 
-cron.schedule('28 18 * * *', async () => {   // 18:28 UTC = 23:58 IST
+cron.schedule('58 23 * * *', async () => { 
   console.log('[AutoCheckout] Nightly cron triggered');
   try {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -178,7 +178,7 @@ connectionPromise.then(async () => {
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const missed = await AttendanceRecord.find({
-      date:          { $lt: todayIST },   // strictly before today
+      date: { $lte: todayIST },  // strictly before today
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },

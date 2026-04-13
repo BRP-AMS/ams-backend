@@ -1,3 +1,4 @@
+
 const express      = require('express');
 const router       = express.Router();
 const multer       = require('multer');
@@ -41,7 +42,7 @@ const processMissedAutoCheckouts = async () => {
  
     // Find ALL Draft records where date < today (missed by the nightly cron)
     const missed = await AttendanceRecord.find({
-      date:          { $lt: todayIST },
+     date: { $lte: todayIST },
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },
@@ -562,49 +563,75 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 });
 
 // ── PUT /api/attendance/:id/hr-override ──────────────────────────────────
-// HR / Super Admin: override a Rejected record back to Approved with mandatory remark
+// ── In src/routes/attendance.js
+// REPLACE the PUT /:id/hr-override handler with this ────────────────────────
+// Added: block second override if hr_override already true
+
 router.put('/:id/hr-override', authenticate, authorize('hr'), [
   body('remark').notEmpty().withMessage('HR override remark is required'),
 ], async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  if (!errors.isEmpty())
+    return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
     const { remark } = req.body;
     const record = await AttendanceRecord.findById(req.params.id).lean();
-    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (!record)
+      return res.status(404).json({ success: false, message: 'Record not found' });
 
-    if (record.status !== 'Rejected')
-      return res.status(400).json({ success: false, message: 'HR override only allowed on Rejected records' });
+    // ✅ Block second override — HR can only override ONCE
+    if (record.hr_override)
+      return res.status(400).json({
+        success: false,
+        message: 'HR override has already been applied to this record. No further changes allowed.',
+      });
 
-    const updateFields = {
-      status:         'Approved',
-      hr_override:    true,
-      hr_remark:      remark,
-      hr_actioned_by: req.user.id,
-      hr_actioned_at: new Date(),
-    };
-    if (record.leave_type) updateFields.leave_status = 'Approved';
+    // Only allow after manager has acted
+    const currentStatus = record.leave_status || record.status;
+    if (currentStatus !== 'Approved' && currentStatus !== 'Rejected')
+      return res.status(400).json({
+        success: false,
+        message: 'HR override can only be applied after manager has Approved or Rejected the leave.',
+      });
 
-    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
+    // Toggle: Approved → Rejected, Rejected → Approved
+    const newStatus = currentStatus === 'Approved' ? 'Rejected' : 'Approved';
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        status:         newStatus,
+        leave_status:   newStatus,
+        hr_override:    true,
+        hr_remark:      remark,
+        hr_actioned_by: req.user.id,
+        hr_actioned_at: new Date(),
+      },
+    });
 
     await notify(
       record.emp_id,
-      'Attendance Override by HR ✓',
-      `Your ${record.leave_type ? record.leave_type + ' request' : 'attendance'} for ${record.date} has been approved via HR override. Remark: ${remark}`,
-      'success', record._id, '/employee/history'
+      `Leave ${newStatus} via HR Override`,
+      `Your ${record.leave_type || 'leave'} request for ${record.date} has been ${newStatus} via HR override. Remark: ${remark}`,
+      newStatus === 'Approved' ? 'success' : 'warning',
+      record._id,
+      '/employee/history'
     );
 
     await AuditLog.create({
-      _id: uuidv4(), user_id: req.user.id, action: 'HR_OVERRIDE_APPROVE',
+      _id: uuidv4(), user_id: req.user.id, action: 'HR_OVERRIDE',
       entity_type: 'attendance', entity_id: record._id,
-      old_value: 'Rejected', new_value: 'Approved',
+      old_value: currentStatus, new_value: newStatus,
     });
 
     const updated = await AttendanceRecord.findById(record._id).lean();
-    res.json({ success: true, message: 'HR override applied successfully', data: formatRecord(updated) });
+    res.json({
+      success: true,
+      message: `HR override applied — leave is now ${newStatus}. This is final.`,
+      data: formatRecord(updated),
+    });
   } catch (err) {
-    console.error(err);
+    console.error('[HROverride]', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

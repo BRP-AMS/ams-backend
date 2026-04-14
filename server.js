@@ -145,7 +145,7 @@ const pruneRevokedTokens = async () => {
 };
 
 // Run once at startup (after DB connection), then hourly
-connectionPromise.then(() => {
+connectionPromise.then(async () => { 
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
 

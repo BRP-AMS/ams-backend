@@ -32,8 +32,6 @@ const uploadAttach = multer({
 });
 
 
-const PDFDocument = require("pdfkit");
-
 router.get("/report/pdf", authenticate, async (req, res) => {
   try {
     const { filter } = req.query;
@@ -154,26 +152,44 @@ const uploadBulk = multer({
 });
 
 // ── LIST schedules ───────────────────────────────────────────────────────
-router.get('/', authenticate, async (req,res)=>{
-  try{
+router.get('/', authenticate, async (req, res) => {
+  try {
+
     const schedules = await ActivitySchedule.find()
-      .sort({scheduled_date:1, created_at:-1})
+      .sort({ scheduled_date: 1, created_at: -1 })
       .lean();
 
-    res.json({success:true,data:schedules});
-  }catch(err){
-    console.error(err);
-    res.status(500).json({success:false,message:'Server error'});
+    const formatted = schedules.map(s => ({
+      ...s,
+      manager_name: s.manager_name || s.assigned_by,
+      id: s._id
+    }));
+
+    res.json({
+      success: true,
+      data: formatted
+    });
+
+  } catch (err) {
+    console.error("Schedule fetch error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch schedules"
+    });
   }
 });
 
 // ── CREATE schedule ──────────────────────────────────────────────────────
 router.post('/', authenticate, async (req,res)=>{
   try{
+
     const {title,description,scheduled_date,location,assigned_emp_id}=req.body;
 
+    const currentUser = await User.findById(req.user.id).lean();
+    let manager_name = currentUser?.name || "Manager";
+
+
     let employee_name=null;
-    let manager_name=req.user.name;
     let assigned_to=null;
 
     if(assigned_emp_id){
@@ -184,19 +200,18 @@ router.post('/', authenticate, async (req,res)=>{
       }
     }
 
-    const schedule=await ActivitySchedule.create({
-      _id:uuidv4(),
-      title,
-      description,
-      scheduled_date,
-      location,
-      assigned_to,
-      employee_name,
-      manager_name,
-      assigned_by:req.user.name,
-      created_by:req.user.id
-    });
-
+    const schedule = await ActivitySchedule.create({
+  _id: uuidv4(),
+  title,
+  description,
+  scheduled_date,
+  location,
+  assigned_to,
+  employee_name,
+  manager_name: manager_name,
+  assigned_by: manager_name,
+  created_by: req.user.id
+});
     res.status(201).json({success:true,data:schedule});
 
   }catch(err){

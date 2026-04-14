@@ -26,7 +26,68 @@ const upload = multer({
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
   await Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
 };
-
+const processMissedAutoCheckouts = async () => {
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+ 
+    // Find ALL Draft records where date < today (missed by the nightly cron)
+    const missed = await AttendanceRecord.find({
+     date: { $lte: todayIST },
+      status:        'Draft',
+      checkout_time: null,
+      duty_type:     { $ne: 'Leave' },
+    }).lean();
+ 
+    if (!missed.length) return 0;
+ 
+    for (const record of missed) {
+      const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+      // Use 23:58 as the auto-checkout time on the record's date
+      const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
+      const workedHrs  = Math.max(
+        0,
+        Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100
+      );
+ 
+      await AttendanceRecord.findByIdAndUpdate(record._id, {
+        $set: {
+          checkout_time:    '23:58',
+          status:           'Approved',          // ← KEY FIX: was missing this
+          submitted_at:     new Date(),
+          is_auto_checkout: true,
+          checkout_remarks: 'Auto checkout — employee did not check out',
+          worked_hours:     workedHrs > 0 ? workedHrs : null,
+          leave_type:       workedHrs < 4 ? 'Half Day' : null,
+          leave_status:     workedHrs < 4 ? 'Pending'  : null,
+        },
+      });
+ 
+      if (record.manager_id) {
+        const emp = await User.findById(record.emp_id).select('name').lean();
+        await notify(
+          record.manager_id,
+          '⚠️ Missed Auto Checkout',
+          `${emp?.name || 'Employee'} forgot to check out on ${record.date}. Auto-processed.`,
+          'warning',
+          record._id,
+          '/manager/queue'
+        );
+      }
+ 
+      await AuditLog.create({
+        _id: uuidv4(), user_id: record.emp_id,
+        action: 'AUTO_CHECKOUT_MISSED', entity_type: 'attendance', entity_id: record._id,
+        new_value: 'Pending',
+      });
+    }
+ 
+    console.log(`[MissedAutoCheckout] Processed ${missed.length} records`);
+    return missed.length;
+  } catch (err) {
+    console.error('[MissedAutoCheckout] Error:', err.message);
+    return 0;
+  }
+};
 // ── Helper: build aggregation pipeline for record list ───────────────────
 const recordListPipeline = (matchFilter, sortStage, skip, limit) => [
   { $match: matchFilter },

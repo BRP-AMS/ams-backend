@@ -97,7 +97,8 @@ app.use('/api/', limiter);
 const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
 const { v4: uuidv4 } = require('uuid');
 
-cron.schedule('58 23 * * *', async () => {
+cron.schedule('58 23 * * *', async () => { 
+  console.log('[AutoCheckout] Nightly cron triggered'); 
   try {
     const today = new Date().toISOString().split('T')[0];
     const unchecked = await AttendanceRecord.find({ date: today, status: 'Draft', checkout_time: null }).lean();
@@ -150,8 +151,54 @@ connectionPromise.then(() => {
 
   // SMTP verification happens automatically in src/utils/mailer.js on require()
   require('./src/utils/mailer');
+  // ── NEW: Process any Draft records missed while server was down (Render sleep) ─
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const missed = await AttendanceRecord.find({
+      date: { $lte: todayIST },  // strictly before today
+      status:        'Draft',
+      checkout_time: null,
+      duty_type:     { $ne: 'Leave' },
+    }).lean();
+ 
+    if (missed.length > 0) {
+      console.log(`[Startup] Found ${missed.length} Draft records from previous days — auto-processing…`);
+      for (const record of missed) {
+        const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+        const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
+        const workedHrs  = Math.max(0, Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100);
+ 
+        await AttendanceRecord.findByIdAndUpdate(record._id, {
+          $set: {
+            checkout_time:    '23:58',
+            status:           'Approved',
+            submitted_at:     new Date(),
+            is_auto_checkout: true,
+            checkout_remarks: 'Auto checkout — server was offline during scheduled run',
+            worked_hours:     workedHrs > 0 ? workedHrs : null,
+            leave_type:       workedHrs < 4 ? 'Half Day' : null,
+            leave_status:     workedHrs < 4 ? 'Pending'  : null,
+          },
+        });
+ 
+        if (record.manager_id) {
+          const emp = await User.findById(record.emp_id).select('name').lean();
+          await Notification.create({
+            _id:               uuidv4(),
+            user_id:           record.manager_id,
+            title:             '⚠️ Missed Auto Checkout',
+            message:           `${emp?.name || 'Employee'} was auto-checked out (server recovery) on ${record.date}.`,
+            type:              'warning',
+            related_record_id: record._id,
+          });
+        }
+      }
+      console.log(`[Startup] Auto-processed ${missed.length} missed Draft records`);
+    }
+  } catch (err) {
+    console.error('[Startup] Missed checkout recovery error:', err.message);
+  }
 });
-
 // ── Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',         require('./src/routes/auth'));
 app.use('/api/attendance',   require('./src/routes/attendance'));

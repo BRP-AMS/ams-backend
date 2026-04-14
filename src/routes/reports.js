@@ -608,7 +608,8 @@ router.post(
 
       res.json({
         success: true,
-        filename: req.file.filename
+        filename: req.file.filename,
+        url: `/uploads/${req.file.filename}`
       });
 
     } catch (err) {

@@ -32,7 +32,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'"],  
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "blob:"],
       connectSrc: ["'self'"],
@@ -94,6 +94,7 @@ app.use((req, res, next) => {
 app.use(morgan('dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use("/uploads", express.static("uploads"));
 // Sanitize req.body against NoSQL injection ($, .)
 // Note: In Express 5, req.query and req.params are read-only (getter/Proxy).
 // Reassigning them breaks internal route matching. URL path params and query

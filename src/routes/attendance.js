@@ -238,7 +238,22 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
   try {
     const today    = istDateStr();
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
-    if (existing) return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
+
+if (existing) {
+
+  // Allow check-in if leave was rejected
+  if (existing.leave_type && existing.leave_status === "Rejected") {
+    await AttendanceRecord.deleteOne({ _id: existing._id });
+  }
+
+  else {
+    return res.status(409).json({
+      success: false,
+      message: "Attendance already recorded for today"
+    });
+  }
+
+}
 
     const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 

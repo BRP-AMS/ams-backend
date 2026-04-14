@@ -588,38 +588,27 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 router.post(
   "/upload",
   authenticate,
   upload.single("document"),
-  async (req, res) => {
+  (req, res) => {
 
-    try {
-
-      if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message: "No file uploaded"
-        });
-      }
-
-      res.json({
-        success: true,
-        filename: req.file.filename,
-        url: `/uploads/${req.file.filename}`
-      });
-
-    } catch (err) {
-
-      res.status(500).json({
+    if (!req.file) {
+      return res.status(400).json({
         success: false,
-        message: "Upload failed"
+        message: "No file uploaded"
       });
-
     }
+
+    res.json({
+      success: true,
+      filename: req.file.filename,
+      url: `/uploads/${req.file.filename}`
+    });
 
   }
 );

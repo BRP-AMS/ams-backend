@@ -408,84 +408,142 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
-   if (req.user.role === 'employee') {
-  matchFilter.user_id = req.user.id;
-} else if (req.user.role === 'manager') {
-  const teamMembersExcel = await User.find(
-    { manager_id: req.user.id, is_active: 1 }
-  ).distinct('_id');
-  matchFilter.user_id = { $in: teamMembersExcel };
-}
-    // hr / super_admin / admin: see all
+    if (req.user.role === 'employee') {
+      matchFilter.user_id = req.user.id;
+    } else if (req.user.role === 'manager') {
+      const teamMembers = await User.find({ manager_id: req.user.id, is_active: 1 }).distinct('_id');
+      matchFilter.user_id = { $in: teamMembers };
+    }
 
     const rows = await Activity.aggregate([
       { $match: matchFilter },
       { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
-      { $addFields: { officer: { $arrayElemAt: ['$user.name', 0] } } },
+      { $addFields: {
+          officer:  { $arrayElemAt: ['$user.name',   0] },
+          emp_code: { $arrayElemAt: ['$user.emp_id', 0] },
+      }},
       { $project: { user: 0 } },
       { $sort: { activity_date: -1 } },
       { $limit: 500 },
     ]);
 
-    const blockStats = await Activity.aggregate([
-      { $match: matchFilter },
-      { $group: { _id: '$block_name', total: { $sum: 1 } } },
-      { $project: { _id: 0, block_name: '$_id', total: 1 } },
-      { $sort: { total: -1 } },
-    ]);
+    const periodLabel = matchFilter.activity_date
+      ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}`
+      : 'All time';
+    const generatedDate = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
 
-    const pdfFilename = filter === 'all' ? 'activity_report_all.pdf' : `activity_report_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.pdf`;
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const pdfFilename = filter === 'all' ? 'activity_report_all.pdf'
+      : `activity_report_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.pdf`;
+
+    const doc = new PDFDocument({ margin: 0, size: 'A4', layout: 'landscape' });
     res.setHeader('Content-Disposition', `attachment; filename=${pdfFilename}`);
     res.setHeader('Content-Type', 'application/pdf');
     doc.pipe(res);
 
-    // Header
-    doc.fontSize(18).font('Helvetica-Bold').text('BRP — Activity Report', { align: 'center' });
-    const periodLabel = matchFilter.activity_date ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}` : 'All time';
-    doc.fontSize(11).font('Helvetica').text(`Period: ${periodLabel}`, { align: 'center' });
-    doc.moveDown(0.5);
-    doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
-    doc.moveDown(0.5);
+    const PAGE_W = 841.89;
+    const PAGE_H = 595.28;
+    const MARGIN = 30;
+    const BLUE   = '#1a6aa5';
+    const BLUE_H = '#155a8a'; // slightly darker for alt
+    const ROW_ALT = '#f0f6fb';
+    const WHITE  = '#ffffff';
+    const BORDER = '#d0e4f0';
 
-    // Summary
-    doc.fontSize(13).font('Helvetica-Bold').text('Block-wise Summary');
-    doc.moveDown(0.3);
-    const colW   = [200, 80];
-    const startX = 40;
-    let y = doc.y;
-    doc.fontSize(10).font('Helvetica-Bold')
-      .text('Block', startX, y).text('Total', startX + colW[0], y);
-    y += 18;
-    doc.font('Helvetica');
-    for (const b of blockStats) {
-      doc.text(b.block_name, startX, y).text(String(b.total), startX + colW[0], y);
-      y += 16;
-      if (y > 750) { doc.addPage(); y = 40; }
-    }
-    doc.moveDown(1);
+    // ── Blue header banner ────────────────────────────────────────────
+    doc.rect(0, 0, PAGE_W, 72).fill(BLUE);
 
-    // Detail table
-    doc.fontSize(13).font('Helvetica-Bold').text('Activity Details', 40, doc.y);
-    doc.moveDown(0.3);
-    const cols    = [70, 100, 120, 80, 100, 80];
-    const headers = ['Date', 'Officer', 'MSME Name', 'Sector', 'Support', 'Block'];
-    y = doc.y;
-    doc.fontSize(9).font('Helvetica-Bold');
-    let x = 40;
-    headers.forEach((h, i) => { doc.text(h, x, y, { width: cols[i] }); x += cols[i]; });
-    y += 16;
-    doc.font('Helvetica').fontSize(8);
+    doc.fillColor(WHITE).fontSize(20).font('Helvetica-Bold')
+      .text('BRP — Activity Report', MARGIN, 14, { width: PAGE_W - MARGIN * 2, align: 'center' });
 
-    for (const r of rows) {
-      if (y > 760) { doc.addPage(); y = 40; }
-      x = 40;
-      [r.activity_date, r.officer, r.msme_name, r.sector, r.support_type, r.block_name].forEach((v, i) => {
-        doc.text(String(v || ''), x, y, { width: cols[i] - 2, ellipsis: true });
-        x += cols[i];
+    const subtitle = `Period: ${filter === 'all' ? 'All Time' : filter.charAt(0).toUpperCase() + filter.slice(1)}  ·  Generated: ${generatedDate}  ·  Total: ${rows.length}`;
+    doc.fontSize(10).font('Helvetica')
+      .text(subtitle, MARGIN, 42, { width: PAGE_W - MARGIN * 2, align: 'center' });
+
+    // ── Table setup ───────────────────────────────────────────────────
+    // Columns: Date, Emp ID, Officer, MSME Name, Udyam No, Sector, Support Type, Block, Remarks
+    const cols   = [68, 52, 80, 110, 105, 80, 90, 75, 112];
+    const heads  = ['Date', 'Emp ID', 'Officer', 'MSME Name', 'Udyam No', 'Sector', 'Support Type', 'Block', 'Remarks'];
+    const ROW_H  = 22;
+    const HEAD_H = 26;
+    let y = 82;
+
+    // Draw header row
+    let x = MARGIN;
+    doc.rect(MARGIN, y, PAGE_W - MARGIN * 2, HEAD_H).fill(BLUE_H);
+    doc.fillColor(WHITE).fontSize(8).font('Helvetica-Bold');
+    heads.forEach((h, i) => {
+      doc.text(h, x + 4, y + 8, { width: cols[i] - 6, align: 'left' });
+      x += cols[i];
+    });
+    y += HEAD_H;
+
+    // Draw data rows
+    doc.font('Helvetica').fontSize(7.5);
+    rows.forEach((r, idx) => {
+      if (y + ROW_H > PAGE_H - 20) {
+        doc.addPage({ size: 'A4', layout: 'landscape', margin: 0 });
+        y = 20;
+        // Re-draw header on new page
+        let hx = MARGIN;
+        doc.rect(MARGIN, y, PAGE_W - MARGIN * 2, HEAD_H).fill(BLUE_H);
+        doc.fillColor(WHITE).fontSize(8).font('Helvetica-Bold');
+        heads.forEach((h, i) => {
+          doc.text(h, hx + 4, y + 8, { width: cols[i] - 6 });
+          hx += cols[i];
+        });
+        y += HEAD_H;
+        doc.font('Helvetica').fontSize(7.5);
+      }
+
+      // Alternating row bg
+      doc.rect(MARGIN, y, PAGE_W - MARGIN * 2, ROW_H)
+         .fill(idx % 2 === 0 ? WHITE : ROW_ALT);
+
+      // Row border bottom
+      doc.moveTo(MARGIN, y + ROW_H)
+         .lineTo(PAGE_W - MARGIN, y + ROW_H)
+         .strokeColor(BORDER).lineWidth(0.4).stroke();
+
+      const vals = [
+        r.activity_date || '',
+        r.emp_code      || '',
+        r.officer       || '',
+        r.msme_name     || '',
+        r.udyam_number  || '',
+        r.sector        || '',
+        r.support_type  || '',
+        r.block_name    || '',
+        r.remarks       || '—',
+      ];
+
+      let cx = MARGIN;
+      doc.fillColor('#1a2744');
+      vals.forEach((v, i) => {
+        doc.text(String(v), cx + 4, y + 7, {
+          width:    cols[i] - 6,
+          ellipsis: true,
+          lineBreak: false,
+        });
+        cx += cols[i];
       });
-      y += 14;
-    }
+
+      // Vertical dividers
+      let vx = MARGIN;
+      cols.forEach((w, i) => {
+        if (i > 0) {
+          doc.moveTo(vx, y).lineTo(vx, y + ROW_H)
+             .strokeColor(BORDER).lineWidth(0.3).stroke();
+        }
+        vx += w;
+      });
+
+      y += ROW_H;
+    });
+
+    // Outer border around whole table
+    const tableH = y - 82;
+    doc.rect(MARGIN, 82, PAGE_W - MARGIN * 2, tableH)
+       .strokeColor(BLUE).lineWidth(0.8).stroke();
 
     doc.end();
   } catch (err) {

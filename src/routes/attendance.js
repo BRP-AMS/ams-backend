@@ -1,5 +1,3 @@
-
-
 const express      = require('express');
 const router       = express.Router();
 const multer       = require('multer');
@@ -10,25 +8,35 @@ const { AttendanceRecord, User, Notification, AuditLog } = require('../models/da
 const { authenticate, authorize } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 
-// ── IST time helpers (server may run in UTC) ─────────────────────────────
+// ── IST time helpers ─────────────────────────────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
+const istMonthStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).substring(0, 7); // "2026-04"
+const istMonthLabel = () => new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' }); // "April 2026"
 
-// Multer — memory storage (files uploaded to Cloudinary)
 const path = require('path');
 const upload = multer({
   storage:    multer.memoryStorage(),
   limits:     { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    // Validate MIME type
     if (!file.mimetype.startsWith('image/')) return cb(new Error('Only images allowed'));
-    // Validate file extension
     const ext = path.extname(file.originalname).toLowerCase();
     const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
     if (!allowedExts.includes(ext)) return cb(new Error('Invalid file extension'));
-    // Validate extension matches MIME type
     const extToMime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
     if (extToMime[ext] && extToMime[ext] !== file.mimetype) return cb(new Error('File extension does not match file type'));
+    cb(null, true);
+  }
+});
+
+const uploadScan = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg','image/png','image/webp','image/bmp','application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Only JPG, PNG, WEBP or PDF scans are accepted'));
+    }
     cb(null, true);
   }
 });
@@ -37,33 +45,30 @@ const upload = multer({
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
   await Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
 };
+
+// ── Helper: Process missed auto-checkouts ────────────────────────────────
 const processMissedAutoCheckouts = async () => {
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
- 
-    // Find ALL Draft records where date < today (missed by the nightly cron)
+
     const missed = await AttendanceRecord.find({
-     date: { $lt: todayIST },
+      date:          { $lte: todayIST },
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },
     }).lean();
- 
+
     if (!missed.length) return 0;
- 
+
     for (const record of missed) {
       const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-      // Use 23:58 as the auto-checkout time on the record's date
       const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
-      const workedHrs  = Math.max(
-        0,
-        Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100
-      );
- 
+      const workedHrs  = Math.max(0, Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100);
+
       await AttendanceRecord.findByIdAndUpdate(record._id, {
         $set: {
           checkout_time:    '23:58',
-          status:           'Approved',          // ← KEY FIX: was missing this
+          status:           'Approved',
           submitted_at:     new Date(),
           is_auto_checkout: true,
           checkout_remarks: 'Auto checkout — employee did not check out',
@@ -72,26 +77,24 @@ const processMissedAutoCheckouts = async () => {
           leave_status:     workedHrs < 4 ? 'Pending'  : null,
         },
       });
- 
+
       if (record.manager_id) {
         const emp = await User.findById(record.emp_id).select('name').lean();
         await notify(
           record.manager_id,
           '⚠️ Missed Auto Checkout',
           `${emp?.name || 'Employee'} forgot to check out on ${record.date}. Auto-processed.`,
-          'warning',
-          record._id,
-          '/manager/queue'
+          'warning', record._id, '/manager/queue'
         );
       }
- 
+
       await AuditLog.create({
         _id: uuidv4(), user_id: record.emp_id,
         action: 'AUTO_CHECKOUT_MISSED', entity_type: 'attendance', entity_id: record._id,
-        new_value: 'Pending',
+        new_value: 'Approved',
       });
     }
- 
+
     console.log(`[MissedAutoCheckout] Processed ${missed.length} records`);
     return missed.length;
   } catch (err) {
@@ -99,7 +102,8 @@ const processMissedAutoCheckouts = async () => {
     return 0;
   }
 };
-// ── Helper: build aggregation pipeline for record list ───────────────────
+
+// ── Helper: build aggregation pipeline ──────────────────────────────────
 const recordListPipeline = (matchFilter, sortStage, skip, limit) => [
   { $match: matchFilter },
   { $lookup: { from: 'users', localField: 'emp_id',      foreignField: '_id', as: 'emp'            } },
@@ -118,18 +122,16 @@ const recordListPipeline = (matchFilter, sortStage, skip, limit) => [
   { $limit: limit },
 ];
 
+// ── GET /api/attendance ──────────────────────────────────────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
-    // Fix any Draft records from previous days before returning data
-  
- 
     const { status, startDate, endDate, empId, onlyLeaves } = req.query;
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
- 
+
     const matchFilter = {};
- 
+
     if (req.user.role === 'employee') {
       matchFilter.emp_id = req.user.id;
     } else if (req.user.role === 'manager') {
@@ -138,7 +140,7 @@ router.get('/', authenticate, async (req, res) => {
     } else if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
       if (empId) matchFilter.emp_id = empId;
     }
- 
+
     if (onlyLeaves === 'true') matchFilter.leave_type = { $ne: null };
     if (status) {
       if (onlyLeaves === 'true') matchFilter.leave_status = status;
@@ -146,12 +148,12 @@ router.get('/', authenticate, async (req, res) => {
     }
     if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
     if (endDate)   matchFilter.date = { ...matchFilter.date, $lte: endDate };
- 
+
     const total   = await AttendanceRecord.countDocuments(matchFilter);
     const records = await AttendanceRecord.aggregate(
       recordListPipeline(matchFilter, { date: -1, created_at: -1 }, offset, limit)
     );
- 
+
     res.json({
       success: true,
       data:    records.map(formatRecord),
@@ -162,6 +164,7 @@ router.get('/', authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
 // ── GET /api/attendance/today ────────────────────────────────────────────
 router.get('/today', authenticate, async (req, res) => {
   try {
@@ -181,8 +184,8 @@ router.get('/today', authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-// POST /api/attendance/process-missed-checkouts
-// Used by server startup + admin manual trigger to fix missed auto-checkouts
+
+// ── POST /api/attendance/process-missed-checkouts ────────────────────────
 router.post('/process-missed-checkouts', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const count = await processMissedAutoCheckouts();
@@ -192,6 +195,116 @@ router.post('/process-missed-checkouts', authenticate, authorize('admin', 'hr', 
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+// ── POST /api/attendance/upload-scan ─────────────────────────────────────
+// Max 2 files per calendar month. Appends — never overwrites.
+router.post(
+  '/upload-scan',
+  authenticate,
+  authorize('employee'),
+  uploadScan.single('scan'),
+  async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
+
+      const month      = istMonthStr();   // "2026-04"
+      const monthLabel = istMonthLabel(); // "April 2026"
+
+      // ── Check how many files already uploaded this month ─────────────
+      const currentUser = await User.findById(req.user.id).select('scan_papers').lean();
+      const existingForMonth = (currentUser?.scan_papers || []).filter(s => s.month === month);
+
+      if (existingForMonth.length >= 2) {
+        return res.status(400).json({
+          success: false,
+          message: `Maximum 2 files already uploaded for ${monthLabel}. Delete one to re-upload.`,
+        });
+      }
+
+      const fileIndex = existingForMonth.length; // 0 for first, 1 for second
+
+      // ── Upload to Cloudinary ─────────────────────────────────────────
+      const scanPath = await uploadFile(
+        req.file.buffer, 'ams/scans',
+        req.file.originalname, req.file.mimetype
+      );
+
+      // ── Append new entry (never pull/overwrite) ───────────────────────
+      await User.findByIdAndUpdate(
+        req.user.id,
+        {
+          $push: {
+            scan_papers: {
+              path:        scanPath,
+              month,
+              month_label: monthLabel,
+              file_name:   req.file.originalname,
+              file_index:  fileIndex,
+              uploaded_at: new Date(),
+            }
+          }
+        },
+        { strict: false }
+      );
+
+      res.json({
+        success:    true,
+        scanPath,
+        month,
+        monthLabel,
+        fileIndex,
+        totalForMonth: fileIndex + 1,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ success: false, message: 'Server error' });
+    }
+  }
+);
+
+// ── DELETE /api/attendance/clear-scan ────────────────────────────────────
+// ?month=2026-04&fileIndex=0  → remove specific file
+// ?month=2026-04              → remove all files for that month
+// (no params)                 → clear all scans
+router.delete('/clear-scan', authenticate, authorize('employee'), async (req, res) => {
+  try {
+    const { month, fileIndex } = req.query;
+
+    if (month && fileIndex !== undefined) {
+      // ── Remove one specific file by month + fileIndex ─────────────────
+      const fi = parseInt(fileIndex, 10);
+      const currentUser = await User.findById(req.user.id).select('scan_papers').lean();
+      const remaining = (currentUser?.scan_papers || []).filter(
+        s => !(s.month === month && s.file_index === fi)
+      );
+      await User.findByIdAndUpdate(
+        req.user.id,
+        { $set: { scan_papers: remaining } },
+        { strict: false }
+      );
+    } else if (month) {
+      // ── Remove all files for that month ──────────────────────────────
+      await User.findByIdAndUpdate(
+        req.user.id,
+        { $pull: { scan_papers: { month } } },
+        { strict: false }
+      );
+    } else {
+      // ── Clear all scans ───────────────────────────────────────────────
+      await User.findByIdAndUpdate(
+        req.user.id,
+        { $set: { scan_papers: [] } },
+        { strict: false }
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ── GET /api/attendance/:id ──────────────────────────────────────────────
 router.get('/:id', authenticate, async (req, res) => {
   try {
@@ -215,7 +328,6 @@ router.get('/:id', authenticate, async (req, res) => {
     if (!rows.length) return res.status(404).json({ success: false, message: 'Record not found' });
     const record = rows[0];
 
-    // Access control
     if (req.user.role === 'employee' && record.emp_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Access denied' });
     if (req.user.role === 'manager' && record.manager_id !== req.user.id)
@@ -240,20 +352,29 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
   try {
     const today    = istDateStr();
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
-    if (existing) return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
+    let existingRejectedLeaveId = null;
+
+    if (existing) {
+      const isRejectedLeave =
+        (existing.duty_type === 'Leave' || (existing.leave_type && existing.leave_type.trim())) &&
+        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+
+      if (!isRejectedLeave) {
+        return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
+      }
+      existingRejectedLeaveId = existing._id;
+    }
 
     const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 
     if (dutyType === 'On Duty' && !sector)
       return res.status(400).json({ success: false, message: 'Sector is required for On Duty' });
 
-    // Get the current user's manager_id
     const currentUser = await User.findById(req.user.id).select('manager_id').lean();
     const managerId   = currentUser?.manager_id || null;
 
-    const id = uuidv4();
+    let id = uuidv4();
 
-    // Support offline sync: capturedAt (HH:MM) and capturedDate (YYYY-MM-DD) override server time
     const timeRe = /^\d{2}:\d{2}$/;
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
     const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : istTimeStr();
@@ -263,8 +384,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
       : null;
 
-    await AttendanceRecord.create({
-      _id:              id,
+    const checkinFields = {
       emp_id:           req.user.id,
       date:             checkinDate,
       duty_type:        dutyType,
@@ -279,7 +399,29 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       checkin_lat:      parseFloat(latitude),
       checkin_lng:      parseFloat(longitude),
       manager_id:       managerId,
-    });
+      leave_type:       null,
+      leave_reason:     null,
+      leave_status:     null,
+      end_date:         null,
+      checkout_time:    null,
+      worked_hours:     null,
+      submitted_at:     null,
+      actioned_by:      null,
+      actioned_at:      null,
+      manager_remark:   null,
+      hr_override:      false,
+      hr_remark:        null,
+      override_remark:  null,
+      overridden_by:    null,
+      hr_actioned_at:   null,
+    };
+
+    if (existingRejectedLeaveId) {
+      await AttendanceRecord.findByIdAndUpdate(existingRejectedLeaveId, { $set: checkinFields });
+      id = existingRejectedLeaveId;
+    } else {
+      await AttendanceRecord.create({ _id: id, ...checkinFields });
+    }
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKIN', entity_type: 'attendance', entity_id: id });
 
@@ -292,7 +434,6 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
 });
 
 // ── POST /api/attendance/apply-leave ─────────────────────────────────────
-// Employee applies for a full-day leave (no check-in required), supports date range
 router.post('/apply-leave', authenticate, authorize('employee'), [
   body('date').isDate().withMessage('Valid start date required'),
   body('endDate').optional().isDate().withMessage('Valid end date required'),
@@ -308,7 +449,6 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
 
     if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
 
-    // Allow up to 30 days in the past and 10 days in advance
     const todayISO = istDateStr();
     const minDate  = new Date(todayISO); minDate.setDate(minDate.getDate() - 30);
     const maxDate  = new Date(todayISO); maxDate.setDate(maxDate.getDate() + 10);
@@ -319,19 +459,15 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
 
     const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
     const managerId   = currentUser?.manager_id;
-    console.log("Employee:", currentUser.name);
-    console.log("Manager ID:", managerId);
 
-    // Check for existing record on start date
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
     if (existing) {
       return res.status(409).json({ success: false, message: `A record already exists for ${date}. Please choose a different start date.` });
     }
 
-    // Create a SINGLE record covering the full date range
     const isMultiDay = finalEndDate !== date;
     const dayCount   = Math.round((endD - startD) / 86400000) + 1;
-    const id = uuidv4();
+    let id = uuidv4();
     await AttendanceRecord.create({
       _id: id, emp_id: req.user.id,
       date,
@@ -365,7 +501,6 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
       }
     }
 
-    // Return the leave record (for frontend step update if today is in range)
     const isTodayInRange = todayISO >= date && todayISO <= finalEndDate;
     const record = await AttendanceRecord.findById(id).lean();
 
@@ -390,57 +525,40 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
     if (record.status !== 'Draft') return res.status(400).json({ success: false, message: 'Cannot checkout - record already submitted' });
 
-    // ── 4-hour enforcement ─────────────────────────────────────────────────
     const now             = new Date();
-    // Parse checkin time with IST offset (+05:30) so the 4-hour gap is computed correctly
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-    // For offline sync: use capturedAt time if provided and valid (must be in the past)
-    const capturedAtBody = req.body?.capturedAt;
-    const timeReCheck    = /^\d{2}:\d{2}$/;
-    const effectiveNow   = (capturedAtBody && timeReCheck.test(capturedAtBody))
+    const capturedAtBody  = req.body?.capturedAt;
+    const timeReCheck     = /^\d{2}:\d{2}$/;
+    const effectiveNow    = (capturedAtBody && timeReCheck.test(capturedAtBody))
       ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00+05:30`); return d <= now ? d : now; })()
       : now;
     const hoursElapsed    = (effectiveNow - checkinDateTime) / (1000 * 60 * 60);
     let leaveType = null;
 
-// Emergency checkout button pressed
-if (isEmergency) {
-
-  if (hoursElapsed < 3) {
-    leaveType = "Emergency Leave";
-  }
-
-  else if (hoursElapsed < 4) {
-    leaveType = "Half Day";
-  }
-if (hoursElapsed < 6) {
-    leaveType = 'Half Day';       // 4–6 hours = Half Day
-  }
-}
-
-// Normal checkout
-else {
-
-  if (hoursElapsed < 4) {
-    const remaining = 4 - hoursElapsed;
-    const h = Math.floor(remaining);
-    const m = Math.floor((remaining - h) * 60);
-
-    return res.status(400).json({
-      success: false,
-      message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
-      hoursRemaining: remaining,
-    });
-  }
-
-}
+    if (isEmergency) {
+      if (hoursElapsed < 3) {
+        leaveType = "Emergency Leave";
+      } else if (hoursElapsed < 6) {
+        leaveType = 'Half Day';
+      }
+    } else {
+      if (hoursElapsed < 4) {
+        const remaining = 4 - hoursElapsed;
+        const h = Math.floor(remaining);
+        const m = Math.floor((remaining - h) * 60);
+        return res.status(400).json({
+          success: false,
+          message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
+          hoursRemaining: remaining,
+        });
+      }
+    }
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
     const checkoutSelfiePath = req.file
       ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
       : null;
 
-    // Support offline sync: use capturedAt (HH:MM) if provided (must be in the past)
     const timeRe = /^\d{2}:\d{2}$/;
     let checkoutTime = istTimeStr();
     let workedHours  = Math.round(hoursElapsed * 100) / 100;
@@ -453,20 +571,19 @@ else {
     }
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
-  $set: {
-    checkout_time:        checkoutTime,
-    checkout_lat:         parseFloat(latitude)  || record.latitude,
-    checkout_lng:         parseFloat(longitude) || record.longitude,
-     checkout_selfie_path: checkoutSelfiePath,   // ← Cloudinary URL
-    status:               'Pending',
-    submitted_at:         now,
-    worked_hours:         workedHours,
-    leave_type:           leaveType,
-    leave_status:         leaveType ? "Pending" : null
-  }
-});
+      $set: {
+        checkout_time:        checkoutTime,
+        checkout_lat:         parseFloat(latitude)  || record.latitude,
+        checkout_lng:         parseFloat(longitude) || record.longitude,
+        checkout_selfie_path: checkoutSelfiePath,
+        status:               'Pending',
+        submitted_at:         now,
+        worked_hours:         workedHours,
+        leave_type:           leaveType,
+        leave_status:         leaveType ? "Pending" : null
+      }
+    });
 
-    // Notify manager
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name').lean();
       await notify(record.manager_id, 'New Attendance Pending', `${emp.name}'s attendance for ${record.date} requires your approval`, 'warning', record._id, '/manager/queue');
@@ -498,10 +615,10 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
 
     const isAdmin      = req.user.role === 'admin';
     const updateFields = {
-      status:       'Approved',
+      status:         'Approved',
       manager_remark: remark || '',
-      actioned_by:  req.user.id,
-      actioned_at:  new Date(),
+      actioned_by:    req.user.id,
+      actioned_at:    new Date(),
     };
     if (isAdmin) updateFields.admin_remark = remark || '';
     if (record.leave_type) updateFields.leave_status = 'Approved';
@@ -542,9 +659,15 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     if (req.user.role === 'manager' && record.manager_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Not your team member' });
 
-    const rejectFields = { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() };
+    const rejectFields = {
+      status:         'Rejected',
+      manager_remark: remark,
+      actioned_by:    req.user.id,
+      actioned_at:    new Date(),
+    };
     if (record.leave_type) rejectFields.leave_status = 'Rejected';
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: rejectFields });
+
     const rejectTitle = record.leave_type ? `Leave Rejected ✗` : 'Attendance Rejected ✗';
     const rejectMsg   = record.leave_type
       ? `Your ${record.leave_type} request for ${record.date} was rejected: ${remark}`
@@ -564,76 +687,61 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 });
 
 // ── PUT /api/attendance/:id/hr-override ──────────────────────────────────
-// ── In src/routes/attendance.js
-// REPLACE the PUT /:id/hr-override handler with this ────────────────────────
-// Added: block second override if hr_override already true
-
-router.put('/:id/hr-override', authenticate, authorize('hr'), [
-  body('remark').notEmpty().withMessage('HR override remark is required'),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty())
-    return res.status(400).json({ success: false, errors: errors.array() });
-
+router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {
   try {
     const { remark } = req.body;
-    const record = await AttendanceRecord.findById(req.params.id).lean();
-    if (!record)
-      return res.status(404).json({ success: false, message: 'Record not found' });
+    const role = req.user.role;
 
-    // ✅ Block second override — HR can only override ONCE
-    if (record.hr_override)
-      return res.status(400).json({
-        success: false,
-        message: 'HR override has already been applied to this record. No further changes allowed.',
+    if (!remark || !remark.trim())
+      return res.status(400).json({ success: false, message: 'Override remark is required' });
+
+    const rec = await AttendanceRecord.findById(req.params.id).lean();
+    if (!rec) return res.status(404).json({ success: false, message: 'Record not found' });
+
+    if (rec.overridden_by && rec.overridden_by !== role) {
+      return res.status(403).json({
+        success:         false,
+        message:         `This record was already overridden by ${rec.overridden_by === 'hr' ? 'HR' : 'Super Admin'}.`,
+        overridden_by:   rec.overridden_by,
+        override_remark: rec.override_remark,
+        hr_actioned_at:  rec.hr_actioned_at,
       });
+    }
 
-    // Only allow after manager has acted
-    const currentStatus = record.leave_status || record.status;
-    if (currentStatus !== 'Approved' && currentStatus !== 'Rejected')
-      return res.status(400).json({
-        success: false,
-        message: 'HR override can only be applied after manager has Approved or Rejected the leave.',
-      });
+    const newStatus = rec.status === 'Approved' ? 'Rejected' : 'Approved';
 
-    // Toggle: Approved → Rejected, Rejected → Approved
-    const newStatus = currentStatus === 'Approved' ? 'Rejected' : 'Approved';
-
-    await AttendanceRecord.findByIdAndUpdate(record._id, {
+    await AttendanceRecord.findByIdAndUpdate(req.params.id, {
       $set: {
-        status:         newStatus,
-        leave_status:   newStatus,
-        hr_override:    true,
-        hr_remark:      remark,
-        hr_actioned_by: req.user.id,
-        hr_actioned_at: new Date(),
+        status:          newStatus,
+        hr_override:     true,
+        hr_remark:       `[${role === 'super_admin' ? 'Super Admin' : 'HR'} Override] ${remark.trim()}`,
+        override_remark: remark.trim(),
+        overridden_by:   role,
+        hr_actioned_at:  new Date(),
+        ...(rec.leave_type ? { leave_status: newStatus } : {}),
       },
     });
 
     await notify(
-      record.emp_id,
-      `Leave ${newStatus} via HR Override`,
-      `Your ${record.leave_type || 'leave'} request for ${record.date} has been ${newStatus} via HR override. Remark: ${remark}`,
-      newStatus === 'Approved' ? 'success' : 'warning',
-      record._id,
-      '/employee/history'
+      rec.emp_id,
+      `Record ${newStatus} by ${role === 'hr' ? 'HR' : 'Super Admin'}`,
+      `Your ${rec.leave_type ? 'leave' : 'attendance'} for ${rec.date} has been ${newStatus.toLowerCase()} via HR override.`,
+      newStatus === 'Approved' ? 'success' : 'error',
+      rec._id, '/employee/history'
     );
 
     await AuditLog.create({
-      _id: uuidv4(), user_id: req.user.id, action: 'HR_OVERRIDE',
-      entity_type: 'attendance', entity_id: record._id,
-      old_value: currentStatus, new_value: newStatus,
+      _id: uuidv4(), user_id: req.user.id,
+      action: `HR_OVERRIDE_${newStatus.toUpperCase()}`,
+      entity_type: 'attendance', entity_id: rec._id,
+      old_value: rec.status, new_value: newStatus,
+      new_value2: remark.trim(),
     });
 
-    const updated = await AttendanceRecord.findById(record._id).lean();
-    res.json({
-      success: true,
-      message: `HR override applied — leave is now ${newStatus}. This is final.`,
-      data: formatRecord(updated),
-    });
+    res.json({ success: true, message: `Record overridden to ${newStatus} by ${role === 'hr' ? 'HR' : 'Super Admin'}` });
   } catch (err) {
     console.error('[HROverride]', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -656,12 +764,10 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
       $set: { leave_type: leaveType, leave_reason: reason, leave_status: 'Pending' }
     });
 
-    // Notify manager
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name email').lean();
       await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id, '/manager/queue');
 
-      // Email manager
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {
         await sendMail(
@@ -748,7 +854,7 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
         status:         'Pending',
         manager_remark: null,
         reapply_reason: reason.trim(),
-        reapply_docs:   docPaths,    // ← Array of Cloudinary URLs
+        reapply_docs:   docPaths,
         reapplied_at:   new Date(),
         submitted_at:   new Date(),
       }
@@ -796,18 +902,25 @@ function formatRecord(r) {
     sector:              r.sector,
     description:         r.description,
     status:              r.status,
-    selfiePath:          r.selfie_path,          // Cloudinary URL
+    selfiePath:          r.selfie_path,
     latitude:            r.latitude,
     longitude:           r.longitude,
     locationAddress:     r.location_address,
     checkinTime:         r.checkin_time,
     checkoutTime:        r.checkout_time,
-    checkoutSelfiePath:  r.checkout_selfie_path, // Cloudinary URL
+    checkoutSelfiePath:  r.checkout_selfie_path,
     checkoutLat:         r.checkout_lat,
     checkoutLng:         r.checkout_lng,
     managerId:           r.manager_id,
     managerName:         r.manager_name,
-    managerRemark:       r.manager_remark,
+    managerRemark:       r.manager_remark
+                           ? r.manager_remark
+                               .replace(/^\[HR Override\]\s*/i, '')
+                               .replace(/^\[Super Admin Override\]\s*/i, '')
+                               .replace(/^\[HR\]\s*/i, '')
+                               .replace(/^\[Super Admin\]\s*/i, '')
+                               .trim()
+                           : '',
     adminRemark:         r.admin_remark,
     actionedBy:          r.actioned_by,
     actionedByName:      r.actioned_by_name,
@@ -821,14 +934,15 @@ function formatRecord(r) {
     leaveReason:         r.leave_reason,
     leaveStatus:         r.leave_status,
     reapplyReason:       r.reapply_reason,
-    reapplyDocs:         r.reapply_docs || [],   // Array of Cloudinary URLs
+    reapplyDocs:         r.reapply_docs || [],
     reappliedAt:         r.reapplied_at,
-    hrOverride:          r.hr_override,
-    hrRemark:            r.hr_remark,
-    hrActionedBy:        r.hr_actioned_by,
-    hrActionedAt:        r.hr_actioned_at,
+    hrOverride:          r.hr_override   || false,
+    hrRemark:            r.hr_remark     || '',
+    overrideRemark:      r.override_remark || '',
+    overriddenBy:        r.overridden_by || null,
+    hrActionedBy:        r.hr_actioned_by || null,
+    hrActionedAt:        r.hr_actioned_at || null,
   };
 }
 
 module.exports = router;
-

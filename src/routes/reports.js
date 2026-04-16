@@ -11,13 +11,24 @@
  * Cell codes:
  *   P   = Present at assigned location       → no colour
  *   OD  = On Duty at other Tripura location  → no colour
- *   L   = Leave                              → RED
+ *   L   = Leave (approved) OR rejected leave with no re-check-in → RED
  *   A   = Absent (no check-in, after join)   → RED
  *   WO  = Weekend                            → light blue
- *   ""  = Blank (future / pre-join / outside all known locations)
+ *   ""  = Blank (future / pre-join / outside all known locations / leave pending)
  *
- * endDate always capped to yesterday (today is incomplete)
+ * Leave status logic:
+ *   leave_status === 'Pending'  → blank  (not yet decided)
+ *   leave_status === 'Approved' → L
+ *   leave_status === 'Rejected' + no re-check-in → L  (LOP)
+ *   leave_status === 'Rejected' + re-checked in  → P / OD (normal attendance)
+ *
+ * endDate always capped to yesterday for ATTENDANCE exports (today is incomplete)
+ * Leave exports: NO cap — leaves are complete records
  * Signature row: Employee Sign (left) + Manager Sign (right) — side by side
+ *
+ * Override mutex:
+ *   After manager acts, EITHER hr OR super_admin can override (first-wins).
+ *   Once one party overrides, the other sees the remark but cannot override again.
  */
 'use strict';
 
@@ -84,48 +95,68 @@ const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-
 /**
  * toCode — determines cell code for one attendance record
  *
- * @param rec            - AttendanceRecord or null/undefined
- * @param assignedBlock  - employee's assigned block (from User.assigned_block)
- * @param assignedDistrict - employee's assigned district (from User.assigned_district)
+ * Leave status rules:
+ *   Pending  → '' (blank — not yet decided, don't mark absent)
+ *   Approved → 'L'
+ *   Rejected + no re-check-in → 'L' (LOP / loss-of-pay)
+ *   Rejected + re-checked in  → fall through to P/OD location logic
+ *
+ * Regular attendance:
+ *   Rejected → 'A'
+ *   Present with location → P or OD
  */
 const toCode = (rec, assignedBlock, assignedDistrict) => {
-  if (!rec) return 'A';                         // no check-in → Absent
-  if (rec.duty_type === 'Leave') return 'L';
-  if (rec.status === 'Rejected') return 'A';    // rejected = absent/LOP
+  if (!rec) return 'A';
+
+  // ── Leave records ──────────────────────────────────────────────────────────
+  const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
+  if (isLeave) {
+    const ls = rec.leave_status || rec.status || 'Pending';
+    if (ls === 'Pending')  return '';   // leave pending → blank (don't penalise)
+    if (ls === 'Approved') return 'L';  // approved leave → L
+    if (ls === 'Rejected') {
+      // Employee re-checked in after rejection → treat as normal attendance
+      const hasCheckin = rec.checkin_time || rec.checkinTime;
+      if (!hasCheckin) return 'L'; // rejected + no re-check-in → L (LOP)
+      // Has a real check-in after rejection → fall through to P/OD logic below
+    }
+  }
+
+  // ── Regular attendance (or rejected leave with actual re-check-in) ─────────
+  if (rec.status === 'Rejected') return 'A';
 
   const addr = rec.location_address || rec.locationAddress || '';
 
-  // ── No assignment: default to P (can't determine, treat as present) ──────
+  // No assignment → always P (can't determine otherwise)
   if (!assignedBlock && !assignedDistrict) return 'P';
 
-  // ── Has assignment: check if location matches assigned block/district ─────
   const matchesAssigned =
     (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
     (assignedDistrict && matchesLocation(addr, assignedDistrict));
 
-  if (matchesAssigned) return 'P';   // at assigned workplace → Present
-
-  // ── In Tripura but not at assigned location → On Duty elsewhere ───────────
-  if (isInTripura(addr)) return 'OD';
-
-  // ── Outside all known Tripura locations → blank (outside service area) ────
-  return '';
+  if (matchesAssigned)  return 'P';   // at assigned workplace
+  if (isInTripura(addr)) return 'OD'; // elsewhere in Tripura
+  return ''; // outside all known Tripura locations
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/reports/export
+//  Attendance matrix export (Excel / PDF)
+//  Supports:  empId, managerId  query params for HR / super_admin filtered downloads
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/export',
   authenticate,
   authorize('super_admin','admin','hr','manager','employee'),
   async (req, res) => {
   try {
-    const { format='excel', status } = req.query;
+    const { format='excel', status, empId, managerId } = req.query;
     const role = req.user.role;
     let { startDate, endDate } = req.query;
 
     if (!startDate||!endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    // Cap endDate to yesterday — today is never shown
+    // Cap endDate to yesterday — today is never shown (incomplete day)
     if (endDate >= todayIST()) endDate = yesterdayIST();
     if (startDate > endDate)
       return res.status(400).json({success:false,message:'No completed dates in range. Report covers up to yesterday.'});
@@ -136,53 +167,85 @@ router.get('/export',
     const totalDays  = dates.length;
     const woCount    = dates.filter(isWeekend).length;
 
-    // ── Employee list — include assigned_block, assigned_district, created_at ─
+    // ── Employee list ──────────────────────────────────────────────────────────
+    // Priority: employee (own) → specific empId → managerId team → manager (own team) → all
     let employees = [];
-    if (role==='employee') {
+
+    if (role === 'employee') {
+      // Always own record only
       const me = await User.findById(req.user.id)
         .select('_id name emp_id created_at assigned_block assigned_district').lean();
       if (me) employees = [me];
-    } else if (role==='manager') {
+
+    } else if (empId && String(empId).trim() !== '') {
+      // Specific employee selected in dropdown (any privileged role)
+      const specific = await User.findById(toObjId(empId))
+        .select('_id name emp_id created_at assigned_block assigned_district').lean();
+      if (specific) employees = [specific];
+      else return res.status(404).json({success:false,message:'Selected employee not found'});
+
+    } else if (managerId && String(managerId).trim() !== '') {
+      // Manager's entire team selected (HR / super_admin / admin use-case)
+      employees = await User.find({ manager_id:toObjId(managerId), is_active:{$ne:false} })
+        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+
+    } else if (role === 'manager') {
+      // Manager viewing own team
       employees = await User.find({ manager_id:toObjId(req.user.id), is_active:{$ne:false} })
         .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+
     } else {
+      // admin / hr / super_admin — all employees
       employees = await User.find({ role:'employee', is_active:{$ne:false} })
         .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
     }
+
     if (!employees.length)
       return res.status(404).json({success:false,message:'No employees found'});
 
-    // ── Manager name for signature ─────────────────────────────────────────
+    // ── Manager name for signature ─────────────────────────────────────────────
     let managerName = '';
-    if (role==='manager') {
+    if (role === 'manager') {
       const mgr = await User.findById(req.user.id).select('name').lean();
       managerName = mgr?.name || '';
-    } else if (role==='employee') {
+    } else if (role === 'employee') {
       const emp = await User.findById(req.user.id).select('manager_id').lean();
       if (emp?.manager_id) {
         const mgr = await User.findById(emp.manager_id).select('name').lean();
         managerName = mgr?.name || '';
       }
-    } else {
-      // admin/hr/super_admin — no single manager; leave blank
+    } else if (managerId && String(managerId).trim() !== '') {
+      // HR/super_admin filtered by a specific manager — show that manager's name
+      const mgr = await User.findById(toObjId(managerId)).select('name').lean();
+      managerName = mgr?.name || '';
     }
+    // admin/hr/super_admin without manager filter → no single manager; leave blank
 
-    // ── Attendance records ─────────────────────────────────────────────────
+    // ── Attendance records ─────────────────────────────────────────────────────
     const recFilter = {
       date:   {$gte:startDate,$lte:endDate},
       emp_id: {$in:employees.map(e=>e._id)},
     };
-    if (status&&status!=='All') recFilter.status = status;
-    const rawRecs = await AttendanceRecord.find(recFilter).lean();
+    if (status && status !== 'All') recFilter.status = status;
+    const rawRecs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
 
+    // Build index — prefer real check-in records over rejected leave records for the same date
     const recIdx = {};
     for (const r of rawRecs) {
       const eid = String(r.emp_id);
       if (!recIdx[eid]) recIdx[eid] = {};
-      recIdx[eid][r.date] = r;
+      const existing = recIdx[eid][r.date];
+      const existingIsRejectedLeave =
+        existing &&
+        (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
+        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+      // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
+      if (!existing || existingIsRejectedLeave) {
+        recIdx[eid][r.date] = r;
+      }
     }
 
-    // ── Build cell matrix ─────────────────────────────────────────────────
+    // ── Build cell matrix ──────────────────────────────────────────────────────
     const matrix = employees.map(emp => {
       const joinDate = emp.created_at
         ? new Date(emp.created_at).toLocaleDateString('en-CA', { timeZone: IST })
@@ -193,8 +256,8 @@ router.get('/export',
       return {
         emp,
         cells: dates.map(iso => {
-          if (isWeekend(iso))                    return 'WO';
-          if (joinDate && iso < joinDate)        return '';   // pre-join → blank
+          if (isWeekend(iso))                 return 'WO';
+          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           const rec = recIdx[String(emp._id)]?.[iso];
           return toCode(rec, ab, ad);
         }),
@@ -208,9 +271,9 @@ router.get('/export',
       `${sd.toLocaleDateString('en-IN',{timeZone:IST,month:'short'})}- ${sd.getFullYear()} To ` +
       `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${ed.getFullYear()}`;
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  EXCEL
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     if (format==='excel') {
       const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS';
 
@@ -220,7 +283,7 @@ router.get('/export',
       const FILL_ALT  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFF7F7F7'}};
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 
-      const codeFill = (code,rf) => {
+      const codeFill = (code, rf) => {
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         return rf;
@@ -241,7 +304,7 @@ router.get('/export',
       const buildSheet = (ws, empList, sheetTitle, mgrName) => {
         const LAST = 3+dates.length;
 
-        // ── Rows 1-3: header ────────────────────────────────────────────
+        // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
         Object.assign(ws.getCell(1,2),{value:'Attendance details of BRP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
         ws.getRow(1).height=24;
@@ -257,7 +320,7 @@ router.get('/export',
         Object.assign(ws.getCell(3,half),{value:'Project Name: Block Resource Person',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         ws.getRow(3).height=16;
 
-        // ── Row 4: column headers ───────────────────────────────────────
+        // ── Row 4: column headers ─────────────────────────────────────────────
         ws.getRow(4).height=multiMonth?30:18;
         ws.getColumn(2).width=9; ws.getColumn(3).width=16;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
@@ -269,7 +332,7 @@ router.get('/export',
         setHdr(2,'Emp code'); setHdr(3,'Employee Name');
         dates.forEach((iso,i)=>setHdr(4+i,multiMonth?`${dayNum(iso)}\n${monAbbr(iso)}`:String(dayNum(iso))));
 
-        // ── Data rows ───────────────────────────────────────────────────
+        // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
           const rowN=5+idx; ws.getRow(rowN).height=15;
           const rf=idx%2===0?FILL_WHT:FILL_ALT;
@@ -283,11 +346,11 @@ router.get('/export',
           });
         });
 
-        // ── Legend ──────────────────────────────────────────────────────
+        // ── Legend ────────────────────────────────────────────────────────────
         const legendRow=5+empList.length+1; ws.getRow(legendRow).height=14;
         [{code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
-         {code:'L',label:'Leave',isRed:true},
+         {code:'L',label:'Leave / LOP',isRed:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ].forEach(({code,label,isRed},i)=>{
@@ -299,7 +362,7 @@ router.get('/export',
           ws.getCell(legendRow,4+i*2+1).font={size:8,name:'Calibri',italic:true};
         });
 
-        // ── Summary ─────────────────────────────────────────────────────
+        // ── Summary ───────────────────────────────────────────────────────────
         const fDC=colLetter(4), lDC=colLetter(3+dates.length);
         let r=legendRow+2; const SR=r;
         ws.getColumn(2).width=28; ws.getColumn(3).width=12;
@@ -318,10 +381,6 @@ router.get('/export',
           vc.value=isF?{formula:value.slice(1)}:value;
           vc.fill=FILL_WHT; vc.font=LF; vc.alignment={horizontal:'center',vertical:'center'}; vc.protection={locked:true};
         };
-        const subHdr=label=>{
-          r++; ws.getRow(r).height=17; mc(ws,r,2,r,3);
-          Object.assign(ws.getCell(r,2),{value:label,fill:FILL_SUBH,font:{bold:true,size:10,color:{argb:'FF1F3864'},name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
-        };
 
         sumRow('No of Total Days',totalDays);
         sumRow('No of Weekoff (WO)',woCount);
@@ -333,49 +392,77 @@ router.get('/export',
           sumRow('No of Leaves (L)',`=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
           sumRow('No of Absent (A)',`=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
         } else {
-          subHdr('No of present / Worked');
-          empList.forEach(({emp},idx)=>{ const er=5+idx; sumRow(emp.name,`=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`); });
-          subHdr('No of Leaves');
-          empList.forEach(({emp},idx)=>{ const er=5+idx; sumRow(emp.name,`=COUNTIF(${fDC}${er}:${lDC}${er},"L")`); });
-          subHdr('No of Absent');
-          empList.forEach(({emp},idx)=>{ const er=5+idx; sumRow(emp.name,`=COUNTIF(${fDC}${er}:${lDC}${er},"A")`); });
+          // ── Table header row ────────────────────────────────────────────────
+          r++; ws.getRow(r).height = 17;
+          ws.getColumn(2).width = 22; ws.getColumn(3).width = 16;
+          ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
+
+          [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C']].forEach(([hdr, argb], i) => {
+            const c = ws.getCell(r, 2 + i);
+            c.value = hdr; c.fill = FILL_SUBH; c.border = CBDR;
+            c.font = { bold: true, size: 10, color: { argb }, name: 'Calibri' };
+            c.alignment = { horizontal: 'center', vertical: 'center' };
+          });
+
+          // ── One row per employee ────────────────────────────────────────────
+          empList.forEach(({ emp }, idx) => {
+            r++; ws.getRow(r).height = 15;
+            const rf  = idx % 2 === 0 ? FILL_WHT : FILL_ALT;
+            const er  = 5 + idx;
+
+            const cn = ws.getCell(r, 2);
+            cn.value = emp.name; cn.fill = rf; cn.border = CBDR;
+            cn.font = { size: 10, name: 'Calibri' };
+            cn.alignment = { horizontal: 'left', vertical: 'center' };
+
+            const cp = ws.getCell(r, 3);
+            cp.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")` };
+            cp.fill = rf; cp.border = CBDR;
+            cp.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF047857' } };
+            cp.alignment = { horizontal: 'center', vertical: 'center' };
+            cp.protection = { locked: true };
+
+            const cl = ws.getCell(r, 4);
+            cl.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"L")` };
+            cl.fill = rf; cl.border = CBDR;
+            cl.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB45309' } };
+            cl.alignment = { horizontal: 'center', vertical: 'center' };
+            cl.protection = { locked: true };
+
+            const ca = ws.getCell(r, 5);
+            ca.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"A")` };
+            ca.fill = rf; ca.border = CBDR;
+            ca.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB91C1C' } };
+            ca.alignment = { horizontal: 'center', vertical: 'center' };
+            ca.protection = { locked: true };
+          });
         }
 
-        outerBorder(ws,SR,2,r,3);
+        outerBorder(ws, SR, 2, r, 5);
 
-        // ── ✅ Employee Sign (left) + Manager Sign (right) — side by side ──
-     // ── Signatures ───────────────────────────────────────────────────────
-r+=3; ws.getRow(r).height=20;
+        // ── Signatures ────────────────────────────────────────────────────────
+        r+=3; ws.getRow(r).height=20;
 
-if (role === 'employee') {
-  // Employee download: show BOTH employee sign (left) + manager sign (right)
-  ws.getCell(r,2).value='Employee Sign:';
-  ws.getCell(r,2).font={bold:true,size:10,name:'Calibri',color:{argb:'FF1F3864'}};
-  mc(ws,r,3,r,6);
-  const empSigCell=ws.getCell(r,3);
-  empSigCell.value='';
-  empSigCell.alignment={horizontal:'center',vertical:'bottom'};
-  empSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
+        if (role === 'employee') {
+          // Employee download: Employee sign (left) + Manager sign (right)
+          ws.getCell(r,2).value='Employee Sign:';
+          ws.getCell(r,2).font={bold:true,size:10,name:'Calibri',color:{argb:'FF1F3864'}};
+          mc(ws,r,3,r,6);
+          const empSigCell=ws.getCell(r,3);
+          empSigCell.value='';
+          empSigCell.alignment={horizontal:'center',vertical:'bottom'};
+          empSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
 
-  ws.getCell(r,8).value='Manager Sign:';
-  ws.getCell(r,8).font={bold:true,size:15,name:'Calibri',color:{argb:'FF1F3864'}};
-  mc(ws,r,12,r,13);
-  const mgrSigCell=ws.getCell(r,12);
-  mgrSigCell.value=mgrName?`(${mgrName})`:'';
-  mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
-  mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
-  mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
-} else {
-  // Manager / super_admin / hr / admin: only Manager sign
-  // ws.getCell(r,2).value='Manager Sign:';
-  // ws.getCell(r,2).font={bold:true,size:10,name:'Calibri',color:{argb:'FF1F3864'}};
-  // mc(ws,r,3,r,8);
-  // const mgrSigCell=ws.getCell(r,3);
-  // mgrSigCell.value=mgrName?`(${mgrName})`:'';
-  // mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
-  // mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
-  // mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
-}
+          ws.getCell(r,8).value='Manager Sign:';
+          ws.getCell(r,8).font={bold:true,size:15,name:'Calibri',color:{argb:'FF1F3864'}};
+          mc(ws,r,12,r,13);
+          const mgrSigCell=ws.getCell(r,12);
+          mgrSigCell.value=mgrName?`(${mgrName})`:'';
+          mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
+          mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
+          mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
+        }
+        // Manager / HR / super_admin / admin: no signature row on exported sheet
 
         ws.views=[{state:'frozen',xSplit:3,ySplit:4}];
         ws.pageSetup={
@@ -410,9 +497,9 @@ if (role === 'employee') {
       return res.end();
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  PDF
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     if(format==='pdf'){
       const doc=new PDFDoc({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28},autoFirstPage:true});
       res.setHeader('Content-Type','application/pdf');
@@ -480,11 +567,11 @@ if (role === 'employee') {
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
-       {code:'L',label:'Leave',red:true},
+       {code:'L',label:'Leave / LOP',red:true},
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
       ].forEach(({code,label,red})=>{
-        const bw=14,lw=72;
+        const bw=14,lw=76;
         doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
         doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
@@ -511,49 +598,66 @@ if (role === 'employee') {
       pdfRow('No of Total Days',totalDays);
       pdfRow('No of Weekoff (WO)',woCount);
       pdfRow('No of Holidays (H)',0);
-      if(matrix.length===1){
-        const cells=matrix[0].cells;
-        pdfRow('No of Present / worked (P+OD)',cells.filter(c=>c==='P'||c==='OD').length);
-        pdfRow('No of Leaves (L)',cells.filter(c=>c==='L').length);
-        pdfRow('No of Absent (A)',cells.filter(c=>c==='A').length);
+
+      if (matrix.length === 1) {
+        const cells = matrix[0].cells;
+        pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
+        pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
+        pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
       } else {
-        pdfRow('No of present / Worked',undefined,'sub');
-        matrix.forEach(({emp,cells})=>pdfRow(emp.name,cells.filter(c=>c==='P'||c==='OD').length));
-        pdfRow('No of Leaves',undefined,'sub');
-        matrix.forEach(({emp,cells})=>pdfRow(emp.name,cells.filter(c=>c==='L').length));
-        pdfRow('No of Absent',undefined,'sub');
-        matrix.forEach(({emp,cells})=>pdfRow(emp.name,cells.filter(c=>c==='A').length));
+        sy++;
+        const TW = SW;
+        const C0 = TW * 0.46;
+        const C1 = TW * 0.18;
+        const C2 = TW * 0.18;
+        const C3 = TW * 0.18;
+
+        doc.rect(SX,        sy, C0, SRH).fill('#E8EDF4').stroke('#000');
+        doc.rect(SX+C0,     sy, C1, SRH).fill('#D1FAE5').stroke('#000');
+        doc.rect(SX+C0+C1,  sy, C2, SRH).fill('#FEF3C7').stroke('#000');
+        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill('#FEE2E2').stroke('#000');
+
+        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    sy+4, {width:C0-8});
+        doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   sy+4, {width:C1,align:'center'});
+        doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,sy+4, {width:C2,align:'center'});
+        doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,sy+4,{width:C3,align:'center'});
+        sy += SRH;
+
+        matrix.forEach(({ emp, cells }, idx) => {
+          const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
+          doc.rect(SX,          sy, C0, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0,       sy, C1, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0+C1,    sy, C2, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill(bg).stroke('#CCCCCC');
+
+          const pres = cells.filter(c => c==='P'||c==='OD').length;
+          const lv   = cells.filter(c => c==='L').length;
+          const abs  = cells.filter(c => c==='A').length;
+
+          doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,     SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
+          doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres), SX+C0,  sy+3,{width:C1,align:'center'});
+          doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),   SX+C0+C1,sy+3,{width:C2,align:'center'});
+          doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),  SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
+          sy += SRH;
+        });
       }
 
-      // ✅ Employee sign (left) + Manager sign (right) — side by side
-   // ── Signatures ───────────────────────────────────────────────────────
-sy+=24; if(sy+30>PH-28){addPage();sy=40;}
-const sigLineW=140;
+      // Signatures (employee download only)
+      sy+=24; if(sy+30>PH-28){addPage();sy=40;}
+      const sigLineW=140;
 
-if (role === 'employee') {
-  // Employee download: Employee sign left + Manager sign right
-  doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold')
-     .text('Employee Sign:',ML,sy);
-  doc.moveTo(ML+90,sy+12).lineTo(ML+90+sigLineW,sy+12).stroke('#1F3864');
+      if (role === 'employee') {
+        doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold').text('Employee Sign:',ML,sy);
+        doc.moveTo(ML+90,sy+12).lineTo(ML+90+sigLineW,sy+12).stroke('#1F3864');
 
-  const mgrSigX=ML+90+sigLineW+60;
-  doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold')
-     .text('Manager Sign:',mgrSigX,sy);
-  doc.moveTo(mgrSigX+90,sy+12).lineTo(mgrSigX+90+sigLineW,sy+12).stroke('#1F3864');
-  if(managerName){
-    doc.fillColor('#555').fontSize(20).font('Helvetica-Oblique')
-       .text(`(${managerName})`,mgrSigX+90,sy+14,{width:sigLineW,align:'center'});
-  }
-} else {
-  // Manager / super_admin / hr: only Manager sign
-  // doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold')
-  //    .text('Manager Sign:',ML,sy);
-  // doc.moveTo(ML+90,sy+12).lineTo(ML+90+sigLineW,sy+12).stroke('#1F3864');
-  // if(managerName){
-  //   doc.fillColor('#555').fontSize(15).font('Helvetica-Oblique')
-  //      .text(`(${managerName})`,ML+90,sy+14,{width:sigLineW,align:'center'});
-  // }
-}
+        const mgrSigX=ML+90+sigLineW+60;
+        doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold').text('Manager Sign:',mgrSigX,sy);
+        doc.moveTo(mgrSigX+90,sy+12).lineTo(mgrSigX+90+sigLineW,sy+12).stroke('#1F3864');
+        if(managerName){
+          doc.fillColor('#555').fontSize(20).font('Helvetica-Oblique')
+             .text(`(${managerName})`,mgrSigX+90,sy+14,{width:sigLineW,align:'center'});
+        }
+      }
 
       doc.end();
       return;
@@ -565,19 +669,10 @@ if (role === 'employee') {
     res.status(500).json({success:false,message:'Export failed',error:err.message});
   }
 });
-/**
- * REPLACE the entire /leave-export route in src/routes/reports.js with this.
- *
- * Fixes (confirmed from DB schema):
- *  1. NO endDate cap for leave exports — leaves are complete records (unlike attendance check-ins)
- *     Attendance: cap to yesterday (today has no checkout yet)
- *     Leaves: no cap — can be today or future
- *  2. Correct snake_case field names from schema:
- *     leave_type, leave_status, leave_reason, manager_remark, hr_override, hr_remark
- *  3. empId filter priority — works for all roles
- *  4. Status filter uses leave_status field
- */
 
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/reports/leave-export
+// ══════════════════════════════════════════════════════════════════════════════
 router.get('/leave-export',
   authenticate,
   authorize('super_admin', 'admin', 'hr', 'manager', 'employee'),
@@ -590,21 +685,18 @@ router.get('/leave-export',
     if (!startDate || !endDate)
       return res.status(400).json({ success: false, message: 'startDate and endDate are required' });
 
-    // ✅ FIX 1: NO cap to yesterday for leave reports
-    // Leaves are submitted as complete records and can be today or future
-    // (Unlike attendance check-ins which need yesterday cap for incomplete day)
+    // NO cap to yesterday for leave reports — leaves are complete records
     if (startDate > endDate)
       return res.status(400).json({ success: false, message: 'startDate must be before or equal to endDate' });
 
-    // ── Employee scope ─────────────────────────────────────────────────────
+    // ── Employee scope ─────────────────────────────────────────────────────────
     let employees = [];
 
     if (role === 'employee') {
       const me = await User.findById(req.user.id).select('_id name emp_id').lean();
       if (me) employees = [me];
 
-    } else if (empId && empId.trim() !== '') {
-      // ✅ Specific employee selected — works for ALL roles
+    } else if (empId && String(empId).trim() !== '') {
       const specific = await User.findById(toObjId(empId)).select('_id name emp_id').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({ success: false, message: 'Selected employee not found' });
@@ -614,7 +706,6 @@ router.get('/leave-export',
         .select('_id name emp_id').sort({ emp_id: 1 }).lean();
 
     } else {
-      // admin / hr / super_admin — all employees
       employees = await User.find({ role: 'employee', is_active: { $ne: false } })
         .select('_id name emp_id').sort({ emp_id: 1 }).lean();
     }
@@ -622,40 +713,34 @@ router.get('/leave-export',
     if (!employees.length)
       return res.status(404).json({ success: false, message: 'No employees found' });
 
-    // ── Fetch records in date range ────────────────────────────────────────
+    // ── Fetch records ──────────────────────────────────────────────────────────
     const allRecs = await AttendanceRecord.find({
       date:   { $gte: startDate, $lte: endDate },
       emp_id: { $in: employees.map(e => e._id) },
     }).sort({ date: 1 }).lean();
 
-    // ✅ FIX 2: Use confirmed schema field names
-    // duty_type === 'Leave'  → leave created via leaveRequest flow
-    // leave_type is non-null → leave created via applyLeave flow
     const leaveRecs = allRecs.filter(r =>
       r.duty_type === 'Leave' ||
-      (r.leave_type && r.leave_type.trim() !== '')
+      (r.leave_type && String(r.leave_type).trim() !== '')
     );
 
-    // ✅ FIX 3: Status filter uses leave_status (the correct DB field)
     const filtered = (status && status !== 'All')
       ? leaveRecs.filter(r => r.leave_status === status)
       : leaveRecs;
 
-    // Build emp lookup
     const empMap = {};
     for (const e of employees) empMap[String(e._id)] = e;
 
-    // ✅ FIX 4: All field names now match the schema exactly
     const rows = filtered.map(r => ({
       empCode:       empMap[String(r.emp_id)]?.emp_id || '',
       empName:       empMap[String(r.emp_id)]?.name   || '',
-      date:          r.date         || '',
-      leaveType:     r.leave_type   || '',          // schema: leave_type
-      status:        r.leave_status || r.status || '',  // schema: leave_status
-      reason:        r.leave_reason || '',          // schema: leave_reason
-      managerRemark: r.manager_remark || '',        // schema: manager_remark
-      hrOverride:    r.hr_override ? 'Yes' : 'No', // schema: hr_override (Boolean)
-      hrRemark:      r.hr_remark   || '',           // schema: hr_remark
+      date:          r.date          || '',
+      leaveType:     r.leave_type    || '',
+      status:        r.leave_status  || r.status || '',
+      reason:        r.leave_reason  || '',
+      managerRemark: r.manager_remark|| '',
+      hrOverride:    r.hr_override   ? 'Yes' : 'No',
+      hrRemark:      r.hr_remark     || '',
     }));
 
     const sd = new Date(startDate + 'T00:00:00+05:30');
@@ -673,9 +758,9 @@ router.get('/leave-export',
     const rejected = rows.filter(r => r.status === 'Rejected').length;
     const pending  = rows.filter(r => r.status === 'Pending').length;
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  EXCEL
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     if (format === 'excel') {
       const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
       const ws = wb.addWorksheet('Leave Report');
@@ -798,9 +883,9 @@ router.get('/leave-export',
       return res.end();
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  PDF
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     if (format === 'pdf') {
       const doc = new PDFDoc({
         size: 'A3', layout: 'landscape',
@@ -891,6 +976,7 @@ router.get('/leave-export',
     res.status(500).json({ success: false, message: 'Leave export failed', error: err.message });
   }
 });
+
 // ── dashboard-stats ───────────────────────────────────────────────────────────
 router.get('/dashboard-stats', authenticate, async (req,res)=>{
   try{

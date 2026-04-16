@@ -110,7 +110,7 @@ cron.schedule('58 23 * * *', async () => {   // 18:28 UTC = 23:58 IST
   try {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const unchecked = await AttendanceRecord.find({
-      date: today,
+      date: { $lte: today },
       status: 'Draft',
       checkout_time: null,
     }).lean();
@@ -178,7 +178,7 @@ connectionPromise.then(async () => {
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const missed = await AttendanceRecord.find({
-      date:          { $lt: todayIST },   // strictly before today
+      date:          { $lte: todayIST },   // strictly before today
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },

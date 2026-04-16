@@ -8,7 +8,7 @@ const { body, validationResult } = require('express-validator');
 const rateLimit  = require('express-rate-limit');
 const { User, AuditLog, RevokedToken } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
-const { sendMail, escapeHtml } = require('../utils/mailer');
+const { sendMail, sendAuthEmail, sendBusinessEmail, escapeHtml } = require('../utils/mailer');
 
 // ── Secure token helpers ──────────────────────────────────────────────────
 const generateToken = () => crypto.randomBytes(32).toString('hex');           // 64-char hex
@@ -271,53 +271,15 @@ router.post('/forgot-password', forgotLimiter, [
 
     if (!user) return res.json(OK);
 
-    // Try Firebase first (sends reset email via Firebase's SMTP relay)
-    if (FIREBASE_API_KEY) {
-      try {
-        const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
-        await sendPasswordResetEmail(user.email);
-        await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
-        return res.json(OK);
-      } catch (err) {
-        console.error('[Auth] Firebase reset email failed, falling back to custom:', err.message);
-      }
+    // Deliver via Firebase auth channel — Firebase renders its own template and
+    // issues a signed reset link. (Gmail SMTP relay has been removed.)
+    try {
+      await sendAuthEmail(user.email, 'PASSWORD_RESET');
+    } catch (err) {
+      console.error('[Auth] Firebase reset email failed:', err.message);
+      // Deliberately still return OK — we don't leak whether the email address
+      // is registered, and we don't want attackers to learn Firebase is down.
     }
-
-    // Fallback: custom token flow (for local dev / non-Firebase setups)
-    const rawToken  = generateToken();
-    const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 5 * 60 * 1000); // 5 min
-
-    await User.findByIdAndUpdate(user._id, {
-      $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
-    });
-
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-niuz.onrender.com';
-    const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
-    await sendMail(user.email, '[BRP AMS] Reset Your Password',
-      emailLayout('Password Reset Request', `
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${escapeHtml(user.name)}</strong>, we received a request to reset your AMS password.
-        </p>
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Click the button below. This link expires in <strong>5 minutes</strong>.
-        </p>
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${resetUrl}"
-            style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Reset Password
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
-          Or copy: ${resetUrl}
-        </p>
-        <p style="color:#dc2626;font-size:13px;">
-          If you didn't request this, ignore this email. Your password won't change.
-        </p>
-      `),
-      { type: 'PASSWORD_RESET' }
-    );
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'FORGOT_PASSWORD', ip_address: req.ip });
     res.json(OK);
@@ -354,7 +316,9 @@ router.post('/reset-password-otp', otpLimiter, [
       $set: { pwd_reset_otp: hashedOtp, pwd_reset_otp_expires: expires }
     });
 
-    await sendMail(user.email, '[BRP AMS] Password Reset OTP',
+    // OTP codes can't go through Firebase (Firebase only sends its own templated
+    // emails). Deliver via Resend/business channel so the custom code is shown.
+    await sendBusinessEmail(user.email, '[BRP AMS] Password Reset OTP',
       emailLayout('Password Reset Verification Code', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
           Hi <strong>${escapeHtml(user.name)}</strong>, enter this code to verify your identity before resetting your password.
@@ -366,8 +330,7 @@ router.post('/reset-password-otp', otpLimiter, [
           This code expires in <strong>5 minutes</strong>.
         </p>
         <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
-      `),
-      { type: 'PASSWORD_RESET' }
+      `)
     );
 
     res.json({ success: true, message: 'OTP sent to your email' });
@@ -422,8 +385,8 @@ router.post('/reset-password', resetPwLimiter, [
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });
 
-    // Password changed notification — fire-and-forget
-    sendMail(user.email, '[BRP AMS] Password Changed',
+    // Password-changed confirmation — informational, custom HTML, Resend.
+    sendBusinessEmail(user.email, '[BRP AMS] Password Changed',
       emailLayout('Password Changed Successfully', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
           Hi <strong>${escapeHtml(user.name)}</strong>, your AMS password was changed successfully.
@@ -431,8 +394,7 @@ router.post('/reset-password', resetPwLimiter, [
         <p style="color:#dc2626;font-size:13px;">
           If you did not do this, contact your administrator immediately.
         </p>
-      `),
-      { type: 'PASSWORD_RESET' }
+      `)
     ).catch(err => console.error('[Auth] Password changed email failed:', err.message));
 
     res.json({ success: true, message: 'Password reset successfully. Please log in.' });
@@ -510,32 +472,15 @@ router.post('/resend-verification', authenticate, async (req, res) => {
     if (!user)           return res.status(404).json({ success: false, message: 'User not found' });
     if (user.email_verified) return res.json({ success: true, message: 'Email already verified' });
 
-    const rawToken  = generateToken();
-    const hashedTok = hashToken(rawToken);
-    const expires   = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-
-    await User.findByIdAndUpdate(user._id, {
-      $set: { email_verify_token: hashedTok, email_verify_expires: expires }
-    });
-
-    const BACKEND = process.env.BACKEND_URL || 'https://ams-backend-1-yvgm.onrender.com';
-    const verifyUrl = `${BACKEND}/api/auth/verify-email/${rawToken}`;
-    await sendMail(user.email, '[BRP AMS] Verify Your Email',
-      emailLayout('Verify Your Email Address', `
-        <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${escapeHtml(user.name)}</strong>, please verify your email address by clicking below.
-        </p>
-        <div style="text-align:center;margin:28px 0;">
-          <a href="${verifyUrl}"
-            style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
-                   text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
-            Verify Email
-          </a>
-        </div>
-        <p style="color:#94a3b8;font-size:12px;">This link expires in 24 hours.</p>
-      `),
-      { type: 'VERIFY_EMAIL' }
-    );
+    // Verification goes through Firebase — Firebase issues its own signed link.
+    // We keep the local email_verify_token field around only for legacy routes
+    // that may still POST back through /verify-email/:token.
+    try {
+      await sendAuthEmail(user.email, 'VERIFY_EMAIL');
+    } catch (err) {
+      console.error('[Auth] Firebase verification email failed:', err.message);
+      return res.status(502).json({ success: false, message: 'Could not send verification email. Please try again later.' });
+    }
     res.json({ success: true, message: 'Verification email sent' });
   } catch (err) {
     console.error(err);
@@ -561,7 +506,8 @@ router.post('/send-phone-otp', otpLimiter, authenticate, async (req, res) => {
       $set: { phone_otp: hashed, phone_otp_expires: expires }
     });
 
-    await sendMail(user.email, '[BRP AMS] Your Verification Code',
+    // Phone OTP is a custom 6-digit code — Firebase can't carry it; use Resend.
+    await sendBusinessEmail(user.email, '[BRP AMS] Your Verification Code',
       emailLayout('Phone Verification Code', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
           Hi <strong>${escapeHtml(user.name)}</strong>, your verification code for phone number <strong>${escapeHtml(user.phone)}</strong> is:
@@ -573,8 +519,7 @@ router.post('/send-phone-otp', otpLimiter, authenticate, async (req, res) => {
           This code expires in <strong>10 minutes</strong>.
         </p>
         <p style="color:#dc2626;font-size:12px;">Never share this code with anyone.</p>
-      `),
-      { type: 'VERIFY_EMAIL' }
+      `)
     );
 
     res.json({ success: true, message: 'OTP sent to your registered email' });

@@ -7,7 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { sendMail, escapeHtml } = require('../utils/mailer');
+const { sendMail, sendAuthEmail, sendBusinessEmail, escapeHtml } = require('../utils/mailer');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -212,14 +212,21 @@ router.post('/', authenticate, authorize('admin'), [
       email_verify_token: hashedVerifyTok, email_verify_expires: new Date(Date.now() + 86400000),
       pwd_reset_token: hashedResetTok, pwd_reset_expires: new Date(Date.now() + 86400000),
     });
-    const { sendPasswordResetEmail } = require('../utils/firebaseMailer');
-    sendPasswordResetEmail(email, tempPassword).catch(err => console.error('[User Create] Firebase email failed:', err.message));
+    // First-time onboarding: create the Firebase shadow user with the temp
+    // password, then deliver a PASSWORD_RESET email so the employee sets their
+    // own password on first login. Routed through the Firebase auth channel
+    // (Gmail SMTP relay has been removed — Firebase renders the template).
+    sendAuthEmail(email, 'FIRST_TIME_PASSWORD', { password: tempPassword })
+      .catch(err => console.error('[User Create] Firebase auth email failed:', err.message));
     const user = await User.findById(id).select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until').lean();
     res.status(201).json({ success: true, message: 'User created. Activation email sent.', data: formatUser(user) });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
 // ── PUT /api/users/:id/reset-password — must be before PUT /:id ──────────
+// Admin-triggered password reset. Rotates the local password to a random temp
+// value (so the old one stops working immediately) and then delivers a Firebase
+// PASSWORD_RESET email so the user can choose a new one.
 router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
   try {
     const target = await User.findById(req.params.id).lean();
@@ -229,15 +236,22 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(target.role))
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     const crypto = require('crypto');
-    const rawResetToken  = crypto.randomBytes(32).toString('hex');
-    const hashedResetTok = crypto.createHash('sha256').update(rawResetToken).digest('hex');
-    const tempPassword   = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
-    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: bcrypt.hashSync(tempPassword, 12), pwd_reset_token: hashedResetTok, pwd_reset_expires: new Date(Date.now() + 300000) } });
-    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-q2lw.onrender.com';
-    const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
-    await sendMail(target.email, '[BRP AMS] Password Reset — Set Your New Password',
-      `<p>Hi ${target.name}, your password was reset by an admin. <a href="${resetUrl}">Set new password</a> (expires in 5 minutes).</p>`);
-    try { await Notification.create({ _id: uuidv4(), user_id: target._id, title: 'Password Reset by Admin', message: 'Check your email for the reset link (expires in 5 minutes).', type: 'warning', is_read: 0 }); } catch (_) {}
+    const tempPassword = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
+    await User.findByIdAndUpdate(req.params.id, {
+      $set: {
+        password_hash:    bcrypt.hashSync(tempPassword, 12),
+        pwd_changed_at:   new Date(), // invalidate outstanding JWTs
+      },
+      $unset: { pwd_reset_token: '', pwd_reset_expires: '' },
+    });
+    try {
+      await sendAuthEmail(target.email, 'PASSWORD_RESET', { password: tempPassword });
+    } catch (err) {
+      console.error('[Admin Reset] Firebase auth email failed:', err.message);
+      return res.status(502).json({ success: false, message: 'Password was rotated but reset email could not be delivered. Check mailer config.' });
+    }
+    try { await Notification.create({ _id: uuidv4(), user_id: target._id, title: 'Password Reset by Admin', message: 'Your password was reset — check your email for the Firebase reset link.', type: 'warning', is_read: 0 }); } catch (_) {}
+    try { await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_RESET_PASSWORD', entity_type: 'user', entity_id: target._id, ip_address: req.ip }); } catch (_) {}
     res.json({ success: true, message: `Password reset email sent to ${target.name} (${target.email})` });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error: ' + err.message }); }
 });
@@ -306,7 +320,11 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
     const title   = `Request: ${label}`;
     const message = note ? `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment. Note: ${note}` : `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment.`;
     if (admins.length) await Notification.insertMany(admins.map(a => ({ _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0, link: `/admin/users?editUser=${req.user.id}` })));
-    for (const admin of admins) sendMail(admin.email, `[BRP AMS] ${title} — ${emp.name}`, `<p>${message}</p><p>Log in to Admin → Users to assign.</p>`);
+    for (const admin of admins) {
+      sendBusinessEmail(admin.email, `[BRP AMS] ${title} — ${emp.name}`,
+        `<p>${escapeHtml(message)}</p><p>Log in to Admin → Users to assign.</p>`)
+        .catch(err => console.error('[request-assignment] email failed:', err.message));
+    }
     res.json({ success: true, message: `Request sent to admin${admins.length > 1 ? 's' : ''}.` });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
@@ -323,7 +341,11 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
     const title   = 'Request: Location / Block Change';
     const message = note ? `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}). Note: ${note}` : `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}).`;
     if (admins.length) await Notification.insertMany(admins.map(a => ({ _id: uuidv4(), user_id: a._id, title, message, type: 'warning', is_read: 0, link: `/admin/users?editUser=${req.user.id}` })));
-    for (const admin of admins) sendMail(admin.email, `[BRP AMS] ${title} — ${emp.name}`, `<p>${message}</p>`);
+    for (const admin of admins) {
+      sendBusinessEmail(admin.email, `[BRP AMS] ${title} — ${emp.name}`,
+        `<p>${escapeHtml(message)}</p>`)
+        .catch(err => console.error('[request-location-change] email failed:', err.message));
+    }
     res.json({ success: true, message: 'Location change request sent to admin.' });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });

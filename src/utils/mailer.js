@@ -1,34 +1,62 @@
 /**
- * Shared email sender.
+ * Email delivery — TWO channels:
  *
- * Supports THREE modes (auto-detected, first match wins):
- *   1. FIREBASE_API_KEY set → sends via Firebase Auth REST API (works on Render)
- *   2. RESEND_API_KEY set   → sends via Resend HTTP API (works on Render)
- *   3. SMTP_HOST set        → sends via nodemailer SMTP  (works locally / non-Render)
+ *   AUTH emails  → Firebase Auth REST API
+ *                    • first-time password (invites user to set password)
+ *                    • password reset
+ *                    • email verification
+ *                  Firebase renders its own HTML using the templates you
+ *                  configure in Firebase Console → Authentication → Templates.
+ *                  Custom per-send HTML is NOT supported on this channel.
  *
- * Render free-tier blocks ALL outbound SMTP (ports 25, 465, 587).
- * Firebase Auth REST API uses HTTPS (port 443) — always works.
+ *   BUSINESS emails → Resend HTTP API  (custom HTML, per-send)
+ *                    • leave requests / approvals / rejections
+ *                    • admin notifications
+ *                    • re-apply notifications
+ *                    • OTPs (cannot go via Firebase)
+ *
+ * Gmail SMTP relay (nodemailer) has been removed — Render free-tier blocks
+ * outbound SMTP anyway, and keeping a legacy transport invited accidental use.
+ *
+ * Required env:
+ *   FIREBASE_API_KEY  — web API key (Firebase Console → Project settings)
+ *   RESEND_API_KEY    — HTTP API key from resend.com
+ *   SMTP_FROM         — "BRP AMS <noreply@yourdomain>"  (used as Resend from addr)
  */
 
-const nodemailer = require('nodemailer');
+const {
+  sendPasswordResetEmail: firebaseSendPasswordReset,
+  sendVerificationEmail:  firebaseSendVerification,
+  createFirebaseUser,
+  ensureFirebaseUser,
+} = require('./firebaseMailer');
 
 // ── FROM address (sanitised) ─────────────────────────────────────────────────
 const rawFrom = (process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@example.com')
   .replace(/^"|"$/g, '').trim();
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 1 — Firebase Auth REST API  (preferred on Render)
-// ═══════════════════════════════════════════════════════════════════════════════
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
-const { sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser } =
-  require('./firebaseMailer');
+const RESEND_KEY       = process.env.RESEND_API_KEY;
+
+if (!FIREBASE_API_KEY) {
+  console.warn('[Mailer] ⚠️  FIREBASE_API_KEY not set — auth emails will fail');
+} else {
+  console.log('[Mailer] ✅ Firebase channel ready (auth emails)');
+}
+if (!RESEND_KEY) {
+  console.warn('[Mailer] ⚠️  RESEND_API_KEY not set — business emails will fail');
+} else {
+  console.log(`[Mailer] ✅ Resend channel ready (business emails) · from: ${rawFrom}`);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 2 — Resend HTTP API
+//  BUSINESS CHANNEL — Resend HTTP API (custom HTML)
 // ═══════════════════════════════════════════════════════════════════════════════
-const RESEND_KEY = process.env.RESEND_API_KEY;
-
 const sendViaResend = async (to, subject, html) => {
+  if (!RESEND_KEY) {
+    console.error('[Email/Resend] ❌ RESEND_API_KEY not set — cannot deliver:', subject, '→', to);
+    throw new Error('RESEND_API_KEY not configured');
+  }
   console.log(`[Email/Resend] Sending "${subject}" → ${to}`);
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -47,73 +75,65 @@ const sendViaResend = async (to, subject, html) => {
   return body;
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  MODE 3 — Nodemailer SMTP  (local / non-Render)
-// ═══════════════════════════════════════════════════════════════════════════════
-let transporter = null;
-
-if (!FIREBASE_API_KEY && !RESEND_KEY && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-  const smtpPort   = parseInt(process.env.SMTP_PORT || '465');
-  const smtpSecure = process.env.SMTP_SECURE != null
-    ? process.env.SMTP_SECURE === 'true'
-    : smtpPort === 465;
-
-  console.log('[Mailer] SMTP mode →', process.env.SMTP_HOST + ':' + smtpPort, smtpSecure ? '(SSL)' : '(STARTTLS)');
-  transporter = nodemailer.createTransport({
-    host:   process.env.SMTP_HOST,
-    port:   smtpPort,
-    secure: smtpSecure,
-    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    tls:    { rejectUnauthorized: false },
-    connectionTimeout: 15000,
-    greetingTimeout:   15000,
-    socketTimeout:     20000,
-  });
-  transporter.verify()
-    .then(() => console.log('✅ SMTP mailer ready  |  from:', rawFrom))
-    .catch(err => console.error('❌ SMTP verify FAILED:', err.message, '| code:', err.code));
-}
-
-const sendViaSMTP = async (to, subject, html) => {
-  console.log(`[Email/SMTP] Sending "${subject}" → ${to}  (from: ${rawFrom})`);
-  const info = await transporter.sendMail({ from: rawFrom, to, subject, html });
-  console.log('[Email/SMTP] ✅ Sent OK. MessageId:', info.messageId);
-  return info;
-};
+/**
+ * Send a business (non-auth) email with custom HTML via Resend.
+ * Use for leave requests, admin notifications, OTPs, re-apply, etc.
+ */
+const sendBusinessEmail = async (to, subject, html) => sendViaResend(to, subject, html);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Unified sendMail
+//  AUTH CHANNEL — Firebase Auth REST API (Firebase-templated emails)
 // ═══════════════════════════════════════════════════════════════════════════════
-const mode = FIREBASE_API_KEY ? 'firebase' : RESEND_KEY ? 'resend' : transporter ? 'smtp' : 'none';
-console.log(`[Mailer] Active mode: ${mode.toUpperCase()}  |  from: ${rawFrom}`);
+const AUTH_TYPES = new Set(['FIRST_TIME_PASSWORD', 'PASSWORD_RESET', 'VERIFY_EMAIL']);
 
 /**
- * Send an email.
- * @param {string} to       - recipient email
- * @param {string} subject  - email subject
- * @param {string} html     - HTML body (used by SMTP/Resend; Firebase uses its own templates)
- * @param {object} options  - { type: 'VERIFY_EMAIL' | 'PASSWORD_RESET', password: '...' }
+ * Send an auth email via Firebase. Firebase renders its own HTML template.
+ *
+ * @param {string} email  — recipient
+ * @param {'FIRST_TIME_PASSWORD'|'PASSWORD_RESET'|'VERIFY_EMAIL'} type
+ * @param {object} [opts]
+ * @param {string} [opts.password] — temp password used to create the shadow user
+ *                                   (only relevant for FIRST_TIME_PASSWORD)
  */
-const sendMail = async (to, subject, html, options = {}) => {
-  if (mode === 'firebase') {
-    // Firebase sends its own templated emails — determine type from subject/options
-    const type = options.type
-      || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
-          ? 'VERIFY_EMAIL'
-          : 'PASSWORD_RESET');
-
-    if (type === 'VERIFY_EMAIL') {
-      return sendVerificationEmail(to, options.password);
-    }
-    return sendPasswordResetEmail(to);
+const sendAuthEmail = async (email, type, opts = {}) => {
+  if (!AUTH_TYPES.has(type)) throw new Error(`Invalid auth email type: ${type}`);
+  if (!FIREBASE_API_KEY) {
+    console.error('[Email/Firebase] ❌ FIREBASE_API_KEY not set — cannot deliver:', type, '→', email);
+    throw new Error('FIREBASE_API_KEY not configured');
   }
 
-  if (mode === 'resend') return sendViaResend(to, subject, html);
-  if (mode === 'smtp')   return sendViaSMTP(to, subject, html);
-
-  console.error('[Email] ⚠️  No email provider configured! Set FIREBASE_API_KEY, RESEND_API_KEY, or SMTP_HOST. Skipping:', subject, '→', to);
+  // FIRST_TIME_PASSWORD: create the Firebase user with the temp password, then
+  // send a PASSWORD_RESET email so the employee sets their own password on
+  // first login. Firebase's template explains this ("a password reset was
+  // requested for your account") — it maps cleanly to the onboarding flow.
+  if (type === 'FIRST_TIME_PASSWORD') {
+    return firebaseSendPasswordReset(email, opts.password);
+  }
+  if (type === 'PASSWORD_RESET') {
+    return firebaseSendPasswordReset(email);
+  }
+  if (type === 'VERIFY_EMAIL') {
+    return firebaseSendVerification(email, opts.password);
+  }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Backward-compat sendMail
+// ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Legacy entry-point retained so existing call sites keep working during the
+ * migration. Routes:
+ *   • options.type in AUTH_TYPES → Firebase (auth channel)
+ *   • everything else            → Resend   (business channel, uses `html`)
+ */
+const sendMail = async (to, subject, html, options = {}) => {
+  if (options.type && AUTH_TYPES.has(options.type)) {
+    return sendAuthEmail(to, options.type, options);
+  }
+  return sendViaResend(to, subject, html);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 /**
  * Escape HTML special chars for safe interpolation into email templates.
  * Prevents stored XSS via user-controlled fields (name, email, remark) reaching
@@ -129,4 +149,12 @@ const escapeHtml = (val) => {
     .replace(/'/g, '&#x27;');
 };
 
-module.exports = { sendMail, transporter, mode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser, escapeHtml };
+module.exports = {
+  sendMail,            // backward-compat
+  sendAuthEmail,       // Firebase auth emails
+  sendBusinessEmail,   // Resend custom HTML emails
+  createFirebaseUser,
+  ensureFirebaseUser,
+  escapeHtml,
+  fromAddress: rawFrom,
+};

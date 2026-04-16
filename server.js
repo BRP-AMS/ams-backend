@@ -159,7 +159,7 @@ connectionPromise.then(async () => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
 
-  // SMTP verification happens automatically in src/utils/mailer.js on require()
+  // Mailer channel detection (Firebase + Resend) happens on require()
   require('./src/utils/mailer');
   // ── NEW: Process any Draft records missed while server was down (Render sleep) ─
   try {

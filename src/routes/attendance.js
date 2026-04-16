@@ -6,7 +6,9 @@ const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { sendMail, escapeHtml } = require('../utils/mailer');
+const { sendMail, sendBusinessEmail, escapeHtml } = require('../utils/mailer');
+const { leaveRequestEmailHtml, reapplyEmailHtml } = require('../utils/emailTemplates');
+const { getLastApprovedLeave } = require('../utils/leaveHistory');
 
 // ── IST time helpers ─────────────────────────────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -489,15 +491,29 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
         'warning', id, '/manager/queue');
       const manager = await User.findById(managerId).select('email name').lean();
       if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
-          `<p>Hi ${escapeHtml(manager.name)},</p>
-           <p><strong>${escapeHtml(currentUser.name)}</strong> has applied for <strong>${escapeHtml(leaveType)}</strong>
-           ${isMultiDay ? `from <strong>${escapeHtml(date)}</strong> to <strong>${escapeHtml(finalEndDate)}</strong> (${dayCount} days)` : `on <strong>${escapeHtml(date)}</strong>`}.</p>
-           <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
+        // Enrich payload for the manager-facing email: emp_id, block, last leave.
+        const empProfile = await User.findById(req.user.id)
+          .select('emp_id name assigned_block').lean();
+        const lastLeave  = await getLastApprovedLeave(AttendanceRecord, req.user.id, id);
+        try {
+          await sendBusinessEmail(
+            manager.email,
+            `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
+            leaveRequestEmailHtml({
+              managerName: manager.name,
+              empName:     empProfile?.name || currentUser.name,
+              empId:       empProfile?.emp_id || '—',
+              blockName:   empProfile?.assigned_block || null,
+              leaveType,
+              reason,
+              dayCount,
+              dateRange,
+              lastLeave,
+            })
+          );
+        } catch (err) {
+          console.error('[apply-leave] manager email failed:', err.message);
+        }
       }
     }
 
@@ -765,20 +781,32 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
     });
 
     if (record.manager_id) {
-      const emp = await User.findById(req.user.id).select('name email').lean();
+      const emp = await User.findById(req.user.id)
+        .select('name email emp_id assigned_block').lean();
       await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id, '/manager/queue');
 
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] ${leaveType} Request – ${emp.name}`,
-          `<p>Hi ${escapeHtml(manager.name)},</p>
-           <p><strong>${escapeHtml(emp.name)}</strong> has submitted a <strong>${escapeHtml(leaveType)}</strong> request for <strong>${escapeHtml(record.date)}</strong>.</p>
-           <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
-           <p><strong>Worked hours:</strong> ${record.worked_hours ?? '—'} hrs</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
+        const lastLeave = await getLastApprovedLeave(AttendanceRecord, req.user.id, record._id);
+        try {
+          await sendBusinessEmail(
+            manager.email,
+            `[AMS] ${leaveType} Request – ${emp.name}`,
+            leaveRequestEmailHtml({
+              managerName: manager.name,
+              empName:     emp.name,
+              empId:       emp.emp_id || '—',
+              blockName:   emp.assigned_block || null,
+              leaveType,
+              reason,
+              dayCount:    1,
+              dateRange:   record.date,
+              lastLeave,
+            })
+          );
+        } catch (err) {
+          console.error('[leave-request] manager email failed:', err.message);
+        }
       }
     }
 
@@ -861,20 +889,27 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
     });
 
     if (record.manager_id) {
-      const emp = await User.findById(req.user.id).select('name email').lean();
+      const emp = await User.findById(req.user.id).select('name email emp_id').lean();
       await notify(record.manager_id, 'Re-application Submitted', `${emp.name} has re-submitted attendance for ${record.date} after rejection. Reason: ${reason}`, 'info', record._id, '/manager/queue');
 
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] Re-application – ${emp.name} (${record.date})`,
-          `<p>Hi ${escapeHtml(manager.name)},</p>
-           <p><strong>${escapeHtml(emp.name)}</strong> has re-submitted their attendance for <strong>${escapeHtml(record.date)}</strong> after it was rejected.</p>
-           <p><strong>Re-apply Reason:</strong> ${escapeHtml(reason)}</p>
-           <p><strong>Supporting documents:</strong> ${docPaths.length} file(s) attached</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
+        try {
+          await sendBusinessEmail(
+            manager.email,
+            `[AMS] Re-application – ${emp.name} (${record.date})`,
+            reapplyEmailHtml({
+              managerName: manager.name,
+              empName:     emp.name,
+              empId:       emp.emp_id || '—',
+              date:        record.date,
+              reason,
+              docCount:    docPaths.length,
+            })
+          );
+        } catch (err) {
+          console.error('[reapply] manager email failed:', err.message);
+        }
       }
     }
 

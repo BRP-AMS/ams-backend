@@ -114,4 +114,19 @@ const sendMail = async (to, subject, html, options = {}) => {
   console.error('[Email] ⚠️  No email provider configured! Set FIREBASE_API_KEY, RESEND_API_KEY, or SMTP_HOST. Skipping:', subject, '→', to);
 };
 
-module.exports = { sendMail, transporter, mode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };
+/**
+ * Escape HTML special chars for safe interpolation into email templates.
+ * Prevents stored XSS via user-controlled fields (name, email, remark) reaching
+ * other users' inboxes where the mail client may render them as HTML.
+ */
+const escapeHtml = (val) => {
+  if (val == null) return '';
+  return String(val)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+};
+
+module.exports = { sendMail, transporter, mode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser, escapeHtml };

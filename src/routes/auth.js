@@ -8,7 +8,7 @@ const { body, validationResult } = require('express-validator');
 const rateLimit  = require('express-rate-limit');
 const { User, AuditLog, RevokedToken } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
-const { sendMail } = require('../utils/mailer');
+const { sendMail, escapeHtml } = require('../utils/mailer');
 
 // ── Secure token helpers ──────────────────────────────────────────────────
 const generateToken = () => crypto.randomBytes(32).toString('hex');           // 64-char hex
@@ -27,6 +27,10 @@ const forgotLimiter = rateLimit({
 const otpLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many OTP requests. Try again in 10 minutes.' },
+});
+const resetPwLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  message: { success: false, message: 'Too many reset attempts. Try again in 15 minutes.' },
 });
 
 const validate = (req, res, next) => {
@@ -293,7 +297,7 @@ router.post('/forgot-password', forgotLimiter, [
     await sendMail(user.email, '[BRP AMS] Reset Your Password',
       emailLayout('Password Reset Request', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, we received a request to reset your AMS password.
+          Hi <strong>${escapeHtml(user.name)}</strong>, we received a request to reset your AMS password.
         </p>
         <p style="color:#475569;font-size:14px;line-height:1.6;">
           Click the button below. This link expires in <strong>5 minutes</strong>.
@@ -353,7 +357,7 @@ router.post('/reset-password-otp', otpLimiter, [
     await sendMail(user.email, '[BRP AMS] Password Reset OTP',
       emailLayout('Password Reset Verification Code', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, enter this code to verify your identity before resetting your password.
+          Hi <strong>${escapeHtml(user.name)}</strong>, enter this code to verify your identity before resetting your password.
         </p>
         <div style="text-align:center;margin:28px 0;">
           <span style="font-size:42px;font-weight:900;letter-spacing:14px;color:#0b1e3b;">${otp}</span>
@@ -374,7 +378,7 @@ router.post('/reset-password-otp', otpLimiter, [
 });
 
 // ── POST /api/auth/reset-password ────────────────────────────────────────
-router.post('/reset-password', [
+router.post('/reset-password', resetPwLimiter, [
   body('token').notEmpty().withMessage('Reset token is required'),
   body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
   body('newPassword')
@@ -422,7 +426,7 @@ router.post('/reset-password', [
     sendMail(user.email, '[BRP AMS] Password Changed',
       emailLayout('Password Changed Successfully', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, your AMS password was changed successfully.
+          Hi <strong>${escapeHtml(user.name)}</strong>, your AMS password was changed successfully.
         </p>
         <p style="color:#dc2626;font-size:13px;">
           If you did not do this, contact your administrator immediately.
@@ -491,7 +495,7 @@ router.get('/verify-email/:token', async (req, res) => {
 
     res.send(page(true,
       'Email Verified!',
-      `Your email has been verified successfully, <strong>${user.name}</strong>.<br><br>Your account is now active. Click below to sign in.`
+      `Your email has been verified successfully, <strong>${escapeHtml(user.name)}</strong>.<br><br>Your account is now active. Click below to sign in.`
     ));
   } catch (err) {
     console.error(err);
@@ -519,7 +523,7 @@ router.post('/resend-verification', authenticate, async (req, res) => {
     await sendMail(user.email, '[BRP AMS] Verify Your Email',
       emailLayout('Verify Your Email Address', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, please verify your email address by clicking below.
+          Hi <strong>${escapeHtml(user.name)}</strong>, please verify your email address by clicking below.
         </p>
         <div style="text-align:center;margin:28px 0;">
           <a href="${verifyUrl}"
@@ -560,7 +564,7 @@ router.post('/send-phone-otp', otpLimiter, authenticate, async (req, res) => {
     await sendMail(user.email, '[BRP AMS] Your Verification Code',
       emailLayout('Phone Verification Code', `
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${user.name}</strong>, your verification code for phone number <strong>${user.phone}</strong> is:
+          Hi <strong>${escapeHtml(user.name)}</strong>, your verification code for phone number <strong>${escapeHtml(user.phone)}</strong> is:
         </p>
         <div style="text-align:center;margin:28px 0;">
           <span style="font-size:42px;font-weight:900;letter-spacing:14px;color:#0b1e3b;">${otp}</span>

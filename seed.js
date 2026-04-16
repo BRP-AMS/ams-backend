@@ -18,8 +18,14 @@ const seed = async () => {
     User.deleteMany({}),
   ]);
 
-  const hash = (pw) => bcrypt.hashSync(pw, 10);
-  const pw = 'R@m%Brp@26';
+  const hash = (pw) => bcrypt.hashSync(pw, 12);
+  // Password must be supplied via SEED_ADMIN_PASSWORD env var — never hardcode.
+  const pw = process.env.SEED_ADMIN_PASSWORD;
+  if (!pw || pw.length < 12) {
+    console.error('FATAL: SEED_ADMIN_PASSWORD env var is required (min 12 chars).');
+    console.error('Example: SEED_ADMIN_PASSWORD="YourStrongPassHere!23" node seed.js');
+    process.exit(1);
+  }
 
   // ── IDs ──────────────────────────────────────────────────────────────
   const superAdminId = uuidv4();
@@ -40,13 +46,12 @@ const seed = async () => {
 
   
 
-  console.log('✅ Database seeded successfully!');
-  console.log('\n📋 Login Credentials (all passwords: R@m%Brp@26)');
-  console.log('─────────────────────────────────────────────────');
+  console.log('Database seeded successfully.');
+  console.log('-------------------------------------------------');
   console.log('  Super Admin: ajay.s@raminfo.com  (SADM001)');
-  console.log('  Admin:        ajay.rges@gmal.com      (ADM001)');
-  
-  console.log('─────────────────────────────────────────────────');
+  console.log('  Admin:        ajay.rges@gmail.com      (ADM001)');
+  console.log('  Password:    [value of SEED_ADMIN_PASSWORD env var]');
+  console.log('-------------------------------------------------');
 
   process.exit(0);
 };

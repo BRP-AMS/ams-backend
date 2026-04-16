@@ -123,11 +123,14 @@ auditLogSchema.index({ entity_type: 1, entity_id: 1 });
 auditLogSchema.index({ user_id: 1 });
 auditLogSchema.index({ created_at: 1 });
 
-// Uses token_hash as _id for O(1) lookup and insert-or-ignore behaviour
+// Uses token_hash as _id for O(1) lookup and insert-or-ignore behaviour.
+// TTL index auto-expires entries 24 h after revoked_at — matches JWT lifetime,
+// so the original token would be rejected by jwt.verify() anyway.
 const revokedTokenSchema = new mongoose.Schema({
   _id:        { type: String }, // token_hash stored as _id
   revoked_at: { type: Date, default: Date.now },
 });
+revokedTokenSchema.index({ revoked_at: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
 
 const activitySchema = new mongoose.Schema({
   _id:              { type: String },

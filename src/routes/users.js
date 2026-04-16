@@ -5,9 +5,9 @@ const multer     = require('multer');
 const XLSX       = require('xlsx');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
-const { User, AttendanceRecord, Notification } = require('../models/database');
+const { User, AttendanceRecord, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { sendMail } = require('../utils/mailer');
+const { sendMail, escapeHtml } = require('../utils/mailer');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -124,6 +124,10 @@ router.post('/', authenticate, authorize('admin'), [
     );
 
     const user = await User.findById(id).lean();
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'USER_CREATE',
+      entity_type: 'user', entity_id: id, new_value: `${empId}/${role}`, ip_address: req.ip,
+    });
     res.status(201).json({ success: true, message: 'User created. Activation & password-set email sent.', data: formatUser(user) });
   } catch (err) {
     console.error(err);
@@ -182,7 +186,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
       <tr><td style="padding:32px;">
         <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Password Reset by Admin</h2>
         <p style="color:#475569;font-size:14px;line-height:1.6;">
-          Hi <strong>${target.name}</strong>, your password has been reset by an administrator.
+          Hi <strong>${escapeHtml(target.name)}</strong>, your password has been reset by an administrator.
           Click the button below to set a new password.
         </p>
         <p style="color:#dc2626;font-size:13px;font-weight:700;">
@@ -211,6 +215,11 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
         type: 'warning', is_read: 0,
       });
     } catch (_) {}
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_RESET_PASSWORD',
+      entity_type: 'user', entity_id: target._id, ip_address: req.ip,
+    });
 
     res.json({ success: true, message: `Password reset email sent to ${target.name} (${target.email})` });
   } catch (err) {
@@ -299,6 +308,13 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
     }
 
     const updated = await User.findById(req.params.id).lean();
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'USER_UPDATE',
+      entity_type: 'user', entity_id: req.params.id,
+      old_value: `${user.role}/active=${user.is_active}`,
+      new_value: `${updated.role}/active=${updated.is_active}`,
+      ip_address: req.ip,
+    });
     res.json({ success: true, message: 'User updated', data: formatUser(updated) });
   } catch (err) {
     console.error(err);
@@ -321,6 +337,10 @@ router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
     }
 
     await User.findByIdAndUpdate(req.params.id, { $set: { is_active: 0 } });
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'USER_DEACTIVATE',
+      entity_type: 'user', entity_id: req.params.id, ip_address: req.ip,
+    });
     res.json({ success: true, message: 'User deactivated' });
   } catch (err) {
     console.error(err);
@@ -386,6 +406,9 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
     const message = note
       ? `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment. Note: ${note}`
       : `${emp.name} (${emp.emp_id}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment.`;
+    const messageHtml = note
+      ? `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment. Note: ${escapeHtml(note)}`
+      : `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a ${type === 'manager' ? 'reporting manager' : 'block'} assignment.`;
 
     // In-app notifications for all admins — link deep-links to this employee's edit panel
     if (admins.length) {
@@ -403,8 +426,8 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
     // Email to all admins
     const emailHtml = `
       <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;padding:32px">
-        <h2 style="color:#0A1F44;margin-bottom:8px">${title}</h2>
-        <p style="color:#64748B;font-size:14px;line-height:1.7">${message}</p>
+        <h2 style="color:#0A1F44;margin-bottom:8px">${escapeHtml(title)}</h2>
+        <p style="color:#64748B;font-size:14px;line-height:1.7">${messageHtml}</p>
         <div style="margin-top:24px;padding:16px;background:#FEF3C7;border-radius:12px;border:1px solid #FDE68A">
           <p style="color:#92400E;font-size:13px;margin:0">Please log in to the <strong>Admin Dashboard → Users</strong> to assign the ${type === 'manager' ? 'reporting manager' : 'block'} for this employee.</p>
         </div>
@@ -435,6 +458,9 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
     const message = note
       ? `${emp.name} (${emp.emp_id}) requests a change to their assigned location (current: ${current}). Note: ${note}`
       : `${emp.name} (${emp.emp_id}) requests a change to their assigned location (current: ${current}).`;
+    const messageHtml = note
+      ? `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a change to their assigned location (current: ${escapeHtml(current)}). Note: ${escapeHtml(note)}`
+      : `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a change to their assigned location (current: ${escapeHtml(current)}).`;
 
     if (admins.length) {
       await Notification.insertMany(admins.map(a => ({
@@ -445,8 +471,8 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
 
     const emailHtml = `
       <div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;padding:32px">
-        <h2 style="color:#0A1F44;margin-bottom:8px">${title}</h2>
-        <p style="color:#64748B;font-size:14px;line-height:1.7">${message}</p>
+        <h2 style="color:#0A1F44;margin-bottom:8px">${escapeHtml(title)}</h2>
+        <p style="color:#64748B;font-size:14px;line-height:1.7">${messageHtml}</p>
         <div style="margin-top:24px;padding:16px;background:#FEF3C7;border-radius:12px;border:1px solid #FDE68A">
           <p style="color:#92400E;font-size:13px;margin:0">Log in to <strong>Admin → Users</strong> and edit this employee's Block / District assignment.</p>
         </div>
@@ -505,7 +531,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
       if (existing) {
         // Update existing user (password only updated if provided)
         const update = { name, email, role, department: dept, phone, assigned_block: block, assigned_district: district };
-        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
+        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 12);
         await User.findByIdAndUpdate(existing._id, { $set: update });
         results.updated++;
       } else {
@@ -519,7 +545,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
           emp_id:            empId,
           name,
           email,
-          password_hash:     bcrypt.hashSync(password, 10),
+          password_hash:     bcrypt.hashSync(password, 12),
           role,
           department:        dept,
           phone,
@@ -529,6 +555,13 @@ router.post('/bulk-upload', authenticate, authorize('super_admin'), uploadMem.si
         results.created++;
       }
     }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'USER_BULK_UPLOAD',
+      entity_type: 'user',
+      new_value: `created=${results.created},updated=${results.updated},skipped=${results.skipped}`,
+      ip_address: req.ip,
+    });
 
     res.json({ success: true, message: 'Bulk upload complete', data: results });
   } catch (err) {

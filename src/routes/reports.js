@@ -181,6 +181,7 @@ const PDFDocument  = require('pdfkit');
 const { AttendanceRecord } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const mongoose     = require('mongoose');
+const { safeRows } = require('../utils/sheetSafe');
 
 // ── Helper: safe ObjectId conversion ─────────────────────────────────────
 const toObjectId = (id) => {
@@ -247,15 +248,15 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'employe
 
     // ── Excel Export ─────────────────────────────────────────────────
     if (format === 'excel') {
-      const wsData = [
-        ['Date', 'Emp ID', 'Employee Name', 'Department', 'Duty Type', 'Sector', 'Check-In', 'Check-Out', 'Location', 'Description', 'Status', 'Manager', 'Remark', 'Actioned At'],
-        ...records.map(r => [
-          r.date,               r.emp_id_code,        r.employee_name,      r.dept,
-          r.duty_type,          r.sector        || '', r.checkin_time  || '', r.checkout_time  || '',
-          r.location_address || '', r.description || '', r.status,
-          r.manager_name     || '', r.manager_remark || '', r.actioned_at || '',
-        ])
-      ];
+      const header = ['Date', 'Emp ID', 'Employee Name', 'Department', 'Duty Type', 'Sector', 'Check-In', 'Check-Out', 'Location', 'Description', 'Status', 'Manager', 'Remark', 'Actioned At'];
+      const dataRows = records.map(r => [
+        r.date,               r.emp_id_code,        r.employee_name,      r.dept,
+        r.duty_type,          r.sector        || '', r.checkin_time  || '', r.checkout_time  || '',
+        r.location_address || '', r.description || '', r.status,
+        r.manager_name     || '', r.manager_remark || '', r.actioned_at || '',
+      ]);
+      // Defense: neutralise CSV/formula-injection in user-supplied free-text cells.
+      const wsData = [header, ...safeRows(dataRows)];
       const ws = XLSX.utils.aoa_to_sheet(wsData);
       ws['!cols'] = wsData[0].map((_, i) => ({ wch: [12, 10, 20, 15, 12, 10, 10, 10, 25, 30, 12, 20, 25, 18][i] }));
       const wb = XLSX.utils.book_new();

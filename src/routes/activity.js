@@ -9,13 +9,24 @@ const { Activity, ActivityDocument, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
 // ── File Upload Config (memory storage → Cloudinary) ─────────────────────
+// Defense in depth: whitelist BOTH extension AND declared MIME type. Magic-byte
+// sniffing happens downstream (Cloudinary verifies images; see M2).
+const ALLOWED_EXT = /^\.(jpe?g|png|gif|pdf|docx?|xlsx)$/i;
+const ALLOWED_MIME = new Set([
+  'image/jpeg', 'image/png', 'image/gif',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
 const upload = multer({
   storage:    multer.memoryStorage(),
   limits:     { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('File type not allowed'));
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_EXT.test(ext))            return cb(new Error('File extension not allowed'));
+    if (!ALLOWED_MIME.has(file.mimetype))  return cb(new Error('File MIME type not allowed'));
+    cb(null, true);
   },
 });
 
@@ -108,7 +119,10 @@ router.get('/', authenticate, [
   query('support_type').optional().trim(),
 ], validate, async (req, res) => {
   try {
-    const { filter = 'monthly', startDate, endDate, block, sector, support_type, limit = 100, offset = 0 } = req.query;
+    const { filter = 'monthly', startDate, endDate, block, sector, support_type } = req.query;
+    // Clamp pagination — prevents a client from asking for millions of rows.
+    const limit  = Math.min(500, Math.max(1, parseInt(req.query.limit,  10) || 100));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
 
     const matchFilter = { activity_date: { $gte: start, $lte: end } };
@@ -130,8 +144,8 @@ router.get('/', authenticate, [
       }},
       { $project: { user: 0, docs: 0 } },
       { $sort: { activity_date: -1, created_at: -1 } },
-      { $skip: Number(offset) },
-      { $limit: Number(limit) },
+      { $skip: offset },
+      { $limit: limit },
     ]);
 
     res.json({ success: true, data: rows, total, start, end });
@@ -288,6 +302,7 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
 ], validate, async (req, res) => {
   try {
     const XLSX = require('xlsx');
+    const { safeRows } = require('../utils/sheetSafe');
     const { filter = 'monthly', startDate, endDate } = req.query;
     const isEmployee = req.user.role === 'employee';
 
@@ -324,7 +339,7 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
     }));
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(excelRows), 'Activities');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(safeRows(excelRows)), 'Activities');
 
     // Block-wise summary sheet
     const blockRows = await Activity.aggregate([
@@ -341,7 +356,7 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
       { $project: { _id: 0, 'Block': '$_id', 'Total': '$total', 'Awareness': '$awareness', 'Marketing Linkage': '$marketing_linkage', 'Loan Facilitation': '$loan_facilitation', 'Training/Workshop': '$training_workshop', 'Advisory/Other': '$advisory_other' } },
       { $sort: { Total: -1 } },
     ]);
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(blockRows), 'Block Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(safeRows(blockRows)), 'Block Summary');
 
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     const excelFilename = filter === 'all' ? `activities_all.xlsx` : `activities_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.xlsx`;

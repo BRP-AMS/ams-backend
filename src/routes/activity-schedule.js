@@ -9,25 +9,42 @@ const { ActivitySchedule, ScheduleDocument, User } = require('../models/database
 const { authenticate, authorize } = require('../middleware/auth');
 
 // For completion attachments (memory storage → Cloudinary)
+const SCHED_ALLOWED_EXT = /^\.(jpe?g|png|gif|pdf|docx?|xlsx)$/i;
+const SCHED_ALLOWED_MIME = new Set([
+  'image/jpeg', 'image/png', 'image/gif',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
 const uploadAttach = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('File type not allowed'));
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!SCHED_ALLOWED_EXT.test(ext))           return cb(new Error('File extension not allowed'));
+    if (!SCHED_ALLOWED_MIME.has(file.mimetype)) return cb(new Error('File MIME type not allowed'));
+    cb(null, true);
   },
 });
 
 // For bulk Excel/CSV upload
+const BULK_ALLOWED_EXT = /^\.(xlsx|xls|csv)$/i;
+const BULK_ALLOWED_MIME = new Set([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+  'text/csv',
+  'application/octet-stream', // some browsers report this for xlsx
+]);
 const bulkStorage = multer.memoryStorage();
 const uploadBulk  = multer({
   storage: bulkStorage,
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
-    const allowed = /xlsx|xls|csv/;
-    if (allowed.test(path.extname(file.originalname).toLowerCase())) cb(null, true);
-    else cb(new Error('Only Excel (.xlsx/.xls) or CSV files allowed'));
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!BULK_ALLOWED_EXT.test(ext))           return cb(new Error('Only .xlsx, .xls or .csv files allowed'));
+    if (!BULK_ALLOWED_MIME.has(file.mimetype)) return cb(new Error('Declared MIME type not allowed'));
+    cb(null, true);
   },
 });
 

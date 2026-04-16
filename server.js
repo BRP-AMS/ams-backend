@@ -56,11 +56,13 @@ const ALLOWED_ORIGINS = [
   'capacitor://localhost',   // Android Capacitor app
   'http://localhost',        // Android WebView fallback
   'https://localhost',
-  null,                      // allow requests with no origin (mobile apps)
 ];
+// Allow no-origin requests (e.g. native mobile apps, curl health checks) ONLY
+// for read-only methods. Browser-origin requests must match ALLOWED_ORIGINS.
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    if (!origin) return cb(null, true);           // non-browser client
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     cb(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -75,7 +77,9 @@ app.use((req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   next();
 });
-app.use(morgan('dev'));
+// Use 'combined' (Apache common log format — includes IP, auth user, UA) in
+// production so access logs aggregate cleanly; 'dev' stays colourful locally.
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Sanitize req.body against NoSQL injection ($, .)
@@ -213,64 +217,51 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
-// ── Seed endpoint (temporary — run once then remove) ─────────────────────
-app.get('/api/run-seed', async (req, res) => {
-  try {
-    const bcrypt = require('bcryptjs');
-    const { v4: uuidv4 } = require('uuid');
-    const { User, AttendanceRecord, Notification, AuditLog } = require('./src/models/database');
+// ── Dev-only diagnostic endpoints ─────────────────────────────────────────
+// These endpoints are only registered when NOT in production. They are guarded
+// by a shared admin bearer token (ADMIN_MAINT_TOKEN env var) to prevent misuse
+// in staging/dev environments as well.
+if (process.env.NODE_ENV !== 'production') {
+  const requireMaintToken = (req, res, next) => {
+    const tok = process.env.ADMIN_MAINT_TOKEN;
+    if (!tok) return res.status(503).json({ success: false, message: 'Maintenance endpoints disabled (ADMIN_MAINT_TOKEN not set)' });
+    const hdr = req.get('X-Maint-Token');
+    if (!hdr || hdr !== tok) return res.status(403).json({ success: false, message: 'Forbidden' });
+    next();
+  };
 
-    // Clear existing data
-    await Promise.all([
-      AuditLog.deleteMany({}),
-      Notification.deleteMany({}),
-      AttendanceRecord.deleteMany({}),
-      User.deleteMany({}),
-    ]);
+  // Admin: unlock all locked accounts
+  app.post('/api/admin-unlock', requireMaintToken, async (req, res) => {
+    try {
+      const { User } = require('./src/models/database');
+      const result = await User.updateMany(
+        {},
+        { $set: { login_locked_until: null, failed_login_attempts: 0 } }
+      );
+      res.json({ success: true, unlocked: result.modifiedCount });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
 
-    const hash = (pw) => bcrypt.hashSync(pw, 10);
-    const pw = 'R@m%Brp@26';
-
-    await User.insertMany([
-      { _id: uuidv4(), emp_id: 'SADM001', name: 'Super Admin', email: 'ajay.s@raminfo.com', password_hash: hash(pw), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001', email_verified: true },
-      { _id: uuidv4(), emp_id: 'ADM001', name: 'Admin User', email: 'ajay.rges@gmal.com', password_hash: hash(pw), role: 'admin', department: 'Administration', manager_id: null, phone: '9000000002', email_verified: true },
-    ]);
-
-    res.json({ success: true, message: 'Database seeded! Login: ajay.s@raminfo.com / R@m%Brp@26' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ── Admin: unlock all locked accounts (temporary) ───────────────────────
-app.get('/api/admin-unlock', async (req, res) => {
-  try {
-    const { User } = require('./src/models/database');
-    const result = await User.updateMany(
-      {},
-      { $set: { login_locked_until: null, failed_login_attempts: 0 } }
-    );
-    res.json({ success: true, unlocked: result.modifiedCount });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ── Email test endpoint (temporary — remove after debugging) ─────────────
-app.get('/api/test-email', async (req, res) => {
-  const { sendMail, mode } = require('./src/utils/mailer');
-  const to = req.query.to;
-  if (!to) return res.status(400).json({ error: 'Pass ?to=email@example.com' });
-  try {
-    const info = await sendMail(to, '[BRP AMS] Test Email',
-      '<h2>✅ Email is working!</h2><p>This is a test email from BRP-AMS backend on Render.</p>',
-      { type: 'PASSWORD_RESET' }
-    );
-    res.json({ success: true, mode, info: info || 'sent' });
-  } catch (err) {
-    res.status(500).json({ success: false, mode, error: err.message, code: err.code });
-  }
-});
+  // Email test endpoint
+  app.post('/api/test-email', requireMaintToken, async (req, res) => {
+    const { sendMail, mode } = require('./src/utils/mailer');
+    const to = req.body?.to;
+    if (!to || typeof to !== 'string') return res.status(400).json({ error: 'Pass { "to": "email@example.com" } in JSON body' });
+    try {
+      const info = await sendMail(to, '[BRP AMS] Test Email',
+        '<h2>Email is working.</h2><p>This is a test email from BRP-AMS backend.</p>',
+        { type: 'PASSWORD_RESET' }
+      );
+      res.json({ success: true, mode, info: info || 'sent' });
+    } catch (err) {
+      res.status(500).json({ success: false, mode, error: err.message, code: err.code });
+    }
+  });
+}
+// Note: /api/run-seed has been removed. Use `node seed.js` locally against a
+// non-production database if demo data is needed.
 
 // ── Error Handler ─────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

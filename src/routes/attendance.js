@@ -6,19 +6,20 @@ const { v4: uuidv4 } = require('uuid');
 const { body, query, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { sendMail } = require('../utils/mailer');
+const { sendMail, escapeHtml } = require('../utils/mailer');
 
 // ── IST time helpers (server may run in UTC) ─────────────────────────────
 const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 
 // Multer — memory storage (files uploaded to Cloudinary)
+const ATT_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const upload = multer({
   storage:    multer.memoryStorage(),
   limits:     { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only images allowed'));
+    if (ATT_ALLOWED_MIME.has(file.mimetype)) cb(null, true);
+    else cb(new Error('Only JPEG/PNG/GIF/WebP images allowed'));
   }
 });
 
@@ -336,10 +337,10 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
         await sendMail(
           manager.email,
           `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong>
-           ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p>
-           <p><strong>Reason:</strong> ${reason}</p>
+          `<p>Hi ${escapeHtml(manager.name)},</p>
+           <p><strong>${escapeHtml(currentUser.name)}</strong> has applied for <strong>${escapeHtml(leaveType)}</strong>
+           ${isMultiDay ? `from <strong>${escapeHtml(date)}</strong> to <strong>${escapeHtml(finalEndDate)}</strong> (${dayCount} days)` : `on <strong>${escapeHtml(date)}</strong>`}.</p>
+           <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
            <p>Please review this in the AMS Manager Dashboard.</p>`
         );
       }
@@ -619,9 +620,9 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
         await sendMail(
           manager.email,
           `[AMS] ${leaveType} Request – ${emp.name}`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${emp.name}</strong> has submitted a <strong>${leaveType}</strong> request for <strong>${record.date}</strong>.</p>
-           <p><strong>Reason:</strong> ${reason}</p>
+          `<p>Hi ${escapeHtml(manager.name)},</p>
+           <p><strong>${escapeHtml(emp.name)}</strong> has submitted a <strong>${escapeHtml(leaveType)}</strong> request for <strong>${escapeHtml(record.date)}</strong>.</p>
+           <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
            <p><strong>Worked hours:</strong> ${record.worked_hours ?? '—'} hrs</p>
            <p>Please review this in the AMS Manager Dashboard.</p>`
         );
@@ -715,9 +716,9 @@ router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('re
         await sendMail(
           manager.email,
           `[AMS] Re-application – ${emp.name} (${record.date})`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${emp.name}</strong> has re-submitted their attendance for <strong>${record.date}</strong> after it was rejected.</p>
-           <p><strong>Re-apply Reason:</strong> ${reason}</p>
+          `<p>Hi ${escapeHtml(manager.name)},</p>
+           <p><strong>${escapeHtml(emp.name)}</strong> has re-submitted their attendance for <strong>${escapeHtml(record.date)}</strong> after it was rejected.</p>
+           <p><strong>Re-apply Reason:</strong> ${escapeHtml(reason)}</p>
            <p><strong>Supporting documents:</strong> ${docPaths.length} file(s) attached</p>
            <p>Please review this in the AMS Manager Dashboard.</p>`
         );

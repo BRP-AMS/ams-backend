@@ -39,7 +39,6 @@ const PDFDoc   = require('pdfkit');
 const mongoose = require('mongoose');
 const { AttendanceRecord, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const mongoose     = require('mongoose');
 const { safeRows } = require('../utils/sheetSafe');
 
 // ── Helper: safe ObjectId conversion ─────────────────────────────────────

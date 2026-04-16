@@ -104,9 +104,15 @@ const { v4: uuidv4 } = require('uuid');
 cron.schedule('58 23 * * *', async () => { 
   console.log('[AutoCheckout] Nightly cron triggered'); 
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const unchecked = await AttendanceRecord.find({ date: today, status: 'Draft', checkout_time: null }).lean();
-    console.log(`[AutoCheckout] ${unchecked.length} unchecked records for ${today}`);
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const unchecked = await AttendanceRecord.find({
+      date: { $lte: today },
+      status: 'Draft',
+      checkout_time: null,
+    }).lean();
+ 
+    console.log(`[AutoCheckout] ${unchecked.length} unchecked for ${today}`);
+ 
     for (const record of unchecked) {
       await AttendanceRecord.findByIdAndUpdate(record._id, {
         $set: {
@@ -159,7 +165,7 @@ connectionPromise.then(async () => {
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const missed = await AttendanceRecord.find({
-      date: { $lte: todayIST },  // strictly before today
+      date:          { $lte: todayIST },   // strictly before today
       status:        'Draft',
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },

@@ -385,32 +385,45 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
       const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
       matchFilter.activity_date = { $gte: start, $lte: end };
     }
+   if (req.user.role === 'employee') {
+  matchFilter.user_id = req.user.id;
+} else if (req.user.role === 'manager') {
+  const teamMembersExcel = await User.find(
+    { manager_id: req.user.id, is_active: 1 }
+  ).distinct('_id');
+  matchFilter.user_id = { $in: teamMembersExcel };
+} 
+    // hr / super_admin / admin: see all
 
     const rows = await Activity.aggregate([
       { $match: matchFilter },
       { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
-      { $addFields: { officer: { $arrayElemAt: ['$user.name', 0] } } },
+      { $addFields: {
+          officer:  { $arrayElemAt: ['$user.name',   0] },
+          emp_code: { $arrayElemAt: ['$user.emp_id', 0] },
+      }},
       { $project: { user: 0 } },
       { $sort: { activity_date: -1 } },
       { $limit: 500 },
     ]);
 
-    const blockStats = await Activity.aggregate([
-      { $match: matchFilter },
-      { $group: { _id: '$block_name', total: { $sum: 1 } } },
-      { $project: { _id: 0, block_name: '$_id', total: 1 } },
-      { $sort: { total: -1 } },
-    ]);
+    const periodLabel = matchFilter.activity_date
+      ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}`
+      : 'All time';
+    const generatedDate = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
 
-    const pdfFilename = filter === 'all' ? 'activity_report_all.pdf' : `activity_report_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.pdf`;
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const pdfFilename = filter === 'all' ? 'activity_report_all.pdf'
+      : `activity_report_${matchFilter.activity_date?.$gte}_${matchFilter.activity_date?.$lte}.pdf`;
+
+    const doc = new PDFDocument({ margin: 0, size: 'A4', layout: 'landscape' });
     res.setHeader('Content-Disposition', `attachment; filename=${pdfFilename}`);
     res.setHeader('Content-Type', 'application/pdf');
     doc.pipe(res);
 
-    // Header
+    // Header 
     doc.fontSize(18).font('Helvetica-Bold').text('BRP — Activity Report', { align: 'center' });
-    doc.fontSize(11).font('Helvetica').text(`Period: ${start} to ${end}`, { align: 'center' });
+    const periodLabel = matchFilter.activity_date ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}` : 'All time';
+    doc.fontSize(11).font('Helvetica').text(`Period: ${periodLabel}`, { align: 'center' });
     doc.moveDown(0.5);
     doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
     doc.moveDown(0.5);
@@ -451,8 +464,24 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
         doc.text(String(v || ''), x, y, { width: cols[i] - 2, ellipsis: true });
         x += cols[i];
       });
-      y += 14;
-    }
+
+      // Vertical dividers
+      let vx = MARGIN;
+      cols.forEach((w, i) => {
+        if (i > 0) {
+          doc.moveTo(vx, y).lineTo(vx, y + ROW_H)
+             .strokeColor(BORDER).lineWidth(0.3).stroke();
+        }
+        vx += w;
+      });
+
+      y += ROW_H;
+    });
+
+    // Outer border around whole table
+    const tableH = y - 82;
+    doc.rect(MARGIN, 82, PAGE_W - MARGIN * 2, tableH)
+       .strokeColor(BLUE).lineWidth(0.8).stroke();
 
     doc.end();
   } catch (err) {

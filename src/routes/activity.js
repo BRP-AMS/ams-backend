@@ -420,9 +420,8 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
     res.setHeader('Content-Type', 'application/pdf');
     doc.pipe(res);
 
-    // Header 
+    // Header
     doc.fontSize(18).font('Helvetica-Bold').text('BRP — Activity Report', { align: 'center' });
-    const periodLabel = matchFilter.activity_date ? `${matchFilter.activity_date.$gte} to ${matchFilter.activity_date.$lte}` : 'All time';
     doc.fontSize(11).font('Helvetica').text(`Period: ${periodLabel}`, { align: 'center' });
     doc.moveDown(0.5);
     doc.moveTo(40, doc.y).lineTo(555, doc.y).stroke();
@@ -446,20 +445,26 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
     doc.moveDown(1);
 
     // Detail table
-    doc.fontSize(13).font('Helvetica-Bold').text('Activity Details', 40, doc.y);
+    const MARGIN  = 40;
+    const PAGE_W  = 841;   // A4 landscape width (pts)
+    const ROW_H   = 16;
+    const BORDER  = '#cccccc';
+    const BLUE    = '#1e3a5f';
+
+    doc.fontSize(13).font('Helvetica-Bold').text('Activity Details', MARGIN, doc.y);
     doc.moveDown(0.3);
     const cols    = [70, 100, 120, 80, 100, 80];
     const headers = ['Date', 'Officer', 'MSME Name', 'Sector', 'Support', 'Block'];
     y = doc.y;
     doc.fontSize(9).font('Helvetica-Bold');
-    let x = 40;
+    let x = MARGIN;
     headers.forEach((h, i) => { doc.text(h, x, y, { width: cols[i] }); x += cols[i]; });
-    y += 16;
+    y += ROW_H;
     doc.font('Helvetica').fontSize(8);
 
     for (const r of rows) {
-      if (y > 760) { doc.addPage(); y = 40; }
-      x = 40;
+      if (y > 560) { doc.addPage(); y = 40; }
+      x = MARGIN;
       [r.activity_date, r.officer, r.msme_name, r.sector, r.support_type, r.block_name].forEach((v, i) => {
         doc.text(String(v || ''), x, y, { width: cols[i] - 2, ellipsis: true });
         x += cols[i];
@@ -476,7 +481,7 @@ router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee'
       });
 
       y += ROW_H;
-    });
+    }
 
     // Outer border around whole table
     const tableH = y - 82;

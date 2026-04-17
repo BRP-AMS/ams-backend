@@ -730,18 +730,26 @@ router.get('/leave-export',
 
     const empMap = {};
     for (const e of employees) empMap[String(e._id)] = e;
-
-    const rows = filtered.map(r => ({
-      empCode:       empMap[String(r.emp_id)]?.emp_id || '',
-      empName:       empMap[String(r.emp_id)]?.name   || '',
-      date:          r.date          || '',
-      leaveType:     r.leave_type    || '',
-      status:        r.leave_status  || r.status || '',
-      reason:        r.leave_reason  || '',
-      managerRemark: r.manager_remark|| '',
-      hrOverride:    r.hr_override   ? 'Yes' : 'No',
-      hrRemark:      r.hr_remark     || '',
-    }));
+const rows = filtered.map(r => {
+  const startD    = r.date || '';
+  const endD      = r.end_date || startD;
+  const dayCount  = (startD && endD && endD !== startD)
+    ? Math.round((new Date(endD) - new Date(startD)) / 86400000) + 1
+    : 1;
+  return {
+    empCode:       empMap[String(r.emp_id)]?.emp_id || '',
+    empName:       empMap[String(r.emp_id)]?.name   || '',
+    startDate:     startD,
+    endDate:       endD !== startD ? endD : '',
+    days:          String(dayCount),
+    leaveType:     r.leave_type     || '',
+    status:        r.leave_status   || r.status || '',
+    reason:        r.leave_reason   || '',
+    managerRemark: r.manager_remark || '',
+    hrOverride:    r.hr_override    ? 'Yes' : 'No',
+    hrRemark:      r.hr_remark      || '',
+  };
+});
 
     const sd = new Date(startDate + 'T00:00:00+05:30');
     const ed = new Date(endDate   + 'T00:00:00+05:30');
@@ -781,7 +789,9 @@ router.get('/leave-export',
       const COLS = [
         { key: 'empCode',       header: 'Emp Code',      width: 12 },
         { key: 'empName',       header: 'Employee Name',  width: 22 },
-        { key: 'date',          header: 'Date',           width: 14 },
+         { key: 'startDate',     header: 'From Date',       width: 14 },
+  { key: 'endDate',       header: 'To Date',         width: 14 },
+   { key: 'days',          header: 'Days',            width:  7 },
         { key: 'leaveType',     header: 'Leave Type',     width: 18 },
         { key: 'status',        header: 'Status',         width: 14 },
         { key: 'reason',        header: 'Reason',         width: 32 },
@@ -853,7 +863,7 @@ router.get('/leave-export',
             c.border = CBDR;
             c.font   = { size: 9, name: 'Calibri' };
             c.alignment = {
-              horizontal: ['empCode','status','hrOverride'].includes(col.key) ? 'center' : 'left',
+              horizontal: ['empCode','status','hrOverride','days','startDate','endDate'].includes(col.key) ? 'center' : 'left',
               vertical:   'center',
               wrapText:   ['reason','managerRemark','hrRemark'].includes(col.key),
             };
@@ -899,9 +909,9 @@ router.get('/leave-export',
 
       const ML      = 28;
       const usableW = doc.page.width - ML * 2;
-      const colWidths = [55, 110, 62, 85, 65, 145, 130, 55, 130];
-      const colKeys   = ['empCode','empName','date','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
-      const colHdrs   = ['Emp Code','Employee Name','Date','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
+     const colWidths = [48, 105, 58, 58, 28, 75, 62, 130, 120, 48, 105];
+const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
+const colHdrs   = ['Emp Code','Employee Name','From Date','To Date','Days','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
       const totalW    = colWidths.reduce((a, b) => a + b, 0);
       const cw        = colWidths.map(w => (w / totalW) * usableW);
       const RH = 14, HRH = 16;
@@ -951,7 +961,7 @@ router.get('/leave-export',
           let cx = ML;
           colKeys.forEach((key, i) => {
             const val = String(row[key] || '');
-            const isCenter = ['empCode','status','hrOverride'].includes(key);
+            const isCenter = ['empCode','status','hrOverride','days','startDate','endDate'].includes(key);
             const textColor =
               key === 'status'
                 ? (row.status === 'Approved' ? '#047857' : row.status === 'Rejected' ? '#B91C1C' : '#B45309')

@@ -52,8 +52,9 @@ const processMissedAutoCheckouts = async () => {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
     const missed = await AttendanceRecord.find({
-      date:          { $lte: todayIST },
+      date:          { $lt: todayIST },
       status:        'Draft',
+       checkin_time:  { $ne: null }, 
       checkout_time: null,
       duty_type:     { $ne: 'Leave' },
     }).lean();

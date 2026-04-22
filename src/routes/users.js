@@ -1,10 +1,12 @@
 const express    = require('express');
 const router     = express.Router();
 const bcrypt     = require('bcryptjs');
+const crypto     = require('crypto');
 const multer     = require('multer');
 const XLSX       = require('xlsx');
 const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
+const resetTokens = require('../utils/resetTokens');
 const { body, validationResult } = require('express-validator');
 const { User, AttendanceRecord, Notification } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
@@ -194,42 +196,125 @@ router.post('/', authenticate, authorize('admin'), [
     });
 
     const user = await User.findById(id).lean();
-    res.status(201).json({ success: true, message: 'User created successfully', data: formatUser(user) });
+
+    // Send welcome email with a set-password link
+    const token = crypto.randomBytes(20).toString('hex');
+    await resetTokens.set(token, id, 24 * 60 * 60 * 1000); // 24 h
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink   = `${frontendUrl}/reset-password?token=${token}`;
+    sendMail(
+      email,
+      'BRP AMS — Welcome! Set Your Password',
+      `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f8fafc;border-radius:12px;">
+        <div style="text-align:center;margin-bottom:28px;">
+          <h2 style="color:#1E3A8A;margin:0 0 6px;">BRP Attendance System</h2>
+          <p style="color:#64748b;font-size:14px;margin:0;">Welcome to the team!</p>
+        </div>
+        <div style="background:#fff;border-radius:10px;padding:28px;border:1px solid #e2e8f0;">
+          <p style="color:#0f172a;font-size:15px;margin:0 0 16px;">Hi <strong>${name}</strong>,</p>
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 8px;">
+            Your account has been created on BRP AMS. Click the button below to set your password and get started.
+            This link is valid for <strong>24 hours</strong>.
+          </p>
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            <strong>Employee ID:</strong> ${empId}<br/>
+            <strong>Email:</strong> ${email}<br/>
+            <strong>Role:</strong> ${role}
+          </p>
+          <div style="text-align:center;margin-bottom:24px;">
+            <a href="${resetLink}"
+               style="display:inline-block;background:#1E3A8A;color:#fff;text-decoration:none;
+                      padding:14px 32px;border-radius:8px;font-size:15px;font-weight:700;">
+              Set My Password
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:0;">
+            Or copy this link:<br/>
+            <a href="${resetLink}" style="color:#2563EB;word-break:break-all;">${resetLink}</a>
+          </p>
+        </div>
+        <p style="text-align:center;color:#cbd5e1;font-size:11px;margin-top:20px;">
+          © ${new Date().getFullYear()} BRP · All rights reserved
+        </p>
+      </div>`
+    ).catch(() => {});
+
+    const responseData = { success: true, message: 'User created successfully', data: formatUser(user) };
+    if (!mailer) responseData.resetToken = token;
+    res.status(201).json(responseData);
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// PUT /api/users/:id/reset-password — must be before PUT /:id to avoid route shadowing
-const DEFAULT_PASSWORD = 'R@m%Brp@26';
+// PUT /api/users/:id/reset-password — sends a "set new password" email link
 router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
-  console.log('[reset-password] called by', req.user?.id, 'for target', req.params.id);
   try {
     const target = await User.findById(req.params.id).lean();
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
     if (String(req.params.id) === String(req.user.id))
       return res.status(400).json({ success: false, message: 'Use profile settings to change your own password' });
 
-    // Admin cannot reset password for admin or super_admin users — only Super Admin can
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(target.role)) {
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     }
 
-    const hash = bcrypt.hashSync(DEFAULT_PASSWORD, 10);
-    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: hash } });
+    const token = crypto.randomBytes(20).toString('hex');
+    await resetTokens.set(token, target._id, 30 * 60 * 1000); // 30 min
 
-    // Notify user — don't let notification failure block the response
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink   = `${frontendUrl}/reset-password?token=${token}`;
+
+    await sendMail(
+      target.email,
+      'BRP AMS — Your New Password',
+      `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f8fafc;border-radius:12px;">
+        <div style="text-align:center;margin-bottom:28px;">
+          <h2 style="color:#1E3A8A;margin:0 0 6px;">BRP Attendance System</h2>
+          <p style="color:#64748b;font-size:14px;margin:0;">Password Reset by Admin</p>
+        </div>
+        <div style="background:#fff;border-radius:10px;padding:28px;border:1px solid #e2e8f0;">
+          <p style="color:#0f172a;font-size:15px;margin:0 0 16px;">Hi <strong>${target.name}</strong>,</p>
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            Your password has been reset by an administrator. Click the button below to set a new password.
+            This link is valid for <strong>30 minutes</strong>.
+          </p>
+          <div style="text-align:center;margin-bottom:24px;">
+            <a href="${resetLink}"
+               style="display:inline-block;background:#1E3A8A;color:#fff;text-decoration:none;
+                      padding:14px 32px;border-radius:8px;font-size:15px;font-weight:700;">
+              Set New Password
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:0;">
+            Or copy this link:<br/>
+            <a href="${resetLink}" style="color:#2563EB;word-break:break-all;">${resetLink}</a>
+          </p>
+          <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;"/>
+          <p style="color:#94a3b8;font-size:12px;margin:0;">
+            If you didn't expect this, contact your administrator.
+          </p>
+        </div>
+        <p style="text-align:center;color:#cbd5e1;font-size:11px;margin-top:20px;">
+          © ${new Date().getFullYear()} BRP · All rights reserved
+        </p>
+      </div>`
+    );
+
+    // In-app notification
     try {
       await Notification.create({
         _id: uuidv4(), user_id: target._id,
         title: 'Password Reset by Admin',
-        message: 'Your password has been reset to the default by an administrator. Please log in and change it immediately.',
+        message: 'An administrator has initiated a password reset. Check your email for the reset link.',
         type: 'warning', is_read: 0,
       });
     } catch (_) {}
 
-    res.json({ success: true, message: `Password reset to default for ${target.name}` });
+    const response = { success: true, message: `Password reset link sent to ${target.email}` };
+    if (!mailer) response.resetToken = token;
+    res.json(response);
   } catch (err) {
     console.error('[reset-password]', err);
     res.status(500).json({ success: false, message: 'Server error: ' + err.message });

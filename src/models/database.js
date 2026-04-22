@@ -127,6 +127,24 @@ activitySchema.index({ block_name: 1 });
 activitySchema.index({ sector: 1 });
 activitySchema.index({ activity_date: 1, block_name: 1 });
 
+// MSME Master — pre-loaded list of registered MSMEs per block
+const msmeMasterSchema = new mongoose.Schema({
+  _id:          { type: String },
+  msme_name:    { type: String, required: true },
+  udyam_number: { type: String, required: true, unique: true },
+  sector:       { type: String, enum: ['Manufacturing', 'Services', 'Trade', 'Agriculture', 'Other'], required: true },
+  block_name:   { type: String, required: true },
+  district:     { type: String, required: true },
+  owner_name:   { type: String, default: null },
+  contact:      { type: String, default: null },
+  is_active:    { type: Boolean, default: true },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+
+msmeMasterSchema.index({ block_name: 1 });
+msmeMasterSchema.index({ district: 1 });
+msmeMasterSchema.index({ sector: 1 });
+msmeMasterSchema.index({ is_active: 1 });
+
 const activityDocumentSchema = new mongoose.Schema({
   _id:         { type: String },
   activity_id: { type: String, ref: 'Activity', required: true },
@@ -175,6 +193,14 @@ scheduleDocumentSchema.index({ schedule_id: 1 });
 
 // ── Models ────────────────────────────────────────────────────────────────
 
+// ── Password Reset Token ──────────────────────────────────────────────────
+const passwordResetTokenSchema = new mongoose.Schema({
+  _id:        { type: String },            // token hex string
+  user_id:    { type: String, required: true },
+  expires_at: { type: Date,   required: true, index: { expires: 0 } }, // TTL auto-delete
+}, { _id: false, versionKey: false });
+passwordResetTokenSchema.index({ user_id: 1 });
+
 const User             = mongoose.model('User',             userSchema);
 const AttendanceRecord = mongoose.model('AttendanceRecord', attendanceRecordSchema);
 const Notification     = mongoose.model('Notification',     notificationSchema);
@@ -184,6 +210,8 @@ const Activity         = mongoose.model('Activity',         activitySchema);
 const ActivityDocument = mongoose.model('ActivityDocument', activityDocumentSchema);
 const ActivitySchedule = mongoose.model('ActivitySchedule', activityScheduleSchema);
 const ScheduleDocument = mongoose.model('ScheduleDocument', scheduleDocumentSchema);
+const MsmeMaster       = mongoose.model('MsmeMaster',       msmeMasterSchema);
+const PasswordResetToken = mongoose.model('PasswordResetToken', passwordResetTokenSchema);
 
 // ── Connect ───────────────────────────────────────────────────────────────
 
@@ -215,5 +243,7 @@ module.exports = {
   ActivityDocument,
   ActivitySchedule,
   ScheduleDocument,
+  MsmeMaster,
+  PasswordResetToken,
   connectionPromise,
 };

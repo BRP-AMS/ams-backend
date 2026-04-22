@@ -248,6 +248,7 @@ app.use('/api/reports',      require('./src/routes/reports'));
 app.use('/api/notifications',require('./src/routes/notifications'));
 app.use('/api/activity',          require('./src/routes/activity'));
 app.use('/api/activity-schedule', require('./src/routes/activity-schedule'));
+app.use('/api/msme',              require('./src/routes/msme'));
 
 // Health check
 app.get('/api/health', (req, res) => {

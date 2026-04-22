@@ -5,8 +5,31 @@ const jwt      = require('jsonwebtoken');
 const crypto   = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
+const nodemailer = require('nodemailer');
 const { User, AuditLog, RevokedToken } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
+
+// ── Email helper ──────────────────────────────────────────────────────────
+const mailer = process.env.SMTP_HOST
+  ? nodemailer.createTransport({
+      host:   process.env.SMTP_HOST,
+      port:   parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    })
+  : null;
+
+const sendMail = async (to, subject, html) => {
+  if (!mailer) {
+    console.warn('[Auth] SMTP not configured — skipping email to:', to);
+    return;
+  }
+  try {
+    await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html });
+  } catch (err) {
+    console.error('[Auth] Email send error:', err.message);
+  }
+};
 
 // POST /api/auth/login
 router.post('/login', [
@@ -66,8 +89,8 @@ router.post('/login', [
   }
 });
 
-// In-memory reset tokens: token -> { userId, expiresAt }
-const resetTokens = new Map();
+// Shared in-memory reset tokens (also used by users.js admin flow)
+const resetTokens = require('../utils/resetTokens');
 
 // POST /api/auth/forgot-password
 router.post('/forgot-password', [
@@ -84,10 +107,55 @@ router.post('/forgot-password', [
       return res.status(404).json({ success: false, message: 'No account found with that email.' });
     }
 
-    const token = crypto.randomBytes(4).toString('hex').toUpperCase();
-    resetTokens.set(token, { userId: user._id, expiresAt: Date.now() + 15 * 60 * 1000 });
+    const token = crypto.randomBytes(20).toString('hex');
+    await resetTokens.set(token, user._id, 15 * 60 * 1000); // 15 min
 
-    res.json({ success: true, token });
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink   = `${frontendUrl}/reset-password?token=${token}`;
+
+    await sendMail(
+      user.email,
+      'BRP AMS — Password Reset Request',
+      `
+      <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#f8fafc;border-radius:12px;">
+        <div style="text-align:center;margin-bottom:28px;">
+          <h2 style="color:#1E3A8A;margin:0 0 6px;">BRP Attendance System</h2>
+          <p style="color:#64748b;font-size:14px;margin:0;">Password Reset Request</p>
+        </div>
+        <div style="background:#fff;border-radius:10px;padding:28px;border:1px solid #e2e8f0;">
+          <p style="color:#0f172a;font-size:15px;margin:0 0 16px;">Hi <strong>${user.name}</strong>,</p>
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            We received a request to reset your password. Click the button below to set a new password.
+            This link is valid for <strong>15 minutes</strong>.
+          </p>
+          <div style="text-align:center;margin-bottom:24px;">
+            <a href="${resetLink}"
+               style="display:inline-block;background:#1E3A8A;color:#fff;text-decoration:none;
+                      padding:14px 32px;border-radius:8px;font-size:15px;font-weight:700;
+                      letter-spacing:0.3px;">
+              Reset My Password
+            </a>
+          </div>
+          <p style="color:#94a3b8;font-size:12px;line-height:1.6;margin:0;">
+            If the button doesn't work, copy and paste this link into your browser:<br/>
+            <a href="${resetLink}" style="color:#2563EB;word-break:break-all;">${resetLink}</a>
+          </p>
+          <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;"/>
+          <p style="color:#94a3b8;font-size:12px;margin:0;">
+            If you didn't request a password reset, you can safely ignore this email.
+            Your password will not change.
+          </p>
+        </div>
+        <p style="text-align:center;color:#cbd5e1;font-size:11px;margin-top:20px;">
+          © ${new Date().getFullYear()} BRP · All rights reserved
+        </p>
+      </div>
+      `
+    );
+
+    const response = { success: true, message: mailer ? 'Password reset link sent to your email.' : 'SMTP not configured — use the reset code below.' };
+    if (!mailer) response.resetToken = token;
+    res.json(response);
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -104,16 +172,16 @@ router.post('/reset-password', [
 
   try {
     const { token, newPassword } = req.body;
-    const record = resetTokens.get(token);
+    const record = await resetTokens.get(token);
 
-    if (!record || Date.now() > record.expiresAt) {
+    if (!record) {
       return res.status(400).json({ success: false, message: 'Invalid or expired reset token.' });
     }
 
     await User.findByIdAndUpdate(record.userId, {
       $set: { password_hash: bcrypt.hashSync(newPassword, 10) }
     });
-    resetTokens.delete(token);
+    await resetTokens.delete(token);
 
     res.json({ success: true, message: 'Password reset successfully.' });
   } catch (err) {

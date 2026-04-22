@@ -33,7 +33,7 @@ const validate = (req, res, next) => {
 };
 
 // GET /api/users - Admin/HR/Super Admin: all users | Manager: team
-router.get('/', authenticate, authorize('manager', 'admin', 'hr'), async (req, res) => {
+router.get('/', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     let users;
     if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
@@ -108,7 +108,7 @@ router.get('/employees', authenticate, async (req, res) => {
 });
 
 // GET /api/users/managers - for admin/hr/super_admin dropdown
-router.get('/managers', authenticate, authorize('admin', 'hr'), async (req, res) => {
+router.get('/managers', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const managers = await User
       .find({ role: 'manager', is_active: 1 })
@@ -158,16 +158,15 @@ router.get('/employees', authenticate, async (req, res) => {
 
 
 // POST /api/users - Admin / Super Admin creates user
-router.post('/', authenticate, authorize('admin'), [
+router.post('/', authenticate, authorize('admin', 'super_admin'), [
   body('name').notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
   body('empId').notEmpty().withMessage('Employee ID is required'),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
   body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']).withMessage('Invalid role'),
   body('department').notEmpty().withMessage('Department is required'),
 ], validate, async (req, res) => {
   try {
-    const { name, email, empId, password, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
+    const { name, email, empId, role, department, managerId, phone, assignedBlock, assignedDistrict } = req.body;
 
     // Admin cannot create admin or super_admin accounts — only Super Admin can
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
@@ -180,13 +179,16 @@ router.post('/', authenticate, authorize('admin'), [
     const existingEmpId = await User.findOne({ emp_id: empId }).lean();
     if (existingEmpId) return res.status(409).json({ success: false, message: 'Employee ID already exists' });
 
+    // Auto-generate a random temp password (user will set their own via email link)
+    const tempPassword = crypto.randomBytes(16).toString('hex');
+
     const id = uuidv4();
     await User.create({
       _id:               id,
       emp_id:            empId,
       name,
       email,
-      password_hash:     bcrypt.hashSync(password, 10),
+      password_hash:     bcrypt.hashSync(tempPassword, 10),
       role,
       department,
       manager_id:        managerId        || null,
@@ -249,7 +251,7 @@ router.post('/', authenticate, authorize('admin'), [
 });
 
 // PUT /api/users/:id/reset-password — sends a "set new password" email link
-router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, res) => {
+router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
     const target = await User.findById(req.params.id).lean();
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
@@ -322,7 +324,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin'), async (req, 
 });
 
 // PUT /api/users/:id - Update user
-router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
+router.put('/:id', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
     const user = await User.findById(req.params.id).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -409,7 +411,7 @@ router.put('/:id', authenticate, authorize('admin'), async (req, res) => {
 });
 
 // DELETE /api/users/:id - Soft delete
-router.delete('/:id', authenticate, authorize('admin'), async (req, res) => {
+router.delete('/:id', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
     if (req.params.id === req.user.id)
       return res.status(400).json({ success: false, message: 'Cannot deactivate yourself' });

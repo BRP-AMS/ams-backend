@@ -255,6 +255,28 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
+// ── One-time super admin reset (DELETE THIS ROUTE AFTER USE) ─────────────
+app.get('/api/init-superadmin', async (req, res) => {
+  const SECRET = process.env.INIT_SECRET || 'brp-init-2026';
+  if (req.query.key !== SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const bcrypt = require('bcryptjs');
+    const { v4: uuidv4 } = require('uuid');
+    const { User } = require('./src/models/database');
+    const EMAIL = 'superadmin@brp.com';
+    const PASSWORD = 'SuperAdmin@123';
+    const hash = bcrypt.hashSync(PASSWORD, 10);
+    const existing = await User.findOne({ email: EMAIL });
+    if (existing) {
+      await User.findByIdAndUpdate(existing._id, { $set: { password_hash: hash, is_active: 1 } });
+      return res.json({ success: true, action: 'reset', email: EMAIL, password: PASSWORD });
+    }
+    await User.create({ _id: uuidv4(), emp_id: 'SADM001', name: 'Super Admin', email: EMAIL,
+      password_hash: hash, role: 'super_admin', department: 'Head Office Operations', is_active: 1 });
+    res.json({ success: true, action: 'created', email: EMAIL, password: PASSWORD });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Temporary seed endpoint (remove after use) ───────────────────────────
 // app.post('/api/admin/seed', async (req, res) => {
 //   try {

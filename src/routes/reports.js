@@ -105,6 +105,47 @@ const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-
  *   Rejected → 'A'
  *   Present with location → P or OD
  */
+// const toCode = (rec, assignedBlock, assignedDistrict) => {
+//   if (!rec) return 'A';
+
+//   // ── Leave records ──────────────────────────────────────────────────────────
+//   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
+//   if (isLeave) {
+//     const ls = rec.leave_status || rec.status || 'Pending';
+//     if (ls === 'Pending')  return '';   // leave pending → blank (don't penalise)
+  
+// if (ls === 'Approved') {
+//   const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
+//   const hasCheckin = rec.checkin_time || rec.checkinTime;
+//   if (!(isHalfDay && hasCheckin)) return 'L';
+//   // Half Day + has check-in → fall through to P / OD logic below
+// }
+//     if (ls === 'Rejected') {
+//       // Employee re-checked in after rejection → treat as normal attendance
+//       const hasCheckin = rec.checkin_time || rec.checkinTime;
+//       if (!hasCheckin) return 'L'; // rejected + no re-check-in → L (LOP)
+//       // Has a real check-in after rejection → fall through to P/OD logic below
+//     }
+//   }
+
+//   // ── Regular attendance (or rejected leave with actual re-check-in) ─────────
+//   if (rec.status === 'Rejected') return 'A';
+
+//   const addr = rec.location_address || rec.locationAddress || '';
+
+//   // No assignment → always P (can't determine otherwise)
+//   if (!assignedBlock && !assignedDistrict) return 'P';
+
+//   const matchesAssigned =
+//     (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
+//     (assignedDistrict && matchesLocation(addr, assignedDistrict));
+
+//   if (matchesAssigned)  return 'P';   // at assigned workplace
+//   if (isInTripura(addr)) return 'OD'; // elsewhere in Tripura
+//   return ''; // outside all known Tripura locations
+// };
+
+// ── reports.js  ·  toCode() ───────────────────────────────────────────────
 const toCode = (rec, assignedBlock, assignedDistrict) => {
   if (!rec) return 'A';
 
@@ -112,31 +153,41 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
-    if (ls === 'Pending')  return '';   // leave pending → blank (don't penalise)
-    if (ls === 'Approved') return 'L';  // approved leave → L
-    if (ls === 'Rejected') {
-      // Employee re-checked in after rejection → treat as normal attendance
+    if (ls === 'Pending') return '';
+    if (ls === 'Approved') {
+      const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
       const hasCheckin = rec.checkin_time || rec.checkinTime;
-      if (!hasCheckin) return 'L'; // rejected + no re-check-in → L (LOP)
-      // Has a real check-in after rejection → fall through to P/OD logic below
+      if (!(isHalfDay && hasCheckin)) return 'L';
+      // Half Day + has check-in → fall through to attendance logic below
+    }
+    if (ls === 'Rejected') {
+      const hasCheckin = rec.checkin_time || rec.checkinTime;
+      if (!hasCheckin) return 'L';
+      // Has a real check-in after rejection → fall through
     }
   }
 
-  // ── Regular attendance (or rejected leave with actual re-check-in) ─────────
+  // ── Regular attendance ─────────────────────────────────────────────────────
   if (rec.status === 'Rejected') return 'A';
 
+  // ✅ NEW: duty_type drives P vs OD — location is only a fallback
+  const dutyType = (rec.duty_type || '').trim();
+
+  if (dutyType === 'On Duty') return 'OD';   // employee chose "On Duty (Field)"
+
+  // dutyType === 'Office Duty' (or blank/unknown) → location-based check
   const addr = rec.location_address || rec.locationAddress || '';
 
-  // No assignment → always P (can't determine otherwise)
+  // No assignment → always P
   if (!assignedBlock && !assignedDistrict) return 'P';
 
   const matchesAssigned =
     (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
     (assignedDistrict && matchesLocation(addr, assignedDistrict));
 
-  if (matchesAssigned)  return 'P';   // at assigned workplace
-  if (isInTripura(addr)) return 'OD'; // elsewhere in Tripura
-  return ''; // outside all known Tripura locations
+  if (matchesAssigned)   return 'P';    // at assigned workplace
+  if (isInTripura(addr)) return 'OD';   // elsewhere in Tripura (location fallback)
+  return '';                            // outside all known locations
 };
 
 // ══════════════════════════════════════════════════════════════════════════════

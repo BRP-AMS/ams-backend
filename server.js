@@ -1,6 +1,5 @@
 const dns = require('node:dns');
 dns.setServers(['8.8.8.8', '1.1.1.1']);
-// require('dns').setDefaultResultOrder('ipv4first');
 require('dotenv').config();
 
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
@@ -21,9 +20,8 @@ const mongoSanitize = require('express-mongo-sanitize');
 const cron          = require('node-cron');
 
 const app  = express();
-const PORT = process.env.PORT ;
+const PORT = process.env.PORT;
 
-// Render (and most hosts) use a reverse proxy — trust it for rate-limiting & IP detection
 app.set('trust proxy', 1);
 
 // ── Security & Middleware ─────────────────────────────────────────────────
@@ -49,13 +47,14 @@ app.use(helmet({
   hidePoweredBy: true,
   frameguard: { action: 'deny' },
 }));
+
 const ALLOWED_ORIGINS = [
   process.env.FRONTEND_URL || 'http://localhost:3000',
-  process.env.BACKEND_URL  || 'https://ams-backend-1-yvgm.onrender.com', // self-hosted pages (reset password)
-  'http://localhost:3000',   // local dev
-  'http://localhost:3001',   // local dev fallback
-  'capacitor://localhost',   // Android Capacitor app
-  'http://localhost',        // Android WebView fallback
+  process.env.BACKEND_URL  || 'https://ams-backend-1-yvgm.onrender.com',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'capacitor://localhost',
+  'http://localhost',
   'https://localhost',
 ];
 app.use(cors({
@@ -78,13 +77,8 @@ app.use((req, res, next) => {
 app.use(morgan('dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-// Sanitize req.body against NoSQL injection ($, .)
-// Note: In Express 5, req.query and req.params are read-only (getter/Proxy).
-// Reassigning them breaks internal route matching. URL path params and query
-// strings don't need NoSQL sanitization — only user-supplied JSON bodies do.
 app.use((req, res, next) => {
   if (req.body) req.body = mongoSanitize.sanitize(req.body, { replaceWith: '_' });
-  // Sanitize query params: strip any keys containing $ or . to prevent NoSQL injection
   if (req.query && typeof req.query === 'object') {
     for (const key of Object.keys(req.query)) {
       if (typeof req.query[key] === 'string') {
@@ -95,71 +89,161 @@ app.use((req, res, next) => {
   next();
 });
 
-// Global rate limit (prevents DDoS / scraping)
 const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
 
-// ── Auto-checkout cron (23:58 every day) ─────────────────────────────────
-// Finds all Draft records (checked-in but not checked-out) for today and
-// auto-checks them out with a remark, then notifies each employee's manager.
+// ── Models ────────────────────────────────────────────────────────────────
 const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
 const { v4: uuidv4 } = require('uuid');
 
-cron.schedule('58 23 * * *', async () => {   // 18:28 UTC = 23:58 IST
-  console.log('[AutoCheckout] Nightly cron triggered');
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 1 — Midnight IST (00:05): Mark unchecked-out records as missed-checkout
+//
+// Finds any Draft attendance record from YESTERDAY or earlier that has a
+// check-in but NO check-out, and converts it to:
+//   status           = 'Pending'
+//   is_missed_checkout = true
+//
+// This places it in the manager's queue so they can approve/reject it.
+// The employee is BLOCKED from checking in again until the manager acts.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('5 0 * * *', async () => {
+  console.log('[MissedCheckout Cron] Running at midnight IST...');
   try {
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+    // Find all Draft records from BEFORE today that have check-in but no check-out
     const unchecked = await AttendanceRecord.find({
-      date: { $lte: today },
-      status: 'Draft',
-     checkin_time:  { $ne: null }, 
+      date:          { $lt: todayIST },   // strictly before today
+      status:        'Draft',
+      checkin_time:  { $ne: null },
       checkout_time: null,
     }).lean();
- 
-    console.log(`[AutoCheckout] ${unchecked.length} unchecked for ${today}`);
- 
+
+    console.log(`[MissedCheckout Cron] Found ${unchecked.length} unchecked-out record(s) to process.`);
+
     for (const record of unchecked) {
-      const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-      const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
-      const workedHrs  = Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100;
- 
+      // Mark as missed-checkout and move to Pending for manager review
       await AttendanceRecord.findByIdAndUpdate(record._id, {
         $set: {
-          checkout_time:    '23:58',
-          status:           'Approved',    // ← KEY: was causing Draft to stay
-          submitted_at:     new Date(),
-          is_auto_checkout: true,
-          checkout_remarks: 'Auto checkout — employee did not check out',
-          worked_hours:     workedHrs > 0 ? workedHrs : null,
-          leave_type:       workedHrs < 4 ? 'Half Day' : null,
-          leave_status:     workedHrs < 4 ? 'Pending'  : null,
+          status:             'Pending',
+          is_missed_checkout: true,
+          checkout_remarks:   'Employee did not check out. Requires manager approval.',
+          submitted_at:       new Date(),
         },
       });
- 
+
+      // Notify the employee
+      await Notification.create({
+        _id:               uuidv4(),
+        user_id:           record.emp_id,
+        title:             '⚠️ Missed Check-Out',
+        message:           `You forgot to check out on ${record.date}. Your attendance has been sent to your manager for review. You cannot check in until they approve or reject it.`,
+        type:              'warning',
+        related_record_id: record._id,
+        link:              '/employee/history',
+      });
+
+      // Notify the manager
       if (record.manager_id) {
         const emp = await User.findById(record.emp_id).select('name').lean();
         await Notification.create({
           _id:               uuidv4(),
           user_id:           record.manager_id,
-          title:             '⚠️ Auto Checkout',
-          message:           `${emp?.name || 'Employee'} was auto-checked out at 23:58 on ${record.date}. Please review.`,
+          title:             '🔔 Missed Check-Out — Action Required',
+          message:           `${emp?.name || 'An employee'} did not check out on ${record.date} (checked in at ${record.checkin_time}). Please review and approve or reject.`,
           type:              'warning',
           related_record_id: record._id,
+          link:              '/manager/queue',
+        });
+      }
+
+      await require('./src/models/database').AuditLog?.create?.({
+        _id:         uuidv4(),
+        user_id:     record.emp_id,
+        action:      'MISSED_CHECKOUT_AUTO_FLAGGED',
+        entity_type: 'attendance',
+        entity_id:   record._id,
+      }).catch(() => {}); // non-fatal
+    }
+
+    console.log(`[MissedCheckout Cron] Done — ${unchecked.length} record(s) flagged.`);
+  } catch (err) {
+    console.error('[MissedCheckout Cron] Error:', err.message);
+  }
+}, {
+  timezone: 'Asia/Kolkata',
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 2 — Hourly reminder (18:00–23:00 IST): Remind employees to check out
+//
+// Sends a notification reminder only — does NOT flag or block anyone.
+// The midnight cron above handles the actual flagging.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('0 18-23 * * *', async () => {
+  console.log('[MissedCheckout Reminder] Cron triggered');
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+    const unchecked = await AttendanceRecord.find({
+      date:          todayIST,
+      status:        'Draft',
+      checkin_time:  { $ne: null },
+      checkout_time: null,
+    }).lean();
+
+    console.log(`[MissedCheckout Reminder] ${unchecked.length} employees still not checked out for ${todayIST}`);
+
+    for (const record of unchecked) {
+      const checkinDT    = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+      const nowIST       = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const hoursElapsed = (nowIST - checkinDT) / 3600000;
+
+      if (hoursElapsed < 6) continue;
+
+      // Throttle — don't spam more than once every 2 hours
+      const recentNotif = await Notification.findOne({
+        user_id:    record.emp_id,
+        type:       'checkout_reminder',
+        created_at: { $gte: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+      }).lean();
+
+      if (recentNotif) continue;
+
+      await Notification.create({
+        _id:               uuidv4(),
+        user_id:           record.emp_id,
+        title:             '⏰ Please Check Out',
+        message:           `You checked in at ${record.checkin_time} and haven't checked out yet. Check out before midnight to avoid a missed-checkout flag.`,
+        type:              'checkout_reminder',
+        related_record_id: record._id,
+        link:              '/employee/attendance',
+      });
+
+      if (record.manager_id) {
+        const emp = await User.findById(record.emp_id).select('name').lean();
+        await Notification.create({
+          _id:               uuidv4(),
+          user_id:           record.manager_id,
+          title:             '⚠️ Employee Not Checked Out',
+          message:           `${emp?.name || 'An employee'} checked in at ${record.checkin_time} on ${record.date} but has not checked out yet (${Math.floor(hoursElapsed)}h elapsed).`,
+          type:              'warning',
+          related_record_id: record._id,
+          link:              '/manager/queue',
         });
       }
     }
-    console.log('[AutoCheckout] Done');
+
+    console.log('[MissedCheckout Reminder] Done');
   } catch (err) {
-    console.error('[AutoCheckout] Error:', err.message);
+    console.error('[MissedCheckout Reminder] Error:', err.message);
   }
 }, {
-  timezone: 'Asia/Kolkata'   // ← ADD THIS: tell node-cron to use IST
+  timezone: 'Asia/Kolkata',
 });
 
 // ── Revoked-token pruning ─────────────────────────────────────────────────
-// JWTs expire after 24 h, so any token revoked more than 24 h ago is safe to
-// delete — the original token would be rejected by jwt.verify() anyway.
-
 const pruneRevokedTokens = async () => {
   try {
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -169,68 +253,19 @@ const pruneRevokedTokens = async () => {
   }
 };
 
-// Run once at startup (after DB connection), then hourly
 connectionPromise.then(async () => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
   require('./src/utils/mailer');
- 
-  // ── NEW: Process any Draft records missed while server was down (Render sleep) ─
-  try {
-    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const missed = await AttendanceRecord.find({
-      date:          { $lt: todayIST },   // strictly before today
-      status:        'Draft',
-      checkin_time:  { $ne: null }, 
-      checkout_time: null,
-      duty_type:     { $ne: 'Leave' },
-    }).lean();
- 
-    if (missed.length > 0) {
-      console.log(`[Startup] Found ${missed.length} Draft records from previous days — auto-processing…`);
-      for (const record of missed) {
-        const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-        const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
-        const workedHrs  = Math.max(0, Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100);
- 
-        await AttendanceRecord.findByIdAndUpdate(record._id, {
-          $set: {
-            checkout_time:    '23:58',
-            status:           'Approved',
-            submitted_at:     new Date(),
-            is_auto_checkout: true,
-            checkout_remarks: 'Auto checkout — server was offline during scheduled run',
-            worked_hours:     workedHrs > 0 ? workedHrs : null,
-            leave_type:       workedHrs < 4 ? 'Half Day' : null,
-            leave_status:     workedHrs < 4 ? 'Pending'  : null,
-          },
-        });
- 
-        if (record.manager_id) {
-          const emp = await User.findById(record.emp_id).select('name').lean();
-          await Notification.create({
-            _id:               uuidv4(),
-            user_id:           record.manager_id,
-            title:             '⚠️ Missed Auto Checkout',
-            message:           `${emp?.name || 'Employee'} was auto-checked out (server recovery) on ${record.date}.`,
-            type:              'warning',
-            related_record_id: record._id,
-          });
-        }
-      }
-      console.log(`[Startup] Auto-processed ${missed.length} missed Draft records`);
-    }
-  } catch (err) {
-    console.error('[Startup] Missed checkout recovery error:', err.message);
-  }
 });
+
 // ── Routes ────────────────────────────────────────────────────────────────
 const attendanceRouter = require('./src/routes/attendance');
 app.use('/api/auth',              require('./src/routes/auth'));
 app.use('/api/attendance',        attendanceRouter);
-app.use('/api/users',        require('./src/routes/users'));
-app.use('/api/reports',      require('./src/routes/reports'));
-app.use('/api/notifications',require('./src/routes/notifications'));
+app.use('/api/users',             require('./src/routes/users'));
+app.use('/api/reports',           require('./src/routes/reports'));
+app.use('/api/notifications',     require('./src/routes/notifications'));
 app.use('/api/activity',          require('./src/routes/activity'));
 app.use('/api/activity-schedule', require('./src/routes/activity-schedule'));
 
@@ -239,79 +274,12 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0' });
 });
 
-// ── Temporary seed endpoint (remove after use) ───────────────────────────
-// app.post('/api/admin/seed', async (req, res) => {
-//   try {
-//     const bcrypt = require('bcryptjs');
-//     const { User } = require('./src/models/database');
-//     const { sendMail } = require('./src/utils/mailer');
-//     const hash = (pw) => bcrypt.hashSync(pw, 10);
-//     const norm = (e) => e.trim().toLowerCase();
-
-//     const pw = 'Pass@123';
-
-//     const users = [
-//       { emp_id: 'SADM001', name: 'Ajaya Narasimha Reddy', email: norm('ajaynarasimhareddy.5252@gmail.com'), role: 'super_admin', department: 'Administration', manager_id: null, phone: '9000000001' },
-//       { emp_id: 'ADM001',  name: 'Ajay Admin',            email: norm('ajay.rges@gmail.com'),               role: 'admin',       department: 'Administration', manager_id: null, phone: '9000000002' },
-    
-//     ];
-
-//     // Delete old dummy seed users
-//     const dummyEmpIds = ['HR001', 'MGR001', 'MGR002', 'EMP001', 'EMP002', 'EMP003', 'EMP004'];
-//     const deleted = await User.deleteMany({ emp_id: { $in: dummyEmpIds } });
-
-//     const results = [];
-//     for (const u of users) {
-//       const existing = await User.findOne({ $or: [{ emp_id: u.emp_id }, { email: u.email }] });
-//       if (existing) {
-//         await User.findByIdAndUpdate(existing._id, { $set: { ...u, is_active: 1, email_verified: true, password_hash: hash(pw) } });
-//         results.push({ emp_id: u.emp_id, email: u.email, action: 'updated+pwd_reset', _id: existing._id });
-//       } else {
-//         const newId = uuidv4();
-//         await User.create({ _id: newId, ...u, password_hash: hash(pw), is_active: 1, email_verified: true });
-//         results.push({ emp_id: u.emp_id, email: u.email, action: 'created', _id: newId });
-
-//         // Send welcome email to newly created users
-//         try {
-//           const roleLabel = { employee:'Employee', manager:'Manager', admin:'Admin', hr:'HR', super_admin:'Super Admin' }[u.role] || u.role;
-//           await sendMail(u.email, '[BRP AMS] Your Account Has Been Created',
-//             '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:12px;">' +
-//             '<h2 style="color:#21879d;margin-bottom:16px;">Welcome to BRP-AMS</h2>' +
-//             '<p>Hello <strong>' + u.name + '</strong>,</p>' +
-//             '<p>Your account has been created in the BRP Attendance Management System.</p>' +
-//             '<table style="margin:16px 0;border-collapse:collapse;">' +
-//             '<tr><td style="padding:6px 12px;color:#64748b;">Role:</td><td style="padding:6px 12px;font-weight:700;">' + roleLabel + '</td></tr>' +
-//             '<tr><td style="padding:6px 12px;color:#64748b;">Emp ID:</td><td style="padding:6px 12px;font-weight:700;">' + u.emp_id + '</td></tr>' +
-//             '<tr><td style="padding:6px 12px;color:#64748b;">Email:</td><td style="padding:6px 12px;font-weight:700;">' + u.email + '</td></tr>' +
-//             '<tr><td style="padding:6px 12px;color:#64748b;">Password:</td><td style="padding:6px 12px;font-weight:700;">' + pw + '</td></tr>' +
-//             '</table>' +
-//             '<p>Login at: <a href="https://ams-frontend-web-niuz.onrender.com">BRP-AMS Portal</a></p>' +
-//             '<p style="color:#dc2626;font-size:13px;">Please change your password after first login.</p>' +
-//             '</div>',
-//             { type: 'VERIFY_EMAIL', password: pw }
-//           );
-//           results[results.length - 1].email_sent = true;
-//         } catch (emailErr) {
-//           results[results.length - 1].email_sent = false;
-//           results[results.length - 1].email_error = emailErr.message;
-//         }
-//       }
-//     }
-
-//     res.json({ success: true, message: 'Seed complete', deleted_dummy: deleted.deletedCount, data: results, password: pw });
-//   } catch (err) {
-//     console.error('Seed error:', err);
-//     res.status(500).json({ success: false, message: err.message });
-//   }
-// });
-
-// ── Temporary email debug endpoint (remove after testing) ─────────────────
+// ── Temporary email debug endpoint ────────────────────────────────────────
 app.post('/api/admin/test-email', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, message: 'email required' });
   const results = {};
 
-  // Test 1: Firebase password reset
   try {
     const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
     if (FIREBASE_API_KEY) {
@@ -329,7 +297,6 @@ app.post('/api/admin/test-email', async (req, res) => {
     results.firebase = { error: err.message };
   }
 
-  // Test 2: SMTP
   try {
     const { sendMail, mode } = require('./src/utils/mailer');
     results.mailer_mode = mode;
@@ -356,7 +323,6 @@ app.listen(PORT, () => {
   console.log(`\n🚀 BRP Attendance API running on http://localhost:${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`\nRun 'npm run seed' to populate demo data\n`);
-
 });
 
 module.exports = app;

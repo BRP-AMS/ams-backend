@@ -1,164 +1,160 @@
-const express      = require('express');
-const router       = express.Router();
-const multer       = require('multer');
+const express        = require('express');
+const router         = express.Router();
+const multer         = require('multer');
 const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
-const { body, query, validationResult } = require('express-validator');
+const { body, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
-const { authenticate, authorize } = require('../middleware/auth');
-const { sendMail } = require('../utils/mailer');
-
-// ── IST time helpers ─────────────────────────────────────────────────────
-const istDateStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-const istTimeStr = () => new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
-const istMonthStr = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).substring(0, 7); // "2026-04"
-const istMonthLabel = () => new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' }); // "April 2026"
-
+const { authenticate, authorize }                         = require('../middleware/auth');
+const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
+
+// ── IST helpers ───────────────────────────────────────────────────────────
+const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' });
+const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
+const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
+const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
+
+// ── Multer — selfie images ────────────────────────────────────────────────
 const upload = multer({
-  storage:    multer.memoryStorage(),
-  limits:     { fileSize: 5 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!file.mimetype.startsWith('image/')) return cb(new Error('Only images allowed'));
     const ext = path.extname(file.originalname).toLowerCase();
-    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
-    if (!allowedExts.includes(ext)) return cb(new Error('Invalid file extension'));
-    const extToMime = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
-    if (extToMime[ext] && extToMime[ext] !== file.mimetype) return cb(new Error('File extension does not match file type'));
+    const ok  = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
+    if (!ok.includes(ext)) return cb(new Error('Invalid file extension'));
+    const map = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
+    if (map[ext] && map[ext] !== file.mimetype) return cb(new Error('File extension does not match file type'));
     cb(null, true);
-  }
+  },
 });
 
+// ── Multer — scan documents ───────────────────────────────────────────────
 const uploadScan = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits:  { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg','image/png','image/webp','image/bmp','application/pdf'];
-    if (!allowed.includes(file.mimetype)) {
-      return cb(new Error('Only JPG, PNG, WEBP or PDF scans are accepted'));
-    }
+    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/bmp', 'application/pdf'];
+    if (!ok.includes(file.mimetype)) return cb(new Error('Only JPG, PNG, WEBP or PDF accepted'));
     cb(null, true);
-  }
+  },
 });
 
-// ── Helper: Notify user ──────────────────────────────────────────────────
-const notify = async (userId, title, message, type = 'info', recordId = null, link = null) => {
-  await Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
-};
+const uploadSignedReport = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!ok.includes(file.mimetype)) return cb(new Error('Only JPG, PNG, WEBP or PDF accepted'));
+    cb(null, true);
+  },
+});
 
-// ── Helper: Process missed auto-checkouts ────────────────────────────────
-const processMissedAutoCheckouts = async () => {
-  try {
-    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+// ── Notification helper ───────────────────────────────────────────────────
+const notify = async (userId, title, message, type = 'info', recordId = null, link = null) =>
+  Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
 
-    const missed = await AttendanceRecord.find({
-      date:          { $lt: todayIST },
-      status:        'Draft',
-       checkin_time:  { $ne: null }, 
-      checkout_time: null,
-      duty_type:     { $ne: 'Leave' },
-    }).lean();
-
-    if (!missed.length) return 0;
-
-    for (const record of missed) {
-      const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-      const checkoutDT = new Date(`${record.date}T23:58:00+05:30`);
-      const workedHrs  = Math.max(0, Math.round(((checkoutDT - checkinDT) / 3600000) * 100) / 100);
-
-      await AttendanceRecord.findByIdAndUpdate(record._id, {
-        $set: {
-          checkout_time:    '23:58',
-          status:           'Approved',
-          submitted_at:     new Date(),
-          is_auto_checkout: true,
-          checkout_remarks: 'Auto checkout — employee did not check out',
-          worked_hours:     workedHrs > 0 ? workedHrs : null,
-          leave_type:       workedHrs < 4 ? 'Half Day' : null,
-          leave_status:     workedHrs < 4 ? 'Pending'  : null,
-        },
-      });
-
-      if (record.manager_id) {
-        const emp = await User.findById(record.emp_id).select('name').lean();
-        await notify(
-          record.manager_id,
-          '⚠️ Missed Auto Checkout',
-          `${emp?.name || 'Employee'} forgot to check out on ${record.date}. Auto-processed.`,
-          'warning', record._id, '/manager/queue'
-        );
-      }
-
-      await AuditLog.create({
-        _id: uuidv4(), user_id: record.emp_id,
-        action: 'AUTO_CHECKOUT_MISSED', entity_type: 'attendance', entity_id: record._id,
-        new_value: 'Approved',
-      });
-    }
-
-    console.log(`[MissedAutoCheckout] Processed ${missed.length} records`);
-    return missed.length;
-  } catch (err) {
-    console.error('[MissedAutoCheckout] Error:', err.message);
-    return 0;
-  }
-};
-
-// ── Helper: build aggregation pipeline ──────────────────────────────────
-const recordListPipeline = (matchFilter, sortStage, skip, limit) => [
-  { $match: matchFilter },
-  { $lookup: { from: 'users', localField: 'emp_id',      foreignField: '_id', as: 'emp'            } },
-  { $lookup: { from: 'users', localField: 'manager_id',  foreignField: '_id', as: 'manager'        } },
+// ── Aggregation pipeline helper ───────────────────────────────────────────
+const recordListPipeline = (match, sort, skip, limit) => [
+  { $match: match },
+  { $lookup: { from: 'users', localField: 'emp_id',      foreignField: '_id', as: 'emp'             } },
+  { $lookup: { from: 'users', localField: 'manager_id',  foreignField: '_id', as: 'manager'         } },
   { $lookup: { from: 'users', localField: 'actioned_by', foreignField: '_id', as: 'actioned_by_user' } },
   { $addFields: {
-    emp_name:        { $arrayElemAt: ['$emp.name',               0] },
-    emp_code:        { $arrayElemAt: ['$emp.emp_id',             0] },
-    department:      { $arrayElemAt: ['$emp.department',         0] },
-    manager_name:    { $arrayElemAt: ['$manager.name',           0] },
-    actioned_by_name:{ $arrayElemAt: ['$actioned_by_user.name',  0] },
+    emp_name:         { $arrayElemAt: ['$emp.name',              0] },
+    emp_code:         { $arrayElemAt: ['$emp.emp_id',            0] },
+    department:       { $arrayElemAt: ['$emp.department',        0] },
+    manager_name:     { $arrayElemAt: ['$manager.name',          0] },
+    actioned_by_name: { $arrayElemAt: ['$actioned_by_user.name', 0] },
   }},
   { $project: { emp: 0, manager: 0, actioned_by_user: 0 } },
-  { $sort: sortStage },
+  { $sort: sort },
   { $skip: skip },
   { $limit: limit },
 ];
 
-// ── GET /api/attendance ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
     const { status, startDate, endDate, empId, onlyLeaves } = req.query;
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const offset = (page - 1) * limit;
-
-    const matchFilter = {};
-
-    if (req.user.role === 'employee') {
-      matchFilter.emp_id = req.user.id;
-    } else if (req.user.role === 'manager') {
-      matchFilter.manager_id = req.user.id;
-      if (empId) matchFilter.emp_id = empId;
+    const match  = {};
+ 
+    if (req.user.role === 'employee')
+      match.emp_id = req.user.id;
+    else if (req.user.role === 'manager') {
+      match.manager_id = req.user.id;
+      if (empId) match.emp_id = empId;
     } else if (['admin', 'hr', 'super_admin'].includes(req.user.role)) {
-      if (empId) matchFilter.emp_id = empId;
+      if (empId) match.emp_id = empId;
     }
-
-    if (onlyLeaves === 'true') matchFilter.leave_type = { $ne: null };
+ 
+    if (onlyLeaves === 'true') match.leave_type = { $ne: null };
+ 
+    // ── Status filter ─────────────────────────────────────────────────────
     if (status) {
-      if (onlyLeaves === 'true') matchFilter.leave_status = status;
-      else matchFilter.status = status;
+      const isManagerOrAdmin = ['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role);
+ 
+      // When a manager/admin queries Pending, also surface Draft records from
+      // PREVIOUS days that have a check-in but NO check-out.  These are
+      // effectively missed-checkout records even if the midnight cron hasn't
+      // processed them yet (e.g. server was down, cron missed a run, etc.)
+      if (status === 'Pending' && isManagerOrAdmin) {
+        const todayIST = istDateStr();
+        match.$or = [
+          { status: 'Pending' },
+          {
+            status:        'Draft',
+            date:          { $lt: todayIST },   // strictly before today
+            checkin_time:  { $ne: null },
+            checkout_time: null,
+          },
+        ];
+      } else if (onlyLeaves === 'true') {
+        match.leave_status = status;
+      } else {
+        match.status = status;
+      }
     }
-    if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
-    if (endDate)   matchFilter.date = { ...matchFilter.date, $lte: endDate };
-
-    const total   = await AttendanceRecord.countDocuments(matchFilter);
+ 
+    if (startDate) match.date = { ...match.date, $gte: startDate };
+    if (endDate)   match.date = { ...match.date, $lte: endDate };
+ 
+    const total   = await AttendanceRecord.countDocuments(match);
     const records = await AttendanceRecord.aggregate(
-      recordListPipeline(matchFilter, { date: -1, created_at: -1 }, offset, limit)
+      recordListPipeline(match, { date: -1, created_at: -1 }, offset, limit)
     );
-
+ 
+    // ── Post-process: tag stale Draft records as missed-checkout ─────────
+    // If the midnight cron hasn't run yet, the record is still Draft.
+    // Presenting it as Pending (with isMissedCheckout = true) ensures the
+    // manager can act on it immediately without waiting for the cron.
+    const todayIST = istDateStr();
+    const formatted = records.map(r => {
+      const rec = formatRecord(r);
+      if (
+        r.status === 'Draft' &&
+        r.date   <  todayIST &&
+        r.checkin_time  &&
+        !r.checkout_time
+      ) {
+        rec.isMissedCheckout = true;
+        rec.status           = 'Pending';   // show as Pending to manager
+        rec.checkoutRemarks  =
+          rec.checkoutRemarks || 'Employee did not check out. Requires manager approval.';
+      }
+      return rec;
+    });
+ 
     res.json({
       success: true,
-      data:    records.map(formatRecord),
-      pagination: { total, page, limit, pages: Math.ceil(total / limit) }
+      data: formatted,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error(err);
@@ -166,147 +162,40 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// ── GET /api/attendance/today ────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance/today
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/today', authenticate, async (req, res) => {
   try {
     const today = istDateStr();
-    const rows  = await AttendanceRecord.aggregate([
+
+    const rows = await AttendanceRecord.aggregate([
       { $match: { emp_id: req.user.id, date: today } },
       { $lookup: { from: 'users', localField: 'emp_id', foreignField: '_id', as: 'emp' } },
-      { $addFields: {
-          emp_name: { $arrayElemAt: ['$emp.name',   0] },
-          emp_code: { $arrayElemAt: ['$emp.emp_id', 0] },
-      }},
+      { $addFields: { emp_name: { $arrayElemAt: ['$emp.name', 0] }, emp_code: { $arrayElemAt: ['$emp.emp_id', 0] } } },
       { $project: { emp: 0 } },
     ]);
-    res.json({ success: true, data: rows.length ? formatRecord(rows[0]) : null });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+
+    // Block check: previous-day missed-checkout still Pending manager action
+    const missedCheckoutBlock = await AttendanceRecord.findOne({
+      emp_id:              req.user.id,
+      date:                { $lt: today },
+      is_missed_checkout:  true,
+      status:              'Pending',
+      checkout_time:       null,
+    }).sort({ date: -1 }).lean();
+
+    res.json({
+      success:                  true,
+      data:                     rows.length ? formatRecord(rows[0]) : null,
+      blockedByMissedCheckout:  missedCheckoutBlock ? formatRecord(missedCheckoutBlock) : null,
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── POST /api/attendance/process-missed-checkouts ────────────────────────
-router.post('/process-missed-checkouts', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
-  try {
-    const count = await processMissedAutoCheckouts();
-    res.json({ success: true, message: `Processed ${count} missed checkout(s)` });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ── POST /api/attendance/upload-scan ─────────────────────────────────────
-// Max 2 files per calendar month. Appends — never overwrites.
-router.post(
-  '/upload-scan',
-  authenticate,
-  authorize('employee'),
-  uploadScan.single('scan'),
-  async (req, res) => {
-    try {
-      if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
-
-      const month      = istMonthStr();   // "2026-04"
-      const monthLabel = istMonthLabel(); // "April 2026"
-
-      // ── Check how many files already uploaded this month ─────────────
-      const currentUser = await User.findById(req.user.id).select('scan_papers').lean();
-      const existingForMonth = (currentUser?.scan_papers || []).filter(s => s.month === month);
-
-      if (existingForMonth.length >= 2) {
-        return res.status(400).json({
-          success: false,
-          message: `Maximum 2 files already uploaded for ${monthLabel}. Delete one to re-upload.`,
-        });
-      }
-
-      const fileIndex = existingForMonth.length; // 0 for first, 1 for second
-
-      // ── Upload to Cloudinary ─────────────────────────────────────────
-      const scanPath = await uploadFile(
-        req.file.buffer, 'ams/scans',
-        req.file.originalname, req.file.mimetype
-      );
-
-      // ── Append new entry (never pull/overwrite) ───────────────────────
-      await User.findByIdAndUpdate(
-        req.user.id,
-        {
-          $push: {
-            scan_papers: {
-              path:        scanPath,
-              month,
-              month_label: monthLabel,
-              file_name:   req.file.originalname,
-              file_index:  fileIndex,
-              uploaded_at: new Date(),
-            }
-          }
-        },
-        { strict: false }
-      );
-
-      res.json({
-        success:    true,
-        scanPath,
-        month,
-        monthLabel,
-        fileIndex,
-        totalForMonth: fileIndex + 1,
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ success: false, message: 'Server error' });
-    }
-  }
-);
-
-// ── DELETE /api/attendance/clear-scan ────────────────────────────────────
-// ?month=2026-04&fileIndex=0  → remove specific file
-// ?month=2026-04              → remove all files for that month
-// (no params)                 → clear all scans
-router.delete('/clear-scan', authenticate, authorize('employee'), async (req, res) => {
-  try {
-    const { month, fileIndex } = req.query;
-
-    if (month && fileIndex !== undefined) {
-      // ── Remove one specific file by month + fileIndex ─────────────────
-      const fi = parseInt(fileIndex, 10);
-      const currentUser = await User.findById(req.user.id).select('scan_papers').lean();
-      const remaining = (currentUser?.scan_papers || []).filter(
-        s => !(s.month === month && s.file_index === fi)
-      );
-      await User.findByIdAndUpdate(
-        req.user.id,
-        { $set: { scan_papers: remaining } },
-        { strict: false }
-      );
-    } else if (month) {
-      // ── Remove all files for that month ──────────────────────────────
-      await User.findByIdAndUpdate(
-        req.user.id,
-        { $pull: { scan_papers: { month } } },
-        { strict: false }
-      );
-    } else {
-      // ── Clear all scans ───────────────────────────────────────────────
-      await User.findByIdAndUpdate(
-        req.user.id,
-        { $set: { scan_papers: [] } },
-        { strict: false }
-      );
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ── GET /api/attendance/:id ──────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance/:id
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:id', authenticate, async (req, res) => {
   try {
     const rows = await AttendanceRecord.aggregate([
@@ -315,33 +204,27 @@ router.get('/:id', authenticate, async (req, res) => {
       { $lookup: { from: 'users', localField: 'manager_id',  foreignField: '_id', as: 'manager'         } },
       { $lookup: { from: 'users', localField: 'actioned_by', foreignField: '_id', as: 'actioned_by_user'} },
       { $addFields: {
-          emp_name:         { $arrayElemAt: ['$emp.name',              0] },
-          emp_code:         { $arrayElemAt: ['$emp.emp_id',            0] },
-          department:       { $arrayElemAt: ['$emp.department',        0] },
-          emp_phone:        { $arrayElemAt: ['$emp.phone',             0] },
-          manager_name:     { $arrayElemAt: ['$manager.name',          0] },
-          manager_email:    { $arrayElemAt: ['$manager.email',         0] },
-          actioned_by_name: { $arrayElemAt: ['$actioned_by_user.name', 0] },
+        emp_name:         { $arrayElemAt: ['$emp.name',              0] },
+        emp_code:         { $arrayElemAt: ['$emp.emp_id',            0] },
+        department:       { $arrayElemAt: ['$emp.department',        0] },
+        emp_phone:        { $arrayElemAt: ['$emp.phone',             0] },
+        manager_name:     { $arrayElemAt: ['$manager.name',          0] },
+        manager_email:    { $arrayElemAt: ['$manager.email',         0] },
+        actioned_by_name: { $arrayElemAt: ['$actioned_by_user.name', 0] },
       }},
       { $project: { emp: 0, manager: 0, actioned_by_user: 0 } },
     ]);
-
     if (!rows.length) return res.status(404).json({ success: false, message: 'Record not found' });
     const record = rows[0];
-
-    if (req.user.role === 'employee' && record.emp_id !== req.user.id)
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    if (req.user.role === 'manager' && record.manager_id !== req.user.id)
-      return res.status(403).json({ success: false, message: 'Access denied' });
-
+    if (req.user.role === 'employee' && record.emp_id !== req.user.id) return res.status(403).json({ success: false, message: 'Access denied' });
+    if (req.user.role === 'manager'  && record.manager_id !== req.user.id) return res.status(403).json({ success: false, message: 'Access denied' });
     res.json({ success: true, data: formatRecord(record) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── POST /api/attendance/checkin ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/attendance/checkin
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/checkin', authenticate, authorize('employee'), upload.single('selfie'), [
   body('dutyType').isIn(['Office Duty', 'On Duty']),
   body('latitude').isFloat(),
@@ -351,14 +234,33 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
-    const today    = istDateStr();
+    const today = istDateStr();
+
+    // Block if a previous missed-checkout is still Pending
+    const missedBlock = await AttendanceRecord.findOne({
+      emp_id:             req.user.id,
+      date:               { $lt: today },
+      is_missed_checkout: true,
+      status:             'Pending',
+      checkout_time:      null,
+    }).lean();
+
+    if (missedBlock) {
+      return res.status(403).json({
+        success: false,
+        message: `You did not check out on ${missedBlock.date}. Your attendance has been sent to your manager. You can check in again once your manager approves or rejects it.`,
+        blockedByMissedCheckout: formatRecord(missedBlock),
+      });
+    }
+
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
     let existingRejectedLeaveId = null;
 
     if (existing) {
       const isRejectedLeave =
         (existing.duty_type === 'Leave' || (existing.leave_type && existing.leave_type.trim())) &&
-        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+        (existing.leave_status === 'Rejected' || existing.status === 'Rejected') &&
+        !existing.checkin_time;
 
       if (!isRejectedLeave) {
         return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
@@ -374,47 +276,29 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const currentUser = await User.findById(req.user.id).select('manager_id').lean();
     const managerId   = currentUser?.manager_id || null;
 
-    let id = uuidv4();
-
     const timeRe = /^\d{2}:\d{2}$/;
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    const checkinTime = (capturedAt && timeRe.test(capturedAt)) ? capturedAt : istTimeStr();
+    const checkinTime = (capturedAt && timeRe.test(capturedAt))     ? capturedAt   : istTimeStr();
     const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
 
     const selfiePath = req.file
       ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
       : null;
 
+    let id = uuidv4();
     const checkinFields = {
-      emp_id:           req.user.id,
-      date:             checkinDate,
-      duty_type:        dutyType,
-      sector:           sector || null,
-      description:      description || '',
-      status:           'Draft',
-      selfie_path:      selfiePath,
-      latitude:         parseFloat(latitude),
-      longitude:        parseFloat(longitude),
-      location_address: locationAddress || '',
-      checkin_time:     checkinTime,
-      checkin_lat:      parseFloat(latitude),
-      checkin_lng:      parseFloat(longitude),
-      manager_id:       managerId,
-      leave_type:       null,
-      leave_reason:     null,
-      leave_status:     null,
-      end_date:         null,
-      checkout_time:    null,
-      worked_hours:     null,
-      submitted_at:     null,
-      actioned_by:      null,
-      actioned_at:      null,
-      manager_remark:   null,
-      hr_override:      false,
-      hr_remark:        null,
-      override_remark:  null,
-      overridden_by:    null,
-      hr_actioned_at:   null,
+      emp_id: req.user.id, date: checkinDate, duty_type: dutyType, sector: sector || null,
+      description: description || '', status: 'Draft', selfie_path: selfiePath,
+      latitude: parseFloat(latitude), longitude: parseFloat(longitude),
+      location_address: locationAddress || '', checkin_time: checkinTime,
+      checkin_lat: parseFloat(latitude), checkin_lng: parseFloat(longitude),
+      manager_id: managerId,
+      leave_type: null, leave_reason: null, leave_status: null, end_date: null,
+      checkout_time: null, worked_hours: null, submitted_at: null,
+      actioned_by: null, actioned_at: null, manager_remark: null,
+      hr_override: false, hr_remark: null, override_remark: null,
+      overridden_by: null, hr_actioned_at: null,
+      is_missed_checkout: false, checkout_remarks: null,
     };
 
     if (existingRejectedLeaveId) {
@@ -425,142 +309,71 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     }
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKIN', entity_type: 'attendance', entity_id: id });
-
     const record = await AttendanceRecord.findById(id).lean();
     res.status(201).json({ success: true, message: 'Check-in successful', data: formatRecord(record) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── POST /api/attendance/apply-leave ─────────────────────────────────────
-router.post('/apply-leave', authenticate, authorize('employee'), [
-  body('date').isDate().withMessage('Valid start date required'),
-  body('endDate').optional().isDate().withMessage('Valid end date required'),
-  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
-  body('reason').notEmpty().withMessage('Reason is required'),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-
-  try {
-    const { date, endDate, leaveType, reason } = req.body;
-    const finalEndDate = endDate || date;
-
-    if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
-
-    const todayISO = istDateStr();
-    const minDate  = new Date(todayISO); minDate.setDate(minDate.getDate() - 30);
-    const maxDate  = new Date(todayISO); maxDate.setDate(maxDate.getDate() + 10);
-    const startD   = new Date(date);
-    const endD     = new Date(finalEndDate);
-    if (startD < minDate) return res.status(400).json({ success: false, message: 'Leave cannot be applied more than 30 days in the past' });
-    if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 10 days in advance' });
-
-    const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
-    const managerId   = currentUser?.manager_id;
-
-    const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
-    if (existing) {
-      return res.status(409).json({ success: false, message: `A record already exists for ${date}. Please choose a different start date.` });
-    }
-
-    const isMultiDay = finalEndDate !== date;
-    const dayCount   = Math.round((endD - startD) / 86400000) + 1;
-    let id = uuidv4();
-    await AttendanceRecord.create({
-      _id: id, emp_id: req.user.id,
-      date,
-      end_date:     isMultiDay ? finalEndDate : null,
-      duty_type:    'Leave',
-      status:       'Pending',
-      manager_id:   managerId,
-      leave_type:   leaveType,
-      leave_reason: reason,
-      leave_status: 'Pending',
-      submitted_at: new Date(),
-    });
-    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
-
-    if (managerId) {
-      const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
-      await notify(managerId, `${leaveType} Request`,
-        `${currentUser.name} applied for ${leaveType} (${dayCount} day${dayCount !== 1 ? 's' : ''}) — ${dateRange}: ${reason}`,
-        'warning', id, '/manager/queue');
-      const manager = await User.findById(managerId).select('email name').lean();
-      if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong>
-           ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p>
-           <p><strong>Reason:</strong> ${reason}</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
-      }
-    }
-
-    const isTodayInRange = todayISO >= date && todayISO <= finalEndDate;
-    const record = await AttendanceRecord.findById(id).lean();
-
-    res.status(201).json({
-      success: true,
-      message: `${leaveType} application submitted for ${dayCount} day${dayCount !== 1 ? 's' : ''}`,
-      count: dayCount,
-      todayRecord: isTodayInRange ? formatRecord(record) : null,
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ── PUT /api/attendance/:id/checkout ─────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/checkout
+//
+// Hours logic:
+//   >= 7 hours  →  AUTO-APPROVED immediately (no manager review needed)
+//   >= 6 hours  →  Full day  → status = Pending (manager review)
+//   4–6 hours   →  Half Day  → leave_type = 'Half Day', status = Pending
+//   < 4 hours   →  Emergency → leave_type = 'Emergency Leave', status = Pending
+//
+// If not emergency mode, block checkout before 4 hours.
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('checkoutSelfie'), async (req, res) => {
   try {
-    const isEmergency = req.body.emergency === "true" || req.body.emergency === true;
+    const isEmergency = req.body.emergency === 'true' || req.body.emergency === true;
     const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
-    if (!record)              return res.status(404).json({ success: false, message: 'Record not found' });
-    if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
-    if (record.status !== 'Draft') return res.status(400).json({ success: false, message: 'Cannot checkout - record already submitted' });
+    if (!record)               return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.checkout_time)  return res.status(409).json({ success: false, message: 'Already checked out' });
+    if (record.status !== 'Draft') return res.status(400).json({ success: false, message: 'Cannot checkout — record already submitted' });
 
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
     const capturedAtBody  = req.body?.capturedAt;
-    const timeReCheck     = /^\d{2}:\d{2}$/;
-    const effectiveNow    = (capturedAtBody && timeReCheck.test(capturedAtBody))
+    const timeRe          = /^\d{2}:\d{2}$/;
+    const effectiveNow    = (capturedAtBody && timeRe.test(capturedAtBody))
       ? (() => { const d = new Date(`${record.date}T${capturedAtBody}:00+05:30`); return d <= now ? d : now; })()
       : now;
-    const hoursElapsed    = (effectiveNow - checkinDateTime) / (1000 * 60 * 60);
-    let leaveType = null;
 
-    if (isEmergency) {
-      if (hoursElapsed < 3) {
-        leaveType = "Emergency Leave";
-      } else if (hoursElapsed < 6) {
-        leaveType = 'Half Day';
-      }
+    const hoursElapsed = (effectiveNow - checkinDateTime) / 3600000;
+
+    // Enforce 4-hour minimum unless emergency
+    if (!isEmergency && hoursElapsed < 4) {
+      const remaining = 4 - hoursElapsed;
+      const h = Math.floor(remaining);
+      const m = Math.floor((remaining - h) * 60);
+      return res.status(400).json({
+        success: false,
+        message: `Check-out locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
+        hoursRemaining: remaining,
+      });
+    }
+
+    // ── Determine leave type and auto-approval ────────────────────────────
+    // >= 7 hours → auto-approved, no manager review
+    // >= 6 hours → full day, needs manager review
+    // >= 4 hours → half day leave attached, manager review
+    // <  4 hours → emergency leave, manager review
+    const AUTO_APPROVE_HOURS = 7;
+    const isAutoApproved = hoursElapsed >= AUTO_APPROVE_HOURS;
+
+    let leaveType = null;
+    if (hoursElapsed >= 6) {
+      leaveType = null;               // Full day — no leave (whether auto-approved or pending)
+    } else if (hoursElapsed >= 4) {
+      leaveType = 'Half Day';
     } else {
-      if (hoursElapsed < 4) {
-        const remaining = 4 - hoursElapsed;
-        const h = Math.floor(remaining);
-        const m = Math.floor((remaining - h) * 60);
-        return res.status(400).json({
-          success: false,
-          message: `Check-out is locked for ${h}h ${m}m more (minimum 4 hours after check-in).`,
-          hoursRemaining: remaining,
-        });
-      }
+      leaveType = 'Emergency Leave';
     }
 
     const { latitude, longitude, locationAddress, capturedAt } = req.body;
-    const checkoutSelfiePath = req.file
-      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
-      : null;
 
-    const timeRe = /^\d{2}:\d{2}$/;
     let checkoutTime = istTimeStr();
     let workedHours  = Math.round(hoursElapsed * 100) / 100;
     if (capturedAt && timeRe.test(capturedAt)) {
@@ -571,36 +384,145 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       }
     }
 
-    await AttendanceRecord.findByIdAndUpdate(record._id, {
-      $set: {
-        checkout_time:        checkoutTime,
-        checkout_lat:         parseFloat(latitude)  || record.latitude,
-        checkout_lng:         parseFloat(longitude) || record.longitude,
-        checkout_selfie_path: checkoutSelfiePath,
-        status:               'Pending',
-        submitted_at:         now,
-        worked_hours:         workedHours,
-        leave_type:           leaveType,
-        leave_status:         leaveType ? "Pending" : null
-      }
-    });
+    const checkoutSelfiePath = req.file
+      ? await uploadFile(req.file.buffer, 'ams/selfies', req.file.originalname, req.file.mimetype)
+      : null;
 
-    if (record.manager_id) {
-      const emp = await User.findById(req.user.id).select('name').lean();
-      await notify(record.manager_id, 'New Attendance Pending', `${emp.name}'s attendance for ${record.date} requires your approval`, 'warning', record._id, '/manager/queue');
+    // Build update payload
+    const updateFields = {
+      checkout_time:            checkoutTime,
+      checkout_lat:             parseFloat(latitude)  || record.latitude,
+      checkout_lng:             parseFloat(longitude) || record.longitude,
+      checkout_location_address: locationAddress || record.location_address,
+      checkout_selfie_path:     checkoutSelfiePath,
+      submitted_at:             now,
+      worked_hours:             workedHours,
+      leave_type:               leaveType,
+      leave_status:             leaveType ? (isAutoApproved ? 'Approved' : 'Pending') : null,
+    };
+
+    if (isAutoApproved) {
+      // Direct approval — no manager action needed
+      updateFields.status       = 'Approved';
+      updateFields.actioned_by  = null; // system-approved
+      updateFields.actioned_at  = now;
+      updateFields.manager_remark = 'Auto-approved: worked 7+ hours';
+    } else {
+      updateFields.status = 'Pending';
     }
 
-    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKOUT', entity_type: 'attendance', entity_id: record._id });
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
+
+    // Notify manager only if NOT auto-approved
+    if (!isAutoApproved && record.manager_id) {
+      const emp = await User.findById(req.user.id).select('name').lean();
+      const hoursLabel = hoursElapsed >= 6
+        ? `Full day (${workedHours.toFixed(1)} hrs)`
+        : hoursElapsed >= 4
+        ? `Half Day (${workedHours.toFixed(1)} hrs)`
+        : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
+      await notify(
+        record.manager_id,
+        'New Attendance Pending',
+        `${emp.name}'s attendance for ${record.date} is pending approval — ${hoursLabel}`,
+        'warning', record._id, '/manager/queue'
+      );
+    }
+
+    // Notify employee about auto-approval
+    if (isAutoApproved) {
+      await notify(
+        record.emp_id,
+        '✅ Attendance Auto-Approved',
+        `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
+        'success', record._id, '/employee/history'
+      );
+    }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id,
+      action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
+      entity_type: 'attendance', entity_id: record._id,
+    });
 
     const updated = await AttendanceRecord.findById(record._id).lean();
-    res.json({ success: true, message: 'Checked out and submitted for approval', data: formatRecord(updated) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+    res.json({
+      success: true,
+      message: isAutoApproved
+        ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
+        : 'Checked out and submitted for approval',
+      autoApproved: isAutoApproved,
+      data: formatRecord(updated),
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── PUT /api/attendance/:id/approve ──────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/attendance/apply-leave
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/apply-leave', authenticate, authorize('employee'), [
+  body('date').isDate().withMessage('Valid start date required'),
+  body('endDate').optional().isDate(),
+  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']),
+  body('reason').notEmpty(),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { date, endDate, leaveType, reason } = req.body;
+    const finalEndDate = endDate || date;
+    if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
+
+    const todayISO = istDateStr();
+    const minDate  = new Date(todayISO); minDate.setDate(minDate.getDate() - 30);
+    const maxDate  = new Date(todayISO); maxDate.setDate(maxDate.getDate() + 10);
+    const startD   = new Date(date), endD = new Date(finalEndDate);
+    if (startD < minDate) return res.status(400).json({ success: false, message: 'Cannot apply leave more than 30 days in the past' });
+    if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 10 days in advance' });
+
+    const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
+    const managerId   = currentUser?.manager_id;
+
+    const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
+    if (existing) return res.status(409).json({ success: false, message: `A record already exists for ${date}.` });
+
+    const isMultiDay = finalEndDate !== date;
+    const dayCount   = Math.round((endD - startD) / 86400000) + 1;
+    const id = uuidv4();
+
+    await AttendanceRecord.create({
+      _id: id, emp_id: req.user.id, date, end_date: isMultiDay ? finalEndDate : null,
+      duty_type: 'Leave', status: 'Pending', manager_id: managerId,
+      leave_type: leaveType, leave_reason: reason, leave_status: 'Pending', submitted_at: new Date(),
+    });
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
+
+    if (managerId) {
+      const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
+      await notify(managerId, `${leaveType} Request`,
+        `${currentUser.name} applied for ${leaveType} (${dayCount} day${dayCount !== 1 ? 's' : ''}) — ${dateRange}: ${reason}`,
+        'warning', id, '/manager/queue');
+      const manager = await User.findById(managerId).select('email name').lean();
+      if (manager?.email) {
+        await sendMail(manager.email, `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
+          `<p>Hi ${manager.name},</p><p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong> ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p><p><strong>Reason:</strong> ${reason}</p>`);
+      }
+    }
+
+    const isTodayInRange = todayISO >= date && todayISO <= finalEndDate;
+    const record = await AttendanceRecord.findById(id).lean();
+    res.status(201).json({
+      success: true,
+      message: `${leaveType} submitted for ${dayCount} day${dayCount !== 1 ? 's' : ''}`,
+      count: dayCount,
+      todayRecord: isTodayInRange ? formatRecord(record) : null,
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/approve
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (req, res) => {
   try {
     const { remark } = req.body;
@@ -608,27 +530,26 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
     if (req.user.role === 'manager') {
-      if (record.manager_id !== req.user.id)
-        return res.status(403).json({ success: false, message: 'Not your team member' });
-      if (!['Pending', 'Rejected'].includes(record.status))
-        return res.status(400).json({ success: false, message: 'Record cannot be approved in current state' });
+      if (record.manager_id !== req.user.id) return res.status(403).json({ success: false, message: 'Not your team member' });
+      if (!['Pending', 'Rejected'].includes(record.status)) return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
     }
 
-    const isAdmin      = req.user.role === 'admin';
-    const updateFields = {
-      status:         'Approved',
-      manager_remark: remark || '',
-      actioned_by:    req.user.id,
-      actioned_at:    new Date(),
-    };
-    if (isAdmin) updateFields.admin_remark = remark || '';
-    if (record.leave_type) updateFields.leave_status = 'Approved';
+    const isAdmin = req.user.role === 'admin';
+    const update  = { status: 'Approved', manager_remark: remark || '', actioned_by: req.user.id, actioned_at: new Date() };
+    if (isAdmin) update.admin_remark = remark || '';
+    if (record.leave_type) update.leave_status = 'Approved';
 
-    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
-    const notifTitle = record.leave_type ? `Leave Approved ✓` : 'Attendance Approved ✓';
-    const notifMsg   = record.leave_type
-      ? `Your ${record.leave_type} request for ${record.date} has been approved`
-      : `Your attendance for ${record.date} has been approved`;
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
+
+    const notifTitle = record.is_missed_checkout
+      ? 'Missed Check-Out Approved ✓'
+      : record.leave_type ? 'Leave Approved ✓' : 'Attendance Approved ✓';
+    const notifMsg = record.is_missed_checkout
+      ? `Your missed check-out on ${record.date} has been approved by your manager. You may check in again.`
+      : record.leave_type
+      ? `Your ${record.leave_type} for ${record.date} has been approved.`
+      : `Your attendance for ${record.date} has been approved.`;
+
     await notify(record.emp_id, notifTitle, notifMsg, 'success', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id,
@@ -638,79 +559,62 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     });
 
     const updated = await AttendanceRecord.findById(record._id).lean();
-    res.json({ success: true, message: 'Record approved successfully', data: formatRecord(updated) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+    res.json({ success: true, message: 'Approved', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── PUT /api/attendance/:id/reject ───────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/reject
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
   body('remark').notEmpty().withMessage('Rejection reason is required'),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-
   try {
     const { remark } = req.body;
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
-
     if (req.user.role === 'manager' && record.manager_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Not your team member' });
 
-    const rejectFields = {
-      status:         'Rejected',
-      manager_remark: remark,
-      actioned_by:    req.user.id,
-      actioned_at:    new Date(),
-    };
-    if (record.leave_type) rejectFields.leave_status = 'Rejected';
-    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: rejectFields });
+    const update = { status: 'Rejected', manager_remark: remark, actioned_by: req.user.id, actioned_at: new Date() };
+    if (record.leave_type) update.leave_status = 'Rejected';
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
 
-    const rejectTitle = record.leave_type ? `Leave Rejected ✗` : 'Attendance Rejected ✗';
-    const rejectMsg   = record.leave_type
-      ? `Your ${record.leave_type} request for ${record.date} was rejected: ${remark}`
+    const notifTitle = record.is_missed_checkout
+      ? 'Missed Check-Out Rejected ✗'
+      : record.leave_type ? 'Leave Rejected ✗' : 'Attendance Rejected ✗';
+    const notifMsg = record.is_missed_checkout
+      ? `Your missed check-out on ${record.date} was rejected: ${remark}. You may check in again.`
+      : record.leave_type
+      ? `Your ${record.leave_type} for ${record.date} was rejected: ${remark}`
       : `Your attendance for ${record.date} was rejected: ${remark}`;
-    await notify(record.emp_id, rejectTitle, rejectMsg, 'error', record._id, '/employee/history');
+
+    await notify(record.emp_id, notifTitle, notifMsg, 'error', record._id, '/employee/history');
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id, action: 'REJECT',
       entity_type: 'attendance', entity_id: record._id,
       old_value: record.status, new_value: 'Rejected',
     });
-
-    res.json({ success: true, message: 'Record rejected' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+    res.json({ success: true, message: 'Rejected' });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── PUT /api/attendance/:id/hr-override ──────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/hr-override
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {
   try {
     const { remark } = req.body;
-    const role = req.user.role;
-
-    if (!remark || !remark.trim())
-      return res.status(400).json({ success: false, message: 'Override remark is required' });
-
+    if (!remark?.trim()) return res.status(400).json({ success: false, message: 'Override remark is required' });
     const rec = await AttendanceRecord.findById(req.params.id).lean();
     if (!rec) return res.status(404).json({ success: false, message: 'Record not found' });
-
-    if (rec.overridden_by && rec.overridden_by !== role) {
-      return res.status(403).json({
-        success:         false,
-        message:         `This record was already overridden by ${rec.overridden_by === 'hr' ? 'HR' : 'Super Admin'}.`,
-        overridden_by:   rec.overridden_by,
-        override_remark: rec.override_remark,
-        hr_actioned_at:  rec.hr_actioned_at,
-      });
-    }
+    const role = req.user.role;
+    if (rec.overridden_by && rec.overridden_by !== role)
+      return res.status(403).json({ success: false, message: `Already overridden by ${rec.overridden_by === 'hr' ? 'HR' : 'Super Admin'}.`, overridden_by: rec.overridden_by });
 
     const newStatus = rec.status === 'Approved' ? 'Rejected' : 'Approved';
-
     await AttendanceRecord.findByIdAndUpdate(req.params.id, {
       $set: {
         status:          newStatus,
@@ -722,227 +626,413 @@ router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), asy
         ...(rec.leave_type ? { leave_status: newStatus } : {}),
       },
     });
-
-    await notify(
-      rec.emp_id,
-      `Record ${newStatus} by ${role === 'hr' ? 'HR' : 'Super Admin'}`,
-      `Your ${rec.leave_type ? 'leave' : 'attendance'} for ${rec.date} has been ${newStatus.toLowerCase()} via HR override.`,
-      newStatus === 'Approved' ? 'success' : 'error',
-      rec._id, '/employee/history'
-    );
-
-    await AuditLog.create({
-      _id: uuidv4(), user_id: req.user.id,
-      action: `HR_OVERRIDE_${newStatus.toUpperCase()}`,
-      entity_type: 'attendance', entity_id: rec._id,
-      old_value: rec.status, new_value: newStatus,
-      new_value2: remark.trim(),
-    });
-
-    res.json({ success: true, message: `Record overridden to ${newStatus} by ${role === 'hr' ? 'HR' : 'Super Admin'}` });
-  } catch (err) {
-    console.error('[HROverride]', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
+    await notify(rec.emp_id, `Record ${newStatus} by ${role === 'hr' ? 'HR' : 'Super Admin'}`,
+      `Your ${rec.leave_type ? 'leave' : 'attendance'} for ${rec.date} was ${newStatus.toLowerCase()} via override.`,
+      newStatus === 'Approved' ? 'success' : 'error', rec._id, '/employee/history');
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: `HR_OVERRIDE_${newStatus.toUpperCase()}`, entity_type: 'attendance', entity_id: rec._id, old_value: rec.status, new_value: newStatus });
+    res.json({ success: true, message: `Overridden to ${newStatus}` });
+  } catch (err) { console.error('[HROverride]', err); res.status(500).json({ success: false, message: err.message }); }
 });
 
-// ── PUT /api/attendance/:id/leave-request ────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/leave-request
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/leave-request', authenticate, authorize('employee'), [
-  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']).withMessage('Invalid leave type'),
-  body('reason').notEmpty().withMessage('Reason is required'),
+  body('leaveType').isIn(['Sick Leave', 'Casual Leave', 'Half Day', 'Emergency Leave']),
+  body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
-
   try {
     const { leaveType, reason } = req.body;
     const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (!record.checkout_time) return res.status(400).json({ success: false, message: 'Must checkout before requesting leave' });
-    if (record.leave_type) return res.status(409).json({ success: false, message: 'Leave already requested for this record' });
+    if (record.leave_type) return res.status(409).json({ success: false, message: 'Leave already requested' });
 
-    await AttendanceRecord.findByIdAndUpdate(record._id, {
-      $set: { leave_type: leaveType, leave_reason: reason, leave_status: 'Pending' }
-    });
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: { leave_type: leaveType, leave_reason: reason, leave_status: 'Pending' } });
 
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name email').lean();
-      await notify(record.manager_id, `${leaveType} Request`, `${emp.name} has requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id, '/manager/queue');
-
+      await notify(record.manager_id, `${leaveType} Request`, `${emp.name} requested ${leaveType} for ${record.date}: ${reason}`, 'warning', record._id, '/manager/queue');
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] ${leaveType} Request – ${emp.name}`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${emp.name}</strong> has submitted a <strong>${leaveType}</strong> request for <strong>${record.date}</strong>.</p>
-           <p><strong>Reason:</strong> ${reason}</p>
-           <p><strong>Worked hours:</strong> ${record.worked_hours ?? '—'} hrs</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
+        await sendMail(manager.email, `[AMS] ${leaveType} Request – ${emp.name}`,
+          `<p>Hi ${manager.name},</p><p><strong>${emp.name}</strong> submitted a <strong>${leaveType}</strong> for <strong>${record.date}</strong>.</p><p><strong>Reason:</strong> ${reason}</p><p><strong>Worked:</strong> ${record.worked_hours ?? '—'} hrs</p>`);
       }
     }
-
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'LEAVE_REQUEST', entity_type: 'attendance', entity_id: record._id, new_value: leaveType });
-
     const updated = await AttendanceRecord.findById(record._id).lean();
     res.json({ success: true, message: 'Leave request submitted', data: formatRecord(updated) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
-// ── GET /api/attendance/stats/summary ───────────────────────────────────
-router.get('/stats/summary', authenticate, async (req, res) => {
-  try {
-    const { startDate, endDate, empId } = req.query;
-    const matchFilter = {};
-
-    if (req.user.role === 'employee') {
-      matchFilter.emp_id = req.user.id;
-    } else if (req.user.role === 'manager') {
-      matchFilter.manager_id = req.user.id;
-      if (empId) matchFilter.emp_id = empId;
-    }
-    if (startDate) matchFilter.date = { ...matchFilter.date, $gte: startDate };
-    if (endDate)   matchFilter.date = { ...matchFilter.date, $lte: endDate };
-
-    const result = await AttendanceRecord.aggregate([
-      { $match: matchFilter },
-      { $group: {
-        _id:             null,
-        total:           { $sum: 1 },
-        approved:        { $sum: { $cond: [{ $eq: ['$status',     'Approved']        }, 1, 0] } },
-        pending:         { $sum: { $cond: [{ $eq: ['$status',     'Pending']         }, 1, 0] } },
-        rejected:        { $sum: { $cond: [{ $eq: ['$status',     'Rejected']        }, 1, 0] } },
-        on_duty:         { $sum: { $cond: [{ $eq: ['$duty_type',  'On Duty']         }, 1, 0] } },
-        office_duty:     { $sum: { $cond: [{ $eq: ['$duty_type',  'Office Duty']     }, 1, 0] } },
-        sick_leave:      { $sum: { $cond: [{ $eq: ['$leave_type', 'Sick Leave']      }, 1, 0] } },
-        casual_leave:    { $sum: { $cond: [{ $eq: ['$leave_type', 'Casual Leave']    }, 1, 0] } },
-        half_day:        { $sum: { $cond: [{ $eq: ['$leave_type', 'Half Day']        }, 1, 0] } },
-        emergency_leave: { $sum: { $cond: [{ $eq: ['$leave_type', 'Emergency Leave'] }, 1, 0] } },
-        total_leaves:    { $sum: { $cond: [{ $ne:  ['$leave_type', null]             }, 1, 0] } },
-        lop_count:       { $sum: { $cond: [{ $eq: ['$status',     'Rejected']        }, 1, 0] } },
-      }},
-      { $project: { _id: 0 } },
-    ]);
-
-    const stats = result[0] || { total: 0, approved: 0, pending: 0, rejected: 0, on_duty: 0, office_duty: 0, sick_leave: 0, casual_leave: 0, half_day: 0, emergency_leave: 0, total_leaves: 0, lop_count: 0 };
-    res.json({ success: true, data: stats });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ── PUT /api/attendance/:id/reapply ──────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/reapply
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('reapplyDocs', 10), async (req, res) => {
   try {
     const { reason } = req.body;
     if (!reason?.trim()) return res.status(400).json({ success: false, message: 'Reason is required' });
-
     const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
 
-    const docPaths = await Promise.all(
-      (req.files || []).map(f => uploadFile(f.buffer, 'ams/reapply-docs', f.originalname, f.mimetype))
-    );
+    const docPaths = await Promise.all((req.files || []).map(f => uploadFile(f.buffer, 'ams/reapply-docs', f.originalname, f.mimetype)));
 
     await AttendanceRecord.findByIdAndUpdate(record._id, {
-      $set: {
-        status:         'Pending',
-        manager_remark: null,
-        reapply_reason: reason.trim(),
-        reapply_docs:   docPaths,
-        reapplied_at:   new Date(),
-        submitted_at:   new Date(),
-      }
+      $set: { status: 'Pending', manager_remark: null, reapply_reason: reason.trim(), reapply_docs: docPaths, reapplied_at: new Date(), submitted_at: new Date() },
     });
 
     if (record.manager_id) {
       const emp = await User.findById(req.user.id).select('name email').lean();
-      await notify(record.manager_id, 'Re-application Submitted', `${emp.name} has re-submitted attendance for ${record.date} after rejection. Reason: ${reason}`, 'info', record._id, '/manager/queue');
-
+      await notify(record.manager_id, 'Re-application Submitted', `${emp.name} re-submitted attendance for ${record.date}: ${reason}`, 'info', record._id, '/manager/queue');
       const manager = await User.findById(record.manager_id).select('email name').lean();
       if (manager?.email) {
-        await sendMail(
-          manager.email,
-          `[AMS] Re-application – ${emp.name} (${record.date})`,
-          `<p>Hi ${manager.name},</p>
-           <p><strong>${emp.name}</strong> has re-submitted their attendance for <strong>${record.date}</strong> after it was rejected.</p>
-           <p><strong>Re-apply Reason:</strong> ${reason}</p>
-           <p><strong>Supporting documents:</strong> ${docPaths.length} file(s) attached</p>
-           <p>Please review this in the AMS Manager Dashboard.</p>`
-        );
+        await sendMail(manager.email, `[AMS] Re-application – ${emp.name} (${record.date})`,
+          `<p>Hi ${manager.name},</p><p><strong>${emp.name}</strong> re-submitted attendance for <strong>${record.date}</strong>.</p><p><strong>Reason:</strong> ${reason}</p><p><strong>Docs:</strong> ${docPaths.length} file(s)</p>`);
       }
     }
-
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'REAPPLY', entity_type: 'attendance', entity_id: record._id, new_value: reason });
-
     const updated = await AttendanceRecord.findById(record._id).lean();
-    res.json({ success: true, message: 'Re-application submitted successfully', data: formatRecord(updated) });
+    res.json({ success: true, message: 'Re-application submitted', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance/stats/summary
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/stats/summary', authenticate, async (req, res) => {
+  try {
+    const { startDate, endDate, empId } = req.query;
+    const match = {};
+    if (req.user.role === 'employee') match.emp_id = req.user.id;
+    else if (req.user.role === 'manager') { match.manager_id = req.user.id; if (empId) match.emp_id = empId; }
+    if (startDate) match.date = { ...match.date, $gte: startDate };
+    if (endDate)   match.date = { ...match.date, $lte: endDate };
+
+    const result = await AttendanceRecord.aggregate([
+      { $match: match },
+      { $group: {
+        _id: null,
+        total:            { $sum: 1 },
+        approved:         { $sum: { $cond: [{ $eq: ['$status', 'Approved']        }, 1, 0] } },
+        pending:          { $sum: { $cond: [{ $eq: ['$status', 'Pending']         }, 1, 0] } },
+        rejected:         { $sum: { $cond: [{ $eq: ['$status', 'Rejected']        }, 1, 0] } },
+        draft:            { $sum: { $cond: [{ $eq: ['$status', 'Draft']           }, 1, 0] } },
+        missed_checkout:  { $sum: { $cond: [{ $eq: ['$is_missed_checkout', true]  }, 1, 0] } },
+        on_duty:          { $sum: { $cond: [{ $eq: ['$duty_type', 'On Duty']      }, 1, 0] } },
+        office_duty:      { $sum: { $cond: [{ $eq: ['$duty_type', 'Office Duty']  }, 1, 0] } },
+        sick_leave:       { $sum: { $cond: [{ $eq: ['$leave_type', 'Sick Leave']      }, 1, 0] } },
+        casual_leave:     { $sum: { $cond: [{ $eq: ['$leave_type', 'Casual Leave']    }, 1, 0] } },
+        half_day:         { $sum: { $cond: [{ $eq: ['$leave_type', 'Half Day']        }, 1, 0] } },
+        emergency_leave:  { $sum: { $cond: [{ $eq: ['$leave_type', 'Emergency Leave'] }, 1, 0] } },
+        total_leaves:     { $sum: { $cond: [{ $ne: ['$leave_type', null]              }, 1, 0] } },
+        lop_count:        { $sum: { $cond: [{ $eq: ['$status', 'Rejected']            }, 1, 0] } },
+      }},
+      { $project: { _id: 0 } },
+    ]);
+    const stats = result[0] || { total:0, approved:0, pending:0, rejected:0, draft:0, missed_checkout:0, on_duty:0, office_duty:0, sick_leave:0, casual_leave:0, half_day:0, emergency_leave:0, total_leaves:0, lop_count:0 };
+    res.json({ success: true, data: stats });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scan upload / delete endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/upload-scan', authenticate, authorize('employee'), uploadScan.single('scan'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
+ 
+    const day      = istDateStr(); // YYYY-MM-DD  ← was: istMonthStr() which gave YYYY-MM
+    const dayLabel = new Date().toLocaleDateString('en-IN', {
+      timeZone: 'Asia/Kolkata', day: '2-digit', month: 'long', year: 'numeric',
+    });
+ 
+    const currentUser = await User.findById(req.user.id).select('scan_papers').lean();
+    const arr         = currentUser?.scan_papers || [];
+    // Support both array and object formats stored on user doc
+    const existing    = Array.isArray(arr)
+      ? arr.filter(s => (s.day || s.date) === day)
+      : (arr[day]?.files || []);
+ 
+    if (existing.length >= 3)
+      return res.status(400).json({ success: false, message: `Max 2 files already uploaded for today.` });
+ 
+    const fileIndex = existing.length;
+    const scanPath  = await uploadFile(req.file.buffer, 'ams/scans', req.file.originalname, req.file.mimetype);
+ 
+    await User.findByIdAndUpdate(
+      req.user.id,
+      {
+        $push: {
+          scan_papers: {
+            path:        scanPath,
+            day,                          // ← full date YYYY-MM-DD
+            day_label:   dayLabel,
+            file_name:   req.file.originalname,
+            file_index:  fileIndex,
+            uploaded_at: new Date(),
+          },
+        },
+      },
+      { strict: false },
+    );
+ 
+    res.json({ success: true, scanPath, day, dayLabel, fileIndex, totalForDay: fileIndex + 1 });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// ── Format helper ────────────────────────────────────────────────────────
+router.delete('/clear-scan', authenticate, authorize('employee'), async (req, res) => {
+  try {
+    // Accept either `day` (YYYY-MM-DD, new) or `month` (YYYY-MM, old) as key
+    const dayParam   = req.query.day   || req.query.month || null;
+    const fileIndex  = req.query.fileIndex !== undefined ? parseInt(req.query.fileIndex, 10) : undefined;
+ 
+    const u   = await User.findById(req.user.id).select('scan_papers').lean();
+    const arr = u?.scan_papers || [];
+ 
+    if (!Array.isArray(arr)) {
+      // Object-format fallback — just clear the whole user doc entry
+      await User.findByIdAndUpdate(req.user.id, { $set: { scan_papers: [] } }, { strict: false });
+      return res.json({ success: true });
+    }
+ 
+    let updated;
+    if (dayParam && fileIndex !== undefined) {
+      // Remove one specific file
+      updated = arr.filter(s => !((s.day === dayParam || s.date === dayParam || s.month === dayParam) && s.file_index === fileIndex));
+    } else if (dayParam) {
+      // Remove all files for a given day
+      updated = arr.filter(s => s.day !== dayParam && s.date !== dayParam && s.month !== dayParam);
+    } else {
+      // Clear everything
+      updated = [];
+    }
+ 
+    await User.findByIdAndUpdate(req.user.id, { $set: { scan_papers: updated } }, { strict: false });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/attendance/upload-signed-report
+// Employee uploads the manager-signed PDF/image of the report
+// Manager/Admin can also upload on behalf of employee (pass empId in body)
+// ─────────────────────────────────────────────────────────────────────────────
+router.post(
+  '/upload-signed-report',
+  authenticate,
+  uploadSignedReport.single('signedReport'),
+  async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
+ 
+      const { month } = req.body; // e.g. "2026-04"
+      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+        return res.status(400).json({ success: false, message: 'Valid month (YYYY-MM) is required' });
+      }
+ 
+      // Determine target employee
+      let targetEmpId = req.user.id;
+      if (['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role) && req.body.empId) {
+        targetEmpId = req.body.empId;
+      }
+ 
+      // ── ENFORCE ONE UPLOAD PER MONTH ─────────────────────────────────────
+      // Check if a signed report for this month already exists for this employee.
+      // Only employees are blocked — admins/HR can always upload (for overrides).
+      if (req.user.role === 'employee') {
+        const existingUser = await User.findById(targetEmpId).select('signed_reports').lean();
+        const alreadyExists = (existingUser?.signed_reports || []).some(r => r.month === month);
+        if (alreadyExists) {
+          return res.status(409).json({
+            success: false,
+            message: `A signed report has already been uploaded for ${month}. Contact your admin to replace it.`,
+          });
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
+ 
+      const monthLabel = new Date(`${month}-01`).toLocaleDateString('en-IN', {
+        month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata',
+      });
+ 
+      const signedPath = await uploadFile(
+        req.file.buffer,
+        'ams/signed-reports',
+        req.file.originalname,
+        req.file.mimetype,
+      );
+ 
+      const entry = {
+        path:        signedPath,
+        name:        req.file.originalname,
+        month,
+        month_label: monthLabel,
+        uploaded_at: new Date(),
+        uploaded_by: req.user.id,
+      };
+ 
+      // Push to user.signed_reports array
+      await User.findByIdAndUpdate(
+        targetEmpId,
+        { $push: { signed_reports: entry } },
+        { strict: false },
+      );
+ 
+      // Notify manager if employee uploaded
+      if (req.user.role === 'employee') {
+        const emp = await User.findById(req.user.id).select('name manager_id').lean();
+        if (emp?.manager_id) {
+          await notify(
+            emp.manager_id,
+            'Signed Report Uploaded',
+            `${emp.name} uploaded the signed attendance report for ${monthLabel}.`,
+            'info', null, '/manager/reports',
+          );
+        }
+      }
+ 
+      await AuditLog.create({
+        _id: uuidv4(), user_id: req.user.id,
+        action: 'UPLOAD_SIGNED_REPORT',
+        entity_type: 'user', entity_id: targetEmpId,
+        new_value: `${month} signed report`,
+      });
+ 
+      res.status(201).json({
+        success: true,
+        message: `Signed report uploaded for ${monthLabel}`,
+        path: signedPath,
+        month,
+        monthLabel,
+      });
+    } catch (err) {
+      console.error('[upload-signed-report]', err);
+      res.status(500).json({ success: false, message: 'Server error' });
+    }
+  },
+);
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+router.delete('/signed-reports/:empId/:month', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const { empId, month } = req.params;
+
+    // Validate month format
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ success: false, message: 'Invalid month format (YYYY-MM)' });
+    }
+
+    const emp = await User.findById(empId).select('signed_reports manager_id name').lean();
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    // Manager can only delete reports of their team members
+    if (req.user.role === 'manager' && emp.manager_id !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized to delete this employee\'s report' });
+    }
+
+    // Remove the report for the given month
+    const updated = (emp.signed_reports || []).filter(r => r.month !== month);
+    
+    await User.findByIdAndUpdate(empId, { $set: { signed_reports: updated } }, { strict: false });
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id,
+      action: 'DELETE_SIGNED_REPORT',
+      entity_type: 'user', entity_id: empId,
+      old_value: month,
+    });
+
+    res.json({ success: true, message: `Signed report for ${month} deleted` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance/signed-reports/:empId
+// Manager/Admin view — get all signed reports for an employee
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/signed-reports/:empId', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const emp = await User.findById(req.params.empId).select('signed_reports name emp_id').lean();
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+ 
+    const reports = (emp.signed_reports || []).map(r => ({
+      path:        r.path,
+      name:        r.name,
+      month:       r.month,
+      monthLabel:  r.month_label,
+      uploadedAt:  r.uploaded_at,
+      uploadedBy:  r.uploaded_by,
+    }));
+ 
+    res.json({ success: true, data: reports });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// Format helper
+// ─────────────────────────────────────────────────────────────────────────────
 function formatRecord(r) {
   return {
-    id:                  r._id || r.id,
-    empId:               r.emp_id,
-    empName:             r.emp_name,
-    empCode:             r.emp_code,
-    department:          r.department,
-    date:                r.date,
-    endDate:             r.end_date || null,
-    dutyType:            r.duty_type,
-    sector:              r.sector,
-    description:         r.description,
-    status:              r.status,
-    selfiePath:          r.selfie_path,
-    latitude:            r.latitude,
-    longitude:           r.longitude,
-    locationAddress:     r.location_address,
-    checkinTime:         r.checkin_time,
-    checkoutTime:        r.checkout_time,
-    checkoutSelfiePath:  r.checkout_selfie_path,
-    checkoutLat:         r.checkout_lat,
-    checkoutLng:         r.checkout_lng,
-    managerId:           r.manager_id,
-    managerName:         r.manager_name,
-    managerRemark:       r.manager_remark
-                           ? r.manager_remark
-                               .replace(/^\[HR Override\]\s*/i, '')
-                               .replace(/^\[Super Admin Override\]\s*/i, '')
-                               .replace(/^\[HR\]\s*/i, '')
-                               .replace(/^\[Super Admin\]\s*/i, '')
-                               .trim()
-                           : '',
-    adminRemark:         r.admin_remark,
-    actionedBy:          r.actioned_by,
-    actionedByName:      r.actioned_by_name,
-    actionedAt:          r.actioned_at,
-    submittedAt:         r.submitted_at,
-    createdAt:           r.created_at,
-    workedHours:         r.worked_hours,
-    isAutoCheckout:      r.is_auto_checkout,
-    checkoutRemarks:     r.checkout_remarks,
-    leaveType:           r.leave_type,
-    leaveReason:         r.leave_reason,
-    leaveStatus:         r.leave_status,
-    reapplyReason:       r.reapply_reason,
-    reapplyDocs:         r.reapply_docs || [],
-    reappliedAt:         r.reapplied_at,
-    hrOverride:          r.hr_override   || false,
-    hrRemark:            r.hr_remark     || '',
-    overrideRemark:      r.override_remark || '',
-    overriddenBy:        r.overridden_by || null,
-    hrActionedBy:        r.hr_actioned_by || null,
-    hrActionedAt:        r.hr_actioned_at || null,
+    id:                       r._id || r.id,
+    empId:                    r.emp_id,
+    empName:                  r.emp_name,
+    empCode:                  r.emp_code,
+    department:               r.department,
+    date:                     r.date,
+    endDate:                  r.end_date   || null,
+    dutyType:                 r.duty_type,
+    sector:                   r.sector,
+    description:              r.description,
+    status:                   r.status,
+    selfiePath:               r.selfie_path,
+    latitude:                 r.latitude,
+    longitude:                r.longitude,
+    locationAddress:          r.location_address,
+    checkinTime:              r.checkin_time,
+    checkoutTime:             r.checkout_time,
+    checkoutSelfiePath:       r.checkout_selfie_path,
+    checkoutLat:              r.checkout_lat,
+    checkoutLng:              r.checkout_lng,
+    checkoutLocationAddress:  r.checkout_location_address,
+    managerId:                r.manager_id,
+    managerName:              r.manager_name,
+    managerRemark:            r.manager_remark
+                                ? r.manager_remark.replace(/^\[(HR|Super Admin) Override\]\s*/i, '').trim()
+                                : '',
+    adminRemark:              r.admin_remark,
+    actionedBy:               r.actioned_by,
+    actionedByName:           r.actioned_by_name,
+    actionedAt:               r.actioned_at,
+    submittedAt:              r.submitted_at,
+    createdAt:                r.created_at,
+    workedHours:              r.worked_hours,
+    isMissedCheckout:         r.is_missed_checkout || false,
+    checkoutRemarks:          r.checkout_remarks,
+    leaveType:                r.leave_type,
+    leaveReason:              r.leave_reason,
+    leaveStatus:              r.leave_status,
+    reapplyReason:            r.reapply_reason,
+    reapplyDocs:              r.reapply_docs  || [],
+    reappliedAt:              r.reapplied_at,
+    hrOverride:               r.hr_override   || false,
+    hrRemark:                 r.hr_remark     || '',
+    overrideRemark:           r.override_remark || '',
+    overriddenBy:             r.overridden_by || null,
+    hrActionedBy:             r.hr_actioned_by || null,
+    hrActionedAt:             r.hr_actioned_at || null,
   };
 }
 

@@ -109,6 +109,14 @@ const attendanceRecordSchema = new mongoose.Schema({
   hr_actioned_at:       { type: Date, default: null },
   overridden_by:        { type: String, enum: ['hr', 'super_admin', null], default: null },
 override_remark:      { type: String, default: null },
+signed_reports: [{
+    path:        String,
+    name:        String,
+    month:       String,   // "YYYY-MM"
+    month_label: String,   // "April 2026"
+    uploaded_at: Date,
+    uploaded_by: String,   // user _id
+  }]
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 attendanceRecordSchema.index({ emp_id: 1, date: 1 }, { unique: true });

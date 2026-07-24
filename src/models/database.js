@@ -328,6 +328,15 @@ const customOptionSchema = new mongoose.Schema({
 customOptionSchema.index({ category: 1, value: 1 }, { unique: true });
 const CustomOption = mongoose.model('CustomOption', customOptionSchema);
 
+// ── Custom Blocks (admin-managed, merged with hardcoded base list) ─────────
+const customBlockSchema = new mongoose.Schema({
+  district:   { type: String, required: true },
+  block_name: { type: String, required: true },
+  added_by:   { type: String, ref: 'User', default: null },
+}, { timestamps: true });
+customBlockSchema.index({ district: 1, block_name: 1 }, { unique: true });
+const CustomBlock = mongoose.model('CustomBlock', customBlockSchema);
+
 // ── Connect ───────────────────────────────────────────────────────────────
 
 const connectionPromise = mongoose.connect(MONGO_URI, {
@@ -355,8 +364,8 @@ module.exports = {
   MsmeProposal,
 
   CustomOption,
+  CustomBlock,
   connectionPromise,
   ActivitySchedule,
   ScheduleDocument,
-  connectionPromise,
 };

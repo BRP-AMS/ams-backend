@@ -46,6 +46,7 @@ const DISTRICT_BLOCKS = {
   ],
   'West Tripura': [
     'Bamutia','Jirania','Belbari','Lefunga','Mandai','Dukli','Hezamara','Mohanpur','Old Agartala',
+    'DIC West',
     'Mohanpur Municipal Council','Ranirbazar Municipal Council','Jirania Nagar Panchayat',
     'Agartala Municipal Council (North Zone)','Agartala Municipal Council (South Zone)',
     'Agartala Municipal Council (East Zone)','Agartala Municipal Council (Central Zone)',

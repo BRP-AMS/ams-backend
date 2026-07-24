@@ -342,6 +342,7 @@ app.use('/api/activity',          require('./src/routes/activity'));
 app.use('/api/activity-schedule', require('./src/routes/activity-schedule'));
 app.use('/api/msme',              require('./src/routes/msme'));
 app.use('/api/custom-options',    require('./src/routes/custom-options'));
+app.use('/api/blocks',            require('./src/routes/blocks'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
 app.use('/api/file',              require('./src/routes/file'));
 

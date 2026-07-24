@@ -114,14 +114,14 @@ const getNthSaturday = iso => {
 
 const isNonWorkingDay = iso => {
   const dow = new Date(iso + 'T00:00:00+05:30').getDay();
-  if (dow === 0) return true;                          // Sunday
-  if (dow === 6) { const n = getNthSaturday(iso); return n === 2 || n === 4; } // 2nd/4th Sat
-  return false;
+  return dow === 0 || dow === 6; // Sunday + all Saturdays
 };
 
-const isWeekend = iso => isNonWorkingDay(iso); // kept for PDF total WO count
-const dayNum    = iso => new Date(iso+'T00:00:00+05:30').getDate();
-const monAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
+const isWeekend  = iso => isNonWorkingDay(iso); // kept for PDF total WO count
+const dayNum     = iso => new Date(iso+'T00:00:00+05:30').getDate();
+const monAbbr    = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
+const _DA        = ['S','M','T','W','Th','F','S'];
+const dayAbbrFn  = iso => _DA[new Date(iso+'T00:00:00+05:30').getDay()];
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
 const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-1)%26)+s;c=Math.floor((c-1)/26);} return s; };
 
@@ -434,16 +434,16 @@ router.get('/export',
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
-        ws.getRow(4).height=multiMonth?30:18;
+        ws.getRow(4).height=multiMonth?36:24;
         ws.getColumn(2).width=9; ws.getColumn(3).width=16;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
         const setHdr=(col,val)=>{
           const c=ws.getCell(4,col); c.value=val; c.font=HF; c.fill=FILL_WHT; c.border=CBDR;
-          c.alignment={horizontal:'center',vertical:'center',wrapText:multiMonth&&col>3};
+          c.alignment={horizontal:'center',vertical:'center',wrapText:col>3};
           ws.getColumn(col).width=col===2?9:col===3?16:4.2;
         };
         setHdr(2,'Emp code'); setHdr(3,'Employee Name');
-        dates.forEach((iso,i)=>setHdr(4+i,multiMonth?`${dayNum(iso)}\n${monAbbr(iso)}`:String(dayNum(iso))));
+        dates.forEach((iso,i)=>setHdr(4+i,multiMonth?`${dayAbbrFn(iso)}\n${dayNum(iso)}\n${monAbbr(iso)}`:`${dayAbbrFn(iso)}\n${dayNum(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -675,19 +675,20 @@ router.get('/export',
         doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
            .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
-        const y2=y+46;
+        const y2=y+46; const HH=20;
         [[xC,CC,'Emp code'],[xN,CN,'Employee Name']].forEach(([x,w,l])=>{
-          doc.rect(x,y2,w,RH).fill('#FFF').stroke('#AAA');
-          doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text(l,x+2,y2+3,{width:w-4,align:'center'});
+          doc.rect(x,y2,w,HH).fill('#FFF').stroke('#AAA');
+          doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text(l,x+2,y2+7,{width:w-4,align:'center'});
         });
         dates.forEach((iso,i)=>{
           const x=xD+i*dW;
-          doc.rect(x,y2,dW,RH).fill('#FFF').stroke('#AAA');
-          doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold').text(String(dayNum(iso)),x+1,y2+3,{width:dW-2,align:'center'});
+          doc.rect(x,y2,dW,HH).fill('#FFF').stroke('#AAA');
+          doc.fillColor('#888888').fontSize(5).font('Helvetica').text(dayAbbrFn(iso),x+1,y2+2,{width:dW-2,align:'center'});
+          doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold').text(String(dayNum(iso)),x+1,y2+11,{width:dW-2,align:'center'});
         });
-        doc.rect(xT,y2,CT,RH).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text('P+OD',xT+2,y2+3,{width:CT-4,align:'center'});
-        return y2+RH;
+        doc.rect(xT,y2,CT,HH).fill('#FFF').stroke('#AAA');
+        doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text('P+OD',xT+2,y2+7,{width:CT-4,align:'center'});
+        return y2+HH;
       };
 
       let y=drawHdr(ML);

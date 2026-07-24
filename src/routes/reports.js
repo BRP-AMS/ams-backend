@@ -822,31 +822,44 @@ router.get('/export',
       const sigLineW=140;
 
       if (role === 'employee') {
-        // Employee signature (left)
-        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold').text('Employee Sign:',ML,sy);
-        doc.moveTo(ML,sy+16).lineTo(ML+sigLineW,sy+16).stroke('#1F3864');
-
-        // Reporting Officer block (right)
-        const roSigX = ML + sigLineW + 80;
         const nameLabel = mgrLabel || '';
-        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold').text('Reporting Officer:',roSigX,sy);
+        const roSigX   = ML + sigLineW + 140;
+        const nameValW = 260;
+        const lH       = 32; // line-height between stacked fields
 
-        // Name/Designation (auto-filled)
-        doc.fillColor('#555').fontSize(9).font('Helvetica').text('Name/Designation:',roSigX,sy+16);
+        // ── Employee Sign (left) ─────────────────────────────────────
+        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold')
+           .text('Employee Sign:', ML, sy, { lineBreak: false });
+        // 1 blank line gap, then signature line
+        doc.moveTo(ML, sy + lH*2).lineTo(ML + sigLineW, sy + lH*2).stroke('#1F3864');
+
+        // ── Reporting Officer (right) ────────────────────────────────
+        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold')
+           .text('Reporting Officer:', roSigX, sy, { lineBreak: false });
+
+        // Row 1: Name/Designation label (fixed position)
+        doc.fillColor('#555').fontSize(9).font('Helvetica')
+           .text('Name/Designation:', roSigX, sy + lH, { lineBreak: false });
+        // Name value — allow wrapping; doc.y tracks bottom of text
         if (nameLabel) {
           doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold')
-             .text(nameLabel, roSigX+80, sy+16, { width: sigLineW, lineBreak:false, ellipsis:true });
+             .text(nameLabel, roSigX + 95, sy + lH, { width: nameValW });
         } else {
-          doc.moveTo(roSigX+80,sy+18).lineTo(roSigX+sigLineW+40,sy+18).stroke('#999');
+          doc.moveTo(roSigX + 95, sy + lH + 2).lineTo(roSigX + 95 + nameValW, sy + lH + 2).stroke('#999');
+          doc.y = sy + lH + 10;
         }
 
-        // Signature & Stamp
-        doc.fillColor('#555').fontSize(9).font('Helvetica').text('Signature & Stamp:',roSigX,sy+30);
-        doc.moveTo(roSigX+85,sy+32).lineTo(roSigX+sigLineW+40,sy+32).stroke('#1F3864');
+        // Row 2: Signature & Stamp — positioned below wherever name ended
+        const sigY = doc.y + lH * 2;
+        doc.fillColor('#555').fontSize(9).font('Helvetica')
+           .text('Signature & Stamp:', roSigX, sigY, { lineBreak: false });
+        doc.moveTo(roSigX + 95, sigY + 2).lineTo(roSigX + 95 + nameValW, sigY + 2).stroke('#1F3864');
 
-        // Date
-        doc.fillColor('#555').fontSize(9).font('Helvetica').text('Date:',roSigX,sy+44);
-        doc.moveTo(roSigX+24,sy+46).lineTo(roSigX+24+100,sy+46).stroke('#1F3864');
+        // Row 3: Date — pushed well below Signature & Stamp
+        const dateY = sigY + 55;
+        doc.fillColor('#555').fontSize(9).font('Helvetica')
+           .text('Date:', roSigX, dateY, { lineBreak: false });
+        doc.moveTo(roSigX + 30, dateY + 2).lineTo(roSigX + 30 + 140, dateY + 2).stroke('#1F3864');
       }
 
       doc.end();

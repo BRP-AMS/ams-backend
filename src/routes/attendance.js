@@ -31,6 +31,18 @@ const upload = multer({
   },
 });
 
+// ── Multer — reapply supporting documents (images + PDFs + Office docs) ──
+const reapplyUpload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 10 * 1024 * 1024, files: 10 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const ok  = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.doc', '.docx', '.xlsx', '.xls'];
+    if (!ok.includes(ext)) return cb(new Error('File type not allowed'));
+    cb(null, true);
+  },
+});
+
 // ── Shared face-verify helper — used by both checkin and checkout ─────────
 // Returns null on pass, or a response-ready error object on block.
 async function runFaceCheck(selfieBuffer, enrolledPhotoUrl, mimetype, empName = '', threshold = undefined) {
@@ -808,17 +820,28 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     });
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
 
+    const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
+    const leaveEmailBody = `<p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong> ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p><p><strong>Reason:</strong> ${reason}</p>`;
+
     if (managerId) {
-      const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
       await notify(managerId, `${leaveType} Request`,
         `${currentUser.name} applied for ${leaveType} (${dayCount} day${dayCount !== 1 ? 's' : ''}) — ${dateRange}: ${reason}`,
         'warning', id, '/manager/queue');
       const manager = await User.findById(managerId).select('email name').lean();
       if (manager?.email) {
-        await sendMail(manager.email, `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
-          `<p>Hi ${manager.name},</p><p><strong>${currentUser.name}</strong> has applied for <strong>${leaveType}</strong> ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p><p><strong>Reason:</strong> ${reason}</p>`);
+        sendMail(manager.email, `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
+          `<p>Hi ${manager.name},</p>${leaveEmailBody}`);
       }
     }
+
+    // Also email all admins
+    const admins = await User.find({ role: 'admin', is_active: { $ne: false } }).select('email name').lean();
+    admins.forEach(admin => {
+      if (admin.email) {
+        sendMail(admin.email, `[AMS] ${leaveType} Request – ${currentUser.name} (${dateRange})`,
+          `<p>Hi ${admin.name},</p>${leaveEmailBody}`);
+      }
+    });
 
     const isTodayInRange = todayISO >= date && todayISO <= finalEndDate;
     const record = await AttendanceRecord.findById(id).lean();
@@ -894,6 +917,15 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
       : record.leave_type ? `Your ${record.leave_type} for ${record.date} has been approved.` : `Your attendance for ${record.date} has been approved.`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'success', record._id, '/employee/history');
+
+    if (record.leave_type) {
+      const empUser = await User.findById(record.emp_id).select('email name').lean();
+      if (empUser?.email) {
+        sendMail(empUser.email, `[AMS] ${record.leave_type} Approved`,
+          `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong>.</p>`);
+      }
+    }
+
     await AuditLog.create({
       _id: uuidv4(), user_id: req.user.id,
       action: isAdmin ? 'ADMIN_OVERRIDE_APPROVE' : 'APPROVE',
@@ -945,6 +977,15 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
         : record.leave_type ? `Your ${record.leave_type} for ${record.date} was rejected: ${remark}` : `Your attendance for ${record.date} was rejected: ${remark}`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'error', record._id, '/employee/history');
+
+    if (record.leave_type) {
+      const empUser = await User.findById(record.emp_id).select('email name').lean();
+      if (empUser?.email) {
+        sendMail(empUser.email, `[AMS] ${record.leave_type} Rejected`,
+          `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#dc2626">rejected</strong>.</p><p><strong>Reason:</strong> ${remark}</p>`);
+      }
+    }
+
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'REJECT', entity_type: 'attendance', entity_id: record._id, old_value: record.status, new_value: 'Rejected' });
     res.json({ success: true, message: 'Rejected' });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
@@ -1016,7 +1057,7 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/reapply
 // ─────────────────────────────────────────────────────────────────────────────
-router.put('/:id/reapply', authenticate, authorize('employee'), upload.array('reapplyDocs', 10), async (req, res) => {
+router.put('/:id/reapply', authenticate, authorize('employee'), reapplyUpload.array('reapplyDocs', 10), async (req, res) => {
   try {
     const { reason } = req.body;
     if (!reason?.trim()) return res.status(400).json({ success: false, message: 'Reason is required' });

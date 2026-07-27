@@ -258,30 +258,30 @@ router.get('/export',
     if (role === 'employee') {
       // Always own record only
       const me = await User.findById(req.user.id)
-        .select('_id name emp_id created_at assigned_block assigned_district').lean();
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
       // Specific employee selected in dropdown (any privileged role)
       const specific = await User.findById(toObjId(empId))
-        .select('_id name emp_id created_at assigned_block assigned_district').lean();
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
 
     } else if (managerId && String(managerId).trim() !== '') {
       // Manager's entire team selected (HR / super_admin / admin use-case)
       employees = await User.find({ manager_id:toObjId(managerId), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
 
     } else if (role === 'manager') {
       // Manager viewing own team
       employees = await User.find({ manager_id:toObjId(req.user.id), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
 
     } else {
       // admin / hr / super_admin — all employees
       employees = await User.find({ role:'employee', is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
     }
 
     if (!employees.length)
@@ -415,11 +415,11 @@ router.get('/export',
       };
 
       const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
-        const LAST = 3+dates.length;
+        const LAST = 4+dates.length;
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
-        Object.assign(ws.getCell(1,2),{value:'Attendance details of BRP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
+        Object.assign(ws.getCell(1,2),{value:'Attendance details of RAMP MSME',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
         ws.getRow(1).height=24;
 
         mc(ws,2,2,2,LAST);
@@ -430,7 +430,7 @@ router.get('/export',
         mc(ws,3,2,3,half-1);
         Object.assign(ws.getCell(3,2),{value:'Location Name: Tripura',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         mc(ws,3,half,3,LAST);
-        Object.assign(ws.getCell(3,half),{value:'Project Name: Block Resource Person',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
+        Object.assign(ws.getCell(3,half),{value:'Project Name: RAMP MSME',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
@@ -440,10 +440,10 @@ router.get('/export',
         const setHdr=(col,val)=>{
           const c=ws.getCell(4,col); c.value=val; c.font=HF; c.fill=FILL_WHT; c.border=CBDR;
           c.alignment={horizontal:'center',vertical:'center',wrapText:col>3};
-          ws.getColumn(col).width=col===2?9:col===3?16:4.2;
+          ws.getColumn(col).width=col===2?9:col===3?16:col===4?12:4.2;
         };
-        setHdr(2,'Emp code'); setHdr(3,'Employee Name');
-        dates.forEach((iso,i)=>setHdr(4+i,multiMonth?`${dayAbbrFn(iso)}\n${dayNum(iso)}\n${monAbbr(iso)}`:`${dayAbbrFn(iso)}\n${dayNum(iso)}`));
+        setHdr(2,'Emp code'); setHdr(3,'Employee Name'); setHdr(4,'Designation');
+        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayAbbrFn(iso)}\n${dayNum(iso)}\n${monAbbr(iso)}`:`${dayAbbrFn(iso)}\n${dayNum(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -451,8 +451,9 @@ router.get('/export',
           const rf=idx%2===0?FILL_WHT:FILL_ALT;
           const c2=ws.getCell(rowN,2); c2.value=emp.emp_id; c2.border=CBDR; c2.fill=rf; c2.alignment={horizontal:'center',vertical:'center',wrapText:false}; c2.font={size:10,name:'Calibri'}; c2.protection={locked:true};
           const c3=ws.getCell(rowN,3); c3.value=emp.name;   c3.border=CBDR; c3.fill=rf; c3.alignment={horizontal:'left',  vertical:'center',wrapText:false}; c3.font={size:10,name:'Calibri'}; c3.protection={locked:true};
+          const c4=ws.getCell(rowN,4); c4.value=emp.role_type||''; c4.border=CBDR; c4.fill=rf; c4.alignment={horizontal:'center',vertical:'center',wrapText:false}; c4.font={size:9,name:'Calibri',color:{argb:'FF555555'}}; c4.protection={locked:true};
           cells.forEach((code,i)=>{
-            const c=ws.getCell(rowN,4+i); c.value=code; c.border=CBDR;
+            const c=ws.getCell(rowN,5+i); c.value=code; c.border=CBDR;
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
             c.font={bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':code==='LA'?'FFB45309':'FF000000'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
@@ -470,17 +471,17 @@ router.get('/export',
          {code:'WO',label:'Week Off',isRed:false},
          {code:'LA',label:'Leave Applied (Pending)',isRed:false,isLA:true},
         ].forEach(({code,label,isRed,isAmber,isLA},i)=>{
-          const cc=ws.getCell(legendRow,4+i*2);
+          const cc=ws.getCell(legendRow,5+i*2);
           cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:isLA?FILL_LA:FILL_WHT; cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
           cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':isLA?'FFB45309':'FF000000'}};
-          ws.getCell(legendRow,4+i*2+1).value=label;
-          ws.getCell(legendRow,4+i*2+1).font={size:8,name:'Calibri',italic:true};
+          ws.getCell(legendRow,5+i*2+1).value=label;
+          ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         
         });
 
         // ── Summary ───────────────────────────────────────────────────────────
-        const fDC=colLetter(4), lDC=colLetter(3+dates.length);
+        const fDC=colLetter(5), lDC=colLetter(4+dates.length);
         let r=legendRow+2; const SR=r;
         ws.getColumn(2).width=28; ws.getColumn(3).width=12;
         const TF={bold:true,size:11,color:{argb:'FFC00000'},name:'Calibri'};
@@ -615,7 +616,7 @@ router.get('/export',
         }
         // Manager / HR / super_admin / admin: no signature row on exported sheet
 
-        ws.views=[{state:'frozen',xSplit:3,ySplit:4}];
+        ws.views=[{state:'frozen',xSplit:4,ySplit:4}];
         ws.pageSetup={
           paperSize:9, orientation:'landscape',
           fitToPage:true, fitToWidth:1, fitToHeight:0,
@@ -660,23 +661,23 @@ router.get('/export',
       doc.pipe(res);
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
-      const CC=52,CN=140,CT=36;
-      const dW=Math.max(11,(PW-56-CC-CN-CT)/dates.length);
-      const RH=14;
-      const xC=ML,xN=ML+CC,xD=xN+CN,xT=xD+dates.length*dW,tW=xT+CT-ML;
+      const CC=52,CN=120,CD=70,CT=36;
+      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/dates.length);
+      const RH=20;
+      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+dates.length*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
       const drawHdr=y=>{
         doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
+        doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of RAMP MSME',ML,y+5,{width:tW,align:'center'});
         doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
         doc.fillColor('#666').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
         doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-           .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+           .text('Location: Tripura',ML+4,y+37).text('Project: RAMP MSME',ML+tW/2,y+37);
         const y2=y+46; const HH=20;
-        [[xC,CC,'Emp code'],[xN,CN,'Employee Name']].forEach(([x,w,l])=>{
+        [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
           doc.rect(x,y2,w,HH).fill('#FFF').stroke('#AAA');
           doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text(l,x+2,y2+7,{width:w-4,align:'center'});
         });
@@ -697,7 +698,8 @@ router.get('/export',
         const bg=idx%2===0?'#F9F9F9':'#FFF';
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
         doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4,lineBreak:false,ellipsis:true});
+        doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
+        doc.fillColor('#555').fontSize(6.5).font('Helvetica').text(emp.role_type||'',xDes+2,y+3,{width:CD-4,align:'center'});
         let pres=0;
         cells.forEach((code,i)=>{
           const x=xD+i*dW;

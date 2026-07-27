@@ -383,7 +383,7 @@ router.put('/:id', authenticate, async (req, res) => {
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(user.role))
       return res.status(403).json({ success: false, message: 'Admins cannot modify admin or super admin accounts' });
 
-    const { name, email, role, department, managerId, hrId, phone, isActive, assignedBlock, assignedDistrict, roleType, designation, photoUpdateQuota, joiningDate, officeName, reportingOfficerName, reportingOfficerDesignation } = req.body;
+    const { name, email, empId, role, department, managerId, hrId, phone, isActive, assignedBlock, assignedDistrict, roleType, designation, photoUpdateQuota, joiningDate, officeName, reportingOfficerName, reportingOfficerDesignation } = req.body;
 
     // Self-update: only allow safe personal fields, ignore admin-only fields
     if (!isAdminUser && isSelf) {
@@ -408,9 +408,17 @@ router.put('/:id', authenticate, async (req, res) => {
     const newDistrict  = assignedDistrict !== undefined ? (assignedDistrict || null) : user.assigned_district;
     const newIsActive  = isActive !== undefined ? isActive : user.is_active;
 
+    // Validate empId uniqueness if changing
+    const newEmpId = empId && empId.trim() ? empId.trim() : user.emp_id;
+    if (newEmpId !== user.emp_id) {
+      const conflict = await User.findOne({ emp_id: newEmpId, _id: { $ne: user._id } }).lean();
+      if (conflict) return res.status(409).json({ success: false, message: `Employee Code "${newEmpId}" is already used by another user.` });
+    }
+
     const update = {
       name: name || user.name,
       email: email || user.email,
+      emp_id: newEmpId,
       role: role || user.role,
       department: department || user.department,
       manager_id: newManagerId,

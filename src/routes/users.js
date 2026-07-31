@@ -369,9 +369,11 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
   <p style="margin:0;color:#94a3b8;font-size:12px;">Do not reply to this email · BRP AMS Automated System</p>
 </td></tr></table></td></tr></table></body></html>`);
         sent++;
+        await sleep(400); // avoid Gmail SMTP rate-limit on bulk sends
       } catch (e) {
         console.error(`[ResetAll] Failed for ${target.email}:`, e.message);
         failed++;
+        await sleep(400);
       }
     }
     res.json({ success: true, message: `Password reset emails sent to ${sent} users${failed ? `, ${failed} failed` : ''} (link expires in ${expiryLabel})` });

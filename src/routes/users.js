@@ -349,8 +349,43 @@ router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'
     const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
-    await sendMail(target.email, 'BRP Attendance System - Set Your New Password',
-      `<p>Hi ${target.name}, your password was reset by an admin. <a href="${resetUrl}">Set new password</a> (expires in ${expiryLabel}).</p>`);
+    await sendMail(target.email, 'BRP Attendance System - Password Reset by Admin',
+      `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0"
+  style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+<tr><td style="background:#0b1e3b;padding:28px 32px;">
+  <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
+  <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
+</td></tr>
+<tr><td style="padding:32px;">
+  <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Password Reset Request</h2>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    Hi <strong>${target.name}</strong>, your password has been reset by an administrator.
+  </p>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    Click the button below to set your new password. This link expires in <strong>${expiryLabel}</strong>.
+  </p>
+  <div style="text-align:center;margin:28px 0;">
+    <a href="${resetUrl}"
+      style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
+             text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+      Reset Password
+    </a>
+  </div>
+  <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
+    Or copy: ${resetUrl}
+  </p>
+  <p style="color:#dc2626;font-size:13px;">
+    If you didn't request this, ignore this email. Your password won't change.
+  </p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;">
+  <p style="margin:0;color:#94a3b8;font-size:12px;">Do not reply to this email · BRP AMS Automated System</p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`);
 
     try {
       await Notification.create({

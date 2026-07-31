@@ -609,6 +609,45 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
   }
 });
 
+// ── Bulk upload helpers ───────────────────────────────────────────────────
+
+// Decode HTML entities that Excel / ExcelJS sometimes introduces
+const decodeHtml = s => s
+  .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&nbsp;/gi, ' ');
+
+// Recursively apply decodeHtml until the string stops changing (handles multiple encodings)
+const fullyDecode = s => { let prev; do { prev = s; s = decodeHtml(s); } while (s !== prev); return s; };
+
+// Extract plain text from an ExcelJS cell value (handles richText, formula, hyperlink, plain)
+const cellText = v => {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map(r => r.text || '').join('');
+    if (v.text != null)   return String(v.text);
+    if (v.result != null) return String(v.result);
+  }
+  return String(v);
+};
+
+// Map any column header variant to a canonical field name
+const normalizeHdr = s => s.toLowerCase().replace(/[\s_\-().]+/g, '');
+const HDR_MAP = {
+  empid: 'empId', employeeid: 'empId', empcode: 'empId', agencyempcode: 'empId', code: 'empId',
+  name: 'name', fullname: 'name', employeename: 'name', resourcename: 'name',
+  email: 'email', emailid: 'email', emailaddress: 'email',
+  password: 'password', pwd: 'password',
+  role: 'role', userrole: 'role',
+  department: 'department', dept: 'department',
+  phone: 'phone', mobile: 'phone', phonenumber: 'phone', mobilenumber: 'phone', contact: 'phone',
+  block: 'block', assignedblock: 'block',
+  district: 'district', assigneddistrict: 'district',
+  roletype: 'roleType', type: 'roleType',
+  designation: 'designation',
+  joiningdate: 'joiningDate', joindate: 'joiningDate', doj: 'joiningDate',
+  manager: 'managerRef', managername: 'managerRef', managerid: 'managerRef', managerempid: 'managerRef',
+};
+
 // ── POST /api/users/bulk-upload ───────────────────────────────────────────
 router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), uploadMem.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ success: false, message: 'Excel file required' });
@@ -616,44 +655,58 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(req.file.buffer);
     const ws = wb.worksheets[0];
-    const headers = [];
+
+    // Build canonical header index
+    const canonHeaders = [];
     const rows = [];
     ws.eachRow((row, rowNum) => {
-      const vals = row.values.slice(1).map(v => (v != null ? String(v).trim() : ''));
-      if (rowNum === 1) { vals.forEach((v, i) => { headers[i] = v; }); }
-      else { const obj = {}; headers.forEach((h, i) => { if (h) obj[h] = vals[i] ?? ''; }); if (Object.values(obj).some(v => v !== '')) rows.push(obj); }
+      const vals = row.values.slice(1).map(v => fullyDecode(cellText(v).trim()));
+      if (rowNum === 1) {
+        vals.forEach((v, i) => { canonHeaders[i] = HDR_MAP[normalizeHdr(v)] || null; });
+      } else {
+        const obj = {};
+        canonHeaders.forEach((h, i) => { if (h) obj[h] = vals[i] ?? ''; });
+        if (Object.values(obj).some(v => v !== '')) rows.push(obj);
+      }
     });
     if (!rows.length) return res.status(400).json({ success: false, message: 'Empty spreadsheet' });
-    
+
     const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin'];
     const results = { created: 0, updated: 0, skipped: 0, errors: [] };
-    
+
     for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]; 
+      const row = rows[i];
       const rowNum = i + 2;
-      const empId = String(row['EmpId'] || row['empId'] || '').trim();
-      const name  = String(row['Name']  || row['name']  || '').trim();
-      const email = String(row['Email'] || row['email'] || '').trim().toLowerCase();
-      const password = String(row['Password'] || row['password'] || '').trim();
-      const role  = String(row['Role']  || row['role']  || 'employee').trim().toLowerCase();
-      const dept  = String(row['Department'] || row['department'] || '').trim();
-      const phone = String(row['Phone'] || row['phone'] || '').trim() || null;
-      const block    = String(row['assignedBlock']    || row['Block']    || row['block']    || '').trim() || null;
-const district = String(row['assignedDistrict'] || row['District'] || row['district'] || '').trim() || null;
-      const roleType = String(row['RoleType'] || row['roleType'] || '').trim() || null;  // ← FIX: Support roleType
-      const designation = String(row['Designation'] || row['designation'] || '').trim() || null;  // ← FIX: Support designation
-      const joiningDate = String(row['joiningDate'] || row['JoiningDate'] || row['joining_date'] || '').trim() || null;
-      const managerRef = String(row['managerId'] || row['ManagerId'] || row['Manager Name'] || row['manager_name'] || row['ManagerName'] || row['manager_id'] || '').trim() || null;
-      
-      if (!empId || !name || !email || !dept) { 
-        results.errors.push({ row: rowNum, reason: 'Missing required field' }); 
-        results.skipped++; 
-        continue; 
+
+      const empId      = (row['empId']      || '').trim();
+      const name       = (row['name']       || '').trim();
+      const email      = (row['email']      || '').trim().toLowerCase();
+      const password   = (row['password']   || '').trim();
+      const role       = (row['role']       || 'employee').trim().toLowerCase();
+      const dept       = (row['department'] || '').trim();
+      const phone      = (row['phone']      || '').trim() || null;
+      const block      = (row['block']      || '').trim() || null;
+      const district   = (row['district']   || '').trim() || null;
+      const roleType   = (row['roleType']   || '').trim() || null;
+      const designation= (row['designation']|| '').trim() || null;
+      const joiningDate= (row['joiningDate']|| '').trim() || null;
+      const managerRef = (row['managerRef'] || '').trim() || null;
+
+      // Specific missing-field message
+      const missing = [];
+      if (!empId) missing.push('EmpId');
+      if (!name)  missing.push('Name');
+      if (!email) missing.push('Email');
+      if (!dept)  missing.push('Department');
+      if (missing.length) {
+        results.errors.push({ row: rowNum, reason: `Missing required field(s): ${missing.join(', ')}` });
+        results.skipped++;
+        continue;
       }
-      if (!VALID_ROLES.includes(role)) { 
-        results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` }); 
-        results.skipped++; 
-        continue; 
+      if (!VALID_ROLES.includes(role)) {
+        results.errors.push({ row: rowNum, reason: `Invalid role "${role}" — must be one of: employee, manager, admin, hr` });
+        results.skipped++;
+        continue;
       }
       
       let managerId = null;

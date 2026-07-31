@@ -6,10 +6,35 @@ const crypto     = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const rateLimit  = require('express-rate-limit');
-const { User, AuditLog, RevokedToken } = require('../models/database');
+const { User, AuditLog, RevokedToken, Notification } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const { sendSMS, mode: smsMode } = require('../utils/sms');
+
+// ── In-app notification helper ────────────────────────────────────────────
+const notify = (userId, title, message, type = 'info', link = null) =>
+  Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, link })
+    .catch(err => console.error('[Notify] create failed:', err.message));
+
+// Notify the user's manager + all active admins about a password change
+const notifyPasswordChange = async (user) => {
+  try {
+    const msg = `${user.name} (${user.emp_id}) reset their password.`;
+    const link = '/admin/users';
+    const recipients = [];
+    if (user.manager_id) recipients.push(String(user.manager_id));
+    const admins = await User.find({ role: { $in: ['admin', 'super_admin'] }, is_active: 1 }).select('_id').lean();
+    admins.forEach(a => {
+      const aid = String(a._id);
+      if (aid !== String(user._id)) recipients.push(aid);
+    });
+    const unique = [...new Set(recipients)];
+    console.log(`[Auth] Password reset notify → user=${user.emp_id}, recipients=${unique.length}`);
+    await Promise.all(unique.map(id => notify(id, 'Password Reset', msg, 'warning', link)));
+  } catch (err) {
+    console.error('[Auth] notifyPasswordChange error:', err.message);
+  }
+};
 
 // ── Secure token helpers ──────────────────────────────────────────────────
 const generateToken = () => crypto.randomBytes(32).toString('hex');           // 64-char hex
@@ -352,6 +377,10 @@ router.put('/change-password', authenticate, [
       $set: { password_hash: bcrypt.hashSync(newPassword, 12), pwd_changed_at: new Date() }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHANGE_PASSWORD', ip_address: req.ip });
+
+    // Notify manager + admins — fire-and-forget
+    notifyPasswordChange(user);
+
     res.json({ success: true, message: 'Password changed successfully' });
   } catch (err) {
     console.error(err);
@@ -500,6 +529,9 @@ router.post('/reset-password', [
       }
     });
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'RESET_PASSWORD', ip_address: req.ip });
+
+    // Notify manager + admins — fire-and-forget
+    notifyPasswordChange(user);
 
     // Password changed notification — fire-and-forget
     sendMail(user.email, 'BRP Attendance System - Password Changed',

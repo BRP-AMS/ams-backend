@@ -32,8 +32,11 @@ const sendViaGmailRelay = async (to, subject, html) => {
   });
   const text = await res.text();
   let body;
-  try { body = JSON.parse(text); } catch { body = { raw: text }; }
-  if (body.success === false) {
+  try { body = JSON.parse(text); } catch (e) {
+    console.error('[Email/GmailRelay] ❌ Non-JSON response:', text.slice(0, 200));
+    throw new Error('Gmail relay returned non-JSON response');
+  }
+  if (!body.success) {
     console.error('[Email/GmailRelay] ❌ FAILED:', JSON.stringify(body));
     throw new Error(body.error || 'Gmail relay failed');
   }

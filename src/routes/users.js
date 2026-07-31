@@ -335,31 +335,35 @@ router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(target.role))
       return res.status(403).json({ success: false, message: 'Admins cannot reset passwords for admin or super admin accounts' });
     
+    const expiry24h = req.body?.expiry === '24h';
+    const expiryMs  = expiry24h ? 24 * 60 * 60 * 1000 : 30 * 60 * 1000;
+    const expiryLabel = expiry24h ? '24 hours' : '30 minutes';
+
     const crypto = require('crypto');
     const rawResetToken  = crypto.randomBytes(32).toString('hex');
     const hashedResetTok = crypto.createHash('sha256').update(rawResetToken).digest('hex');
     const tempPassword   = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
-    
-    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: bcrypt.hashSync(tempPassword, 12), pwd_reset_token: hashedResetTok, pwd_reset_expires: new Date(Date.now() + 30 * 60 * 1000) } });
-    
+
+    await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: bcrypt.hashSync(tempPassword, 12), pwd_reset_token: hashedResetTok, pwd_reset_expires: new Date(Date.now() + expiryMs) } });
+
     const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
-    
+
     await sendMail(target.email, 'BRP Attendance System - Set Your New Password',
-      `<p>Hi ${target.name}, your password was reset by an admin. <a href="${resetUrl}">Set new password</a> (expires in 30 minutes).</p>`);
-    
-    try { 
-      await Notification.create({ 
-        _id: uuidv4(), 
-        user_id: target._id, 
-        title: 'Password Reset by Admin', 
-        message: 'Check your email for the reset link (expires in 5 minutes).', 
-        type: 'warning', 
-        is_read: 0 
-      }); 
+      `<p>Hi ${target.name}, your password was reset by an admin. <a href="${resetUrl}">Set new password</a> (expires in ${expiryLabel}).</p>`);
+
+    try {
+      await Notification.create({
+        _id: uuidv4(),
+        user_id: target._id,
+        title: 'Password Reset by Admin',
+        message: `Check your email for the reset link (expires in ${expiryLabel}).`,
+        type: 'warning',
+        is_read: 0
+      });
     } catch (_) {}
-    
-    res.json({ success: true, message: `Password reset email sent to ${target.name} (${target.email})` });
+
+    res.json({ success: true, message: `Password reset email sent to ${target.name} (${target.email}) — link expires in ${expiryLabel}` });
   } catch (err) { 
     console.error(err); 
     res.status(500).json({ success: false, message: 'Server error: ' + err.message }); 
@@ -619,15 +623,38 @@ const decodeHtml = s => s
 // Recursively apply decodeHtml until the string stops changing (handles multiple encodings)
 const fullyDecode = s => { let prev; do { prev = s; s = decodeHtml(s); } while (s !== prev); return s; };
 
-// Extract plain text from an ExcelJS cell value (handles richText, formula, hyperlink, plain)
+// Extract plain text from an ExcelJS cell value (handles richText, formula, hyperlink, Date, plain)
 const cellText = v => {
   if (v == null) return '';
+  if (v instanceof Date) {
+    // Format as YYYY-MM-DD
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, '0');
+    const d = String(v.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
   if (typeof v === 'object') {
     if (Array.isArray(v.richText)) return v.richText.map(r => r.text || '').join('');
+    if (v.result instanceof Date) {
+      const d2 = v.result;
+      return `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,'0')}-${String(d2.getDate()).padStart(2,'0')}`;
+    }
     if (v.text != null)   return String(v.text);
     if (v.result != null) return String(v.result);
   }
   return String(v);
+};
+
+// Normalise any common date string to YYYY-MM-DD; returns null if unrecognised
+const parseDate = s => {
+  if (!s) return null;
+  s = s.trim();
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD.MM.YYYY  or  DD/MM/YYYY  or  DD-MM-YYYY
+  const m = s.match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  return null;
 };
 
 // Map any column header variant to a canonical field name
@@ -683,21 +710,22 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
       const email      = (row['email']      || '').trim().toLowerCase();
       const password   = (row['password']   || '').trim();
       const role       = (row['role']       || 'employee').trim().toLowerCase();
-      const dept       = (row['department'] || '').trim();
+      const dept       = (row['department'] || '').trim() || 'Field Operation';
       const phone      = (row['phone']      || '').trim() || null;
       const block      = (row['block']      || '').trim() || null;
       const district   = (row['district']   || '').trim() || null;
       const roleType   = (row['roleType']   || '').trim() || null;
       const designation= (row['designation']|| '').trim() || null;
-      const joiningDate= (row['joiningDate']|| '').trim() || null;
+      const joiningDate= parseDate((row['joiningDate'] || '').trim());
       const managerRef = (row['managerRef'] || '').trim() || null;
 
-      // Specific missing-field message
+      // Only these 5 fields are mandatory
       const missing = [];
-      if (!empId) missing.push('EmpId');
-      if (!name)  missing.push('Name');
-      if (!email) missing.push('Email');
-      if (!dept)  missing.push('Department');
+      if (!empId)    missing.push('EmpId');
+      if (!name)     missing.push('Name');
+      if (!email)    missing.push('Email');
+      if (!block)    missing.push('assignedBlock');
+      if (!district) missing.push('assignedDistrict');
       if (missing.length) {
         results.errors.push({ row: rowNum, reason: `Missing required field(s): ${missing.join(', ')}` });
         results.skipped++;
@@ -738,30 +766,91 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
         await User.findByIdAndUpdate(existing._id, { $set: update });
         results.updated++;
       } else {
-        if (!password || password.length < 6) { 
-          results.errors.push({ row: rowNum, reason: `Password required for "${empId}"` }); 
-          results.skipped++; 
-          continue; 
+        const crypto = require('crypto');
+        let passwordHash;
+        let setupTokenRaw = null;
+
+        if (password && password.length >= 6) {
+          passwordHash = bcrypt.hashSync(password, 10);
+        } else {
+          // No password supplied — generate temp + send setup email
+          const tempPass = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
+          passwordHash   = bcrypt.hashSync(tempPass, 10);
+          setupTokenRaw  = crypto.randomBytes(32).toString('hex');
         }
-        await User.create({ 
-          _id: uuidv4(), 
-          emp_id: empId, 
-          name, 
-          email, 
-          password_hash: bcrypt.hashSync(password, 10), 
-          role, 
-          department: dept, 
-          manager_id: managerId || null, 
-          phone, 
-          assigned_block: block, 
+
+        const hashedSetupTok = setupTokenRaw
+          ? crypto.createHash('sha256').update(setupTokenRaw).digest('hex')
+          : null;
+
+        const newId = uuidv4();
+        await User.create({
+          _id: newId,
+          emp_id: empId,
+          name,
+          email,
+          password_hash: passwordHash,
+          role,
+          department: dept,
+          manager_id: managerId || null,
+          phone,
+          assigned_block: block,
           assigned_district: district,
-          role_type: roleType,           // ← FIX: Support creation
-          designation: designation,       // ← FIX: Support creation
+          role_type: roleType,
+          designation: designation,
           joining_date: joiningDate,
-          is_active: 1, 
-          email_verified: true, 
-          phone_verified: true 
+          is_active: 1,
+          email_verified: true,
+          phone_verified: true,
+          ...(hashedSetupTok ? { pwd_reset_token: hashedSetupTok, pwd_reset_expires: new Date(Date.now() + 86400000) } : {}),
         });
+
+        if (setupTokenRaw) {
+          const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+          const resetUrl = `${FRONTEND}/reset-password?token=${setupTokenRaw}`;
+          sendMail(
+            email,
+            'BRP Attendance System - Your Account is Ready',
+            `<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0"
+  style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+<tr><td style="background:#0b1e3b;padding:28px 32px;">
+  <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
+  <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
+</td></tr>
+<tr><td style="padding:32px;">
+  <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Welcome, ${name}! Set Your Password</h2>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    Your BRP AMS account has been created. Click the button below to set your password and activate your account.
+  </p>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    <strong>Employee ID:</strong> ${empId}<br/>
+    <strong>Role:</strong> ${role}
+  </p>
+  <div style="text-align:center;margin:28px 0;">
+    <a href="${resetUrl}"
+      style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
+             text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+      Set My Password
+    </a>
+  </div>
+  <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
+    Or copy this link: ${resetUrl}
+  </p>
+  <p style="color:#dc2626;font-size:13px;">
+    This link expires in <strong>24 hours</strong>. If you did not expect this email, contact your administrator.
+  </p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;">
+  <p style="margin:0;color:#94a3b8;font-size:12px;">Do not reply to this email · BRP AMS Automated System</p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`
+          ).catch(err => console.error(`[Bulk Upload] Setup email failed for ${email}:`, err.message));
+        }
+
         results.created++;
       }
     }

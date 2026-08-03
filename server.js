@@ -56,13 +56,15 @@ const ALLOWED_ORIGINS = [
   process.env.BACKEND_URL,
   'http://localhost:3000', 'http://localhost:3001', 'http://103.44.0.48:3000','http://erp.brptripura.com'
 ].filter(Boolean);
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     cb(new Error('Not allowed by CORS'));
   },
   credentials: true,
-}));
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // explicit preflight handler for all routes
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');

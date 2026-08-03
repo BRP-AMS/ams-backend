@@ -386,6 +386,19 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
   }
 });
 
+// ── POST /api/users/:id/unlock — clear login lockout ────────────────────────
+router.post('/:id/unlock', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id).select('name emp_id login_locked_until failed_login_attempts').lean();
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    await User.findByIdAndUpdate(req.params.id, { $set: { login_locked_until: null, failed_login_attempts: 0 } });
+    console.log(`[Users] Account unlocked: ${target.emp_id} by ${req.user.emp_id}`);
+    res.json({ success: true, message: `${target.name}'s account has been unlocked.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ── PUT /api/users/:id/reset-password — must be before PUT /:id ──────────
 router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
@@ -1126,6 +1139,8 @@ function formatUser(u) {
     profile_photo_uploaded: u.profile_photo_uploaded  || null,
     photoUpdateQuota:       u.photo_update_quota       ?? null,
     photoUpdateCount:       u.photo_update_count       ?? 0,
+    loginLockedUntil:       u.login_locked_until       || null,
+    failedLoginAttempts:    u.failed_login_attempts    ?? 0,
   };
 }
 

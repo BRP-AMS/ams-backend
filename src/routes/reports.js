@@ -50,7 +50,7 @@ const TRIPURA_BLOCKS = [
   'Ramchandraghat','Rupaichari','Sabroom','Salema','Sonamura','Surma','Teliamura',
 ];
 const TRIPURA_DISTRICTS = [
-  'Dhalai','Gomati','Khowai','North Tripura','Sepahijala',
+  'Dhalai','Gomati','Khowai','North Tripura','Sipahijala',
   'South Tripura','Unakoti','West Tripura',
 ];
 const ALL_TRIPURA = [...TRIPURA_BLOCKS, ...TRIPURA_DISTRICTS, 'Tripura'];
@@ -122,62 +122,13 @@ const isNonWorkingDay = iso => {
 const isWeekend = iso => isNonWorkingDay(iso); // kept for PDF total WO count
 const dayNum    = iso => new Date(iso+'T00:00:00+05:30').getDate();
 const monAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
+const dayAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,weekday:'short'});
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
 const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-1)%26)+s;c=Math.floor((c-1)/26);} return s; };
 
 /**
  * toCode — determines cell code for one attendance record
- *
- * Leave status rules:
- *   Pending  → '' (blank — not yet decided, don't mark absent)
- *   Approved → 'L'
- *   Rejected + no re-check-in → 'L' (LOP / loss-of-pay)
- *   Rejected + re-checked in  → fall through to P/OD location logic
- *
- * Regular attendance:
- *   Rejected → 'A'
- *   Present with location → P or OD
  */
-// const toCode = (rec, assignedBlock, assignedDistrict) => {
-//   if (!rec) return 'A';
-
-//   // ── Leave records ──────────────────────────────────────────────────────────
-//   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
-//   if (isLeave) {
-//     const ls = rec.leave_status || rec.status || 'Pending';
-//     if (ls === 'Pending')  return '';   // leave pending → blank (don't penalise)
-  
-// if (ls === 'Approved') {
-//   const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
-//   const hasCheckin = rec.checkin_time || rec.checkinTime;
-//   if (!(isHalfDay && hasCheckin)) return 'L';
-//   // Half Day + has check-in → fall through to P / OD logic below
-// }
-//     if (ls === 'Rejected') {
-//       // Employee re-checked in after rejection → treat as normal attendance
-//       const hasCheckin = rec.checkin_time || rec.checkinTime;
-//       if (!hasCheckin) return 'L'; // rejected + no re-check-in → L (LOP)
-//       // Has a real check-in after rejection → fall through to P/OD logic below
-//     }
-//   }
-
-//   // ── Regular attendance (or rejected leave with actual re-check-in) ─────────
-//   if (rec.status === 'Rejected') return 'A';
-
-//   const addr = rec.location_address || rec.locationAddress || '';
-
-//   // No assignment → always P (can't determine otherwise)
-//   if (!assignedBlock && !assignedDistrict) return 'P';
-
-//   const matchesAssigned =
-//     (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
-//     (assignedDistrict && matchesLocation(addr, assignedDistrict));
-
-//   if (matchesAssigned)  return 'P';   // at assigned workplace
-//   if (isInTripura(addr)) return 'OD'; // elsewhere in Tripura
-//   return ''; // outside all known Tripura locations
-// };
-
 // ── reports.js  ·  toCode() ───────────────────────────────────────────────
 const toCode = (rec, assignedBlock, assignedDistrict) => {
   if (!rec) return 'A';
@@ -203,7 +154,7 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   // ── Regular attendance ─────────────────────────────────────────────────────
   if (rec.status === 'Rejected') return 'A';
 
-  // ✅ NEW: duty_type drives P vs OD — location is only a fallback
+  // duty_type drives P vs OD — location is only a fallback
   const dutyType = (rec.duty_type || '').trim();
 
   if (dutyType === 'On Duty') return 'OD';   // employee chose "On Duty (Field)"
@@ -255,33 +206,35 @@ router.get('/export',
     // Priority: employee (own) → specific empId → managerId team → manager (own team) → all
     let employees = [];
 
+    const EMP_SELECT = '_id name emp_id created_at assigned_block assigned_district role_type designation';
+
     if (role === 'employee') {
       // Always own record only
       const me = await User.findById(req.user.id)
-        .select('_id name emp_id created_at assigned_block assigned_district').lean();
+        .select(EMP_SELECT).lean();
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
       // Specific employee selected in dropdown (any privileged role)
       const specific = await User.findById(toObjId(empId))
-        .select('_id name emp_id created_at assigned_block assigned_district').lean();
+        .select(EMP_SELECT).lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
 
     } else if (managerId && String(managerId).trim() !== '') {
       // Manager's entire team selected (HR / super_admin / admin use-case)
       employees = await User.find({ manager_id:toObjId(managerId), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
 
     } else if (role === 'manager') {
       // Manager viewing own team
       employees = await User.find({ manager_id:toObjId(req.user.id), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
 
     } else {
       // admin / hr / super_admin — all employees
       employees = await User.find({ role:'employee', is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
     }
 
     if (!employees.length)
@@ -393,7 +346,7 @@ router.get('/export',
       };
 
       const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
-        const LAST = 3+dates.length;
+        const LAST = 4+dates.length;
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
@@ -412,16 +365,16 @@ router.get('/export',
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
-        ws.getRow(4).height=multiMonth?30:18;
-        ws.getColumn(2).width=9; ws.getColumn(3).width=16;
+        ws.getRow(4).height=multiMonth?38:26;
+        ws.getColumn(2).width=9; ws.getColumn(3).width=16; ws.getColumn(4).width=14;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
         const setHdr=(col,val)=>{
           const c=ws.getCell(4,col); c.value=val; c.font=HF; c.fill=FILL_WHT; c.border=CBDR;
-          c.alignment={horizontal:'center',vertical:'center',wrapText:multiMonth&&col>3};
-          ws.getColumn(col).width=col===2?9:col===3?16:4.2;
+          c.alignment={horizontal:'center',vertical:'center',wrapText:col>4};
+          ws.getColumn(col).width=col===2?9:col===3?16:col===4?14:4.2;
         };
-        setHdr(2,'Emp code'); setHdr(3,'Employee Name');
-        dates.forEach((iso,i)=>setHdr(4+i,multiMonth?`${dayNum(iso)}\n${monAbbr(iso)}`:String(dayNum(iso))));
+        setHdr(2,'Emp code'); setHdr(3,'Employee Name'); setHdr(4,'Designation');
+        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`:`${dayNum(iso)}\n${dayAbbr(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -429,8 +382,9 @@ router.get('/export',
           const rf=idx%2===0?FILL_WHT:FILL_ALT;
           const c2=ws.getCell(rowN,2); c2.value=emp.emp_id; c2.border=CBDR; c2.fill=rf; c2.alignment={horizontal:'center',vertical:'center',wrapText:false}; c2.font={size:10,name:'Calibri'}; c2.protection={locked:true};
           const c3=ws.getCell(rowN,3); c3.value=emp.name;   c3.border=CBDR; c3.fill=rf; c3.alignment={horizontal:'left',  vertical:'center',wrapText:false}; c3.font={size:10,name:'Calibri'}; c3.protection={locked:true};
+          const c4=ws.getCell(rowN,4); c4.value=emp.role_type||emp.designation||''; c4.border=CBDR; c4.fill=rf; c4.alignment={horizontal:'center',vertical:'center',wrapText:false}; c4.font={size:9,name:'Calibri'}; c4.protection={locked:true};
           cells.forEach((code,i)=>{
-            const c=ws.getCell(rowN,4+i); c.value=code; c.border=CBDR;
+            const c=ws.getCell(rowN,5+i); c.value=code; c.border=CBDR;
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
             c.font={bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
@@ -447,17 +401,17 @@ router.get('/export',
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ].forEach(({code,label,isRed,isAmber},i)=>{
-          const cc=ws.getCell(legendRow,4+i*2);
+          const cc=ws.getCell(legendRow,5+i*2);
           cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT; cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
           cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
-          ws.getCell(legendRow,4+i*2+1).value=label;
-          ws.getCell(legendRow,4+i*2+1).font={size:8,name:'Calibri',italic:true};
+          ws.getCell(legendRow,5+i*2+1).value=label;
+          ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         
         });
 
         // ── Summary ───────────────────────────────────────────────────────────
-        const fDC=colLetter(4), lDC=colLetter(3+dates.length);
+        const fDC=colLetter(5), lDC=colLetter(4+dates.length);
         let r=legendRow+2; const SR=r;
         ws.getColumn(2).width=28; ws.getColumn(3).width=12;
         const TF={bold:true,size:11,color:{argb:'FFC00000'},name:'Calibri'};
@@ -588,7 +542,7 @@ router.get('/export',
         }
         // Manager / HR / super_admin / admin: no signature row on exported sheet
 
-        ws.views=[{state:'frozen',xSplit:3,ySplit:4}];
+        ws.views=[{state:'frozen',xSplit:4,ySplit:4}];
         ws.pageSetup={
           paperSize:9, orientation:'landscape',
           fitToPage:true, fitToWidth:1, fitToHeight:0,
@@ -614,8 +568,11 @@ router.get('/export',
         });
       }
 
+      const fnamePrefix = matrix.length === 1
+        ? `${(matrix[0].emp.name||'').replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'')}_${matrix[0].emp.emp_id||''}_`
+        : '';
       res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition',`attachment; filename="BRP_Attendance_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Content-Disposition',`attachment; filename="${fnamePrefix}BRP_Attendance_${startDate}_to_${endDate}.xlsx"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
@@ -632,10 +589,10 @@ router.get('/export',
       doc.pipe(res);
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
-      const CC=52,CN=115,CT=36;
-      const dW=Math.max(11,(PW-56-CC-CN-CT)/dates.length);
+      const CC=52,CN=105,CD=64,CT=36;
+      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/dates.length);
       const RH=14;
-      const xC=ML,xN=ML+CC,xD=xN+CN,xT=xD+dates.length*dW,tW=xT+CT-ML;
+      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+dates.length*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
@@ -649,9 +606,9 @@ router.get('/export',
      .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
 
   const y2=y+46;
-  const HRH = multiMonth ? 22 : RH;   // taller header row when spanning months
+  const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
 
-  [[xC,CC,'Emp code'],[xN,CN,'Employee Name']].forEach(([x,w,l])=>{
+  [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
     doc.rect(x,y2,w,HRH).fill('#FFF').stroke('#AAA');
     doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
        .text(l,x+2,y2+(HRH-9)/2,{width:w-4,align:'center'});
@@ -662,9 +619,11 @@ router.get('/export',
     doc.rect(x,y2,dW,HRH).fill('#FFF').stroke('#AAA');
     doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
        .text(String(dayNum(iso)),x+1,y2+3,{width:dW-2,align:'center'});
+    doc.fillColor('#555').fontSize(5).font('Helvetica')
+       .text(dayAbbr(iso),x+1,y2+11,{width:dW-2,align:'center'});
     if (multiMonth) {
       doc.fillColor('#888').fontSize(5).font('Helvetica')
-         .text(monAbbr(iso),x+1,y2+12,{width:dW-2,align:'center'});
+         .text(monAbbr(iso),x+1,y2+19,{width:dW-2,align:'center'});
     }
   });
 
@@ -681,6 +640,7 @@ router.get('/export',
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
         doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
         doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
+        doc.font('Helvetica').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
         let pres=0;
         cells.forEach((code,i)=>{
           const x=xD+i*dW;
@@ -809,34 +769,31 @@ router.get('/export',
       const sigLineW=140;
 if (role === 'employee') {
   // Employee Sign
-  doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold').text('Employee Sign:', ML, sy);
-  doc.moveTo(ML + 130, sy + 14).lineTo(ML + 130 + sigLineW, sy + 14).stroke('#1F3864');
+  doc.fillColor('#1F3864').fontSize(12).font('Helvetica-Bold').text('Employee Sign:', ML, sy);
+  doc.moveTo(ML + 110, sy + 12).lineTo(ML + 110 + sigLineW, sy + 12).stroke('#999');
 
-  // Reporting Officer block
-  const roX = ML + 130 + sigLineW + 80;
-  doc.fillColor('#1F3864').fontSize(16).font('Helvetica-Bold').text('Reporting Officer:', roX, sy);
+  // Reporting Officer block — CSS matched to reference layout
+  const roX = ML + 110 + sigLineW + 80;
+  doc.fillColor('#1F3864').fontSize(12).font('Helvetica-Bold').text('Reporting Officer:', roX, sy);
 
-  const lineGap = 34;
+  const lineGap = 30;
   let ry = sy + lineGap;
 
-  // Name/Designation — value filled in BEFORE the label's blank line
-  doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold').text('Name/Designation:', roX, ry);
+  // Name/Designation — thin grey line, value (if known) sits above the line
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Name/Designation:', roX, ry);
   if (managerName) {
-    doc.fillColor('#333').fontSize(16).font('Helvetica-Oblique')
-       .text(managerName, roX + 110, ry, { width: sigLineW });
-  } else {
-    doc.moveTo(roX + 110, ry + 11).lineTo(roX + 110 + sigLineW, ry + 11).stroke('#999');
+    doc.fillColor('#333').fontSize(10).font('Helvetica-Oblique')
+       .text(managerName, roX + 100, ry - 9, { width: sigLineW });
   }
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW, ry + 9).stroke('#999');
 
-  ry += lineGap;
-  doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold').text('Signature & Stamp:', roX, ry);
-  doc.moveTo(roX + 110, ry + 11).lineTo(roX + 110 + sigLineW, ry + 11).stroke('#1F3864');
+  ry += lineGap + 10;
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Signature & Stamp:', roX, ry);
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW, ry + 9).stroke('#1F3864');
 
-
-
-  ry += lineGap;
-  doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold').text('Date:', roX, ry);
-  doc.moveTo(roX + 110, ry + 11).lineTo(roX + 110 + sigLineW, ry + 11).stroke('#999');
+  ry += lineGap + 10;
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Date:', roX, ry);
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW * 0.55, ry + 9).stroke('#999');
 }
 
       doc.end();

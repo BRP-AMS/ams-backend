@@ -11,9 +11,10 @@ const { slugify } = require('../utils/folderlabel');
 const { sendMail } = require('../utils/mailer');
 const path            = require('path');
 const { uploadFile }  = require('../utils/storage');
-
+const { createFirebaseUser } = require('../utils/firebaseMailer');
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
-
+ 
+const crypto = require('crypto');
 const validate = (req, res, next) => {
   const errs = validationResult(req);
   if (!errs.isEmpty()) return res.status(422).json({ success: false, message: errs.array()[0].msg, errors: errs.array() });
@@ -113,7 +114,7 @@ router.get('/employees', authenticate, authorize('manager', 'admin', 'hr', 'supe
 
 // ── GET /api/users/team/attendance-summary ────────────────────────────────
 // Must be BEFORE /:id to avoid Express route shadowing
-router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin'), async (req, res) => {
+router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin','super_admin'), async (req, res) => {
   try {
     const today      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const matchStage = req.user.role === 'manager'
@@ -263,9 +264,14 @@ router.post('/', authenticate, authorize('admin'), [
       pwd_reset_token: hashedResetTok, 
       pwd_reset_expires: new Date(Date.now() + 86400000),
     });
-    
+    try {
+  await createFirebaseUser(email, tempPassword);
+  console.log(`[Firebase] User created: ${email}`);
+} catch (err) {
+  console.error(`[Firebase] Failed to create user ${email}:`, err.message);
+}
     // Send welcome email with app's own reset link (same SMTP that powers forgot-password)
-    const { sendMail } = require('../utils/mailer');
+    const { sendMail, } = require('../utils/mailer');
     const FRONTEND  = process.env.FRONTEND_URL || 'https://ams-frontend-web-q2lw.onrender.com';
     const resetUrl  = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
@@ -620,98 +626,195 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
     if (!rows.length) return res.status(400).json({ success: false, message: 'Empty spreadsheet' });
-    
+ 
     const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin'];
     const results = { created: 0, updated: 0, skipped: 0, errors: [] };
-    
+    const FRONTEND = process.env.FRONTEND_URL || 'https://ams-frontend-web-q2lw.onrender.com';
+ 
+    const genToken  = () => crypto.randomBytes(32).toString('hex');
+    const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
+ 
+    // Same welcome email used by manual POST /api/users, kept in one place
+    // so bulk-created users get an identical email/password experience.
+    const welcomeEmailHtml = (name, empId, role, resetUrl) => `
+<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f2f6f8;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f2f6f8;padding:40px 0;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0"
+  style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+<tr><td style="background:#0b1e3b;padding:28px 32px;">
+  <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">BRP · AMS</h1>
+  <p style="margin:4px 0 0;color:rgba(255,255,255,.6);font-size:13px;">Attendance Management System</p>
+</td></tr>
+<tr><td style="padding:32px;">
+  <h2 style="margin:0 0 16px;color:#0b1e3b;font-size:18px;">Welcome, ${name}! Set Your Password</h2>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    Your BRP AMS account has been created. Click the button below to set your password and activate your account.
+  </p>
+  <p style="color:#475569;font-size:14px;line-height:1.6;">
+    <strong>Employee ID:</strong> ${empId}<br/>
+    <strong>Role:</strong> ${role}
+  </p>
+  <div style="text-align:center;margin:28px 0;">
+    <a href="${resetUrl}"
+      style="background:#21879d;color:#fff;padding:14px 32px;border-radius:8px;
+             text-decoration:none;font-weight:700;font-size:15px;display:inline-block;">
+      Set My Password
+    </a>
+  </div>
+  <p style="color:#94a3b8;font-size:12px;word-break:break-all;">
+    Or copy this link: ${resetUrl}
+  </p>
+  <p style="color:#dc2626;font-size:13px;">
+    This link expires in <strong>24 hours</strong>. If you did not expect this email, contact your administrator.
+  </p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0;">
+  <p style="margin:0;color:#94a3b8;font-size:12px;">Do not reply to this email · BRP AMS Automated System</p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`;
+ 
     for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]; 
       const rowNum = i + 2;
-      const empId = String(row['EmpId'] || row['empId'] || '').trim();
-      const name  = String(row['Name']  || row['name']  || '').trim();
-      const email = String(row['Email'] || row['email'] || '').trim().toLowerCase();
-      const password = String(row['Password'] || row['password'] || '').trim();
-      const role  = String(row['Role']  || row['role']  || 'employee').trim().toLowerCase();
-      const dept  = String(row['Department'] || row['department'] || '').trim();
-      const phone = String(row['Phone'] || row['phone'] || '').trim() || null;
-      const block    = String(row['assignedBlock']    || row['Block']    || row['block']    || '').trim() || null;
-const district = String(row['assignedDistrict'] || row['District'] || row['district'] || '').trim() || null;
-      const roleType = String(row['RoleType'] || row['roleType'] || '').trim() || null;  // ← FIX: Support roleType
-      const designation = String(row['Designation'] || row['designation'] || '').trim() || null;  // ← FIX: Support designation
-      const managerRef = String(row['managerId'] || row['ManagerId'] || row['Manager Name'] || row['manager_name'] || row['ManagerName'] || row['manager_id'] || '').trim() || null;
-      
-      if (!empId || !name || !email || !dept) { 
-        results.errors.push({ row: rowNum, reason: 'Missing required field' }); 
-        results.skipped++; 
-        continue; 
-      }
-      if (!VALID_ROLES.includes(role)) { 
-        results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` }); 
-        results.skipped++; 
-        continue; 
-      }
-      
-      let managerId = null;
-      if (managerRef) {
-        const mgr = await User.findOne({ $or: [{ emp_id: managerRef }, { name: { $regex: new RegExp(`^${managerRef}$`, 'i') } }], is_active: 1 }).lean();
-        if (mgr) { 
-          managerId = mgr._id; 
-        } else { 
-          results.errors.push({ row: rowNum, reason: `Manager "${managerRef}" not found — created without manager` }); 
+      try {
+        const row = rows[i];
+        const empId = String(row['EmpId'] || row['empId'] || '').trim();
+        const name  = String(row['Name']  || row['name']  || '').trim();
+        const email = String(row['Email'] || row['email'] || '').trim().toLowerCase();
+        const password = String(row['Password'] || row['password'] || '').trim();
+        const role  = String(row['Role']  || row['role']  || 'employee').trim().toLowerCase();
+        const dept  = String(row['Department'] || row['department'] || '').trim();
+        const phone = String(row['Phone'] || row['phone'] || '').trim() || null;
+        const block    = String(row['assignedBlock']    || row['Block']    || row['block']    || '').trim() || null;
+        const district = String(row['assignedDistrict'] || row['District'] || row['district'] || '').trim() || null;
+        const roleType = String(row['RoleType'] || row['roleType'] || '').trim() || null;
+        const designation = String(row['Designation'] || row['designation'] || '').trim() || null;
+        // Accepts a manager EMP ID *or* a manager full name — matched below via $or
+        const managerRef = String(
+          row['managerId'] || row['ManagerId'] || row['Manager Name'] ||
+          row['manager_name'] || row['ManagerName'] || row['manager_id'] || ''
+        ).trim() || null;
+ 
+        if (!empId || !name || !email || !dept) {
+          results.errors.push({ row: rowNum, reason: 'Missing required field' });
+          results.skipped++;
+          continue;
         }
-      }
-      
-      const existing = await User.findOne({ $or: [{ emp_id: empId }, { email }] }).lean();
-      if (existing) {
-        const update = { 
-          name, 
-          email, 
-          role, 
-          department: dept, 
-          phone, 
-          manager_id: managerId || existing.manager_id || null, 
-          assigned_block: block, 
-          assigned_district: district,
-          role_type: roleType,           // ← FIX: Support update
-          designation: designation        // ← FIX: Support update
-        };
-        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
-        await User.findByIdAndUpdate(existing._id, { $set: update });
-        results.updated++;
-      } else {
-        if (!password || password.length < 6) { 
-          results.errors.push({ row: rowNum, reason: `Password required for "${empId}"` }); 
-          results.skipped++; 
-          continue; 
+        if (!VALID_ROLES.includes(role)) {
+          results.errors.push({ row: rowNum, reason: `Invalid role: ${role}` });
+          results.skipped++;
+          continue;
         }
-        await User.create({ 
-          _id: uuidv4(), 
-          emp_id: empId, 
-          name, 
-          email, 
-          password_hash: bcrypt.hashSync(password, 10), 
-          role, 
-          department: dept, 
-          manager_id: managerId || null, 
-          phone, 
-          assigned_block: block, 
-          assigned_district: district,
-          role_type: roleType,           // ← FIX: Support creation
-          designation: designation,       // ← FIX: Support creation
-          is_active: 1, 
-          email_verified: true, 
-          phone_verified: true 
+ 
+        // Manager can be supplied as emp_id OR name (case-insensitive)
+        let managerId = null;
+        if (managerRef) {
+          const mgr = await User.findOne({
+            $or: [{ emp_id: managerRef }, { name: { $regex: new RegExp(`^${managerRef}$`, 'i') } }],
+            is_active: 1,
+          }).lean();
+          if (mgr) {
+            managerId = mgr._id;
+          } else {
+            results.errors.push({ row: rowNum, reason: `Manager "${managerRef}" not found — created without manager` });
+          }
+        }
+ 
+        const existing = await User.findOne({ $or: [{ emp_id: empId }, { email }] }).lean();
+ 
+        // ── FIX: existing user → actually save the update, then move on ──
+        if (existing) {
+          const update = {
+            name,
+            email,
+            role,
+            department: dept,
+            phone,
+            manager_id: managerId || existing.manager_id || null,
+            assigned_block: block,
+            assigned_district: district,
+            role_type: roleType,
+            designation: designation,
+          };
+          await User.findByIdAndUpdate(existing._id, { $set: update });
+          results.updated++;
+          continue; // never fall through into create() for this row
+        }
+ 
+        // ── New user: mirrors manual POST /api/users exactly ──
+        const rawResetToken   = genToken();
+        const hashedResetTok  = hashToken(rawResetToken);
+        const rawVerifyToken  = genToken();
+        const hashedVerifyTok = hashToken(rawVerifyToken);
+        const tempPassword = (password && password.length >= 6) ? password : `Tmp@${crypto.randomBytes(8).toString('hex')}`;
+        const newId = uuidv4();
+ 
+        await User.create({
+          _id: newId, emp_id: empId, name, email,
+          password_hash: bcrypt.hashSync(tempPassword, 12),
+          role, department: dept || null, manager_id: managerId || null, phone,
+          assigned_block: block, assigned_district: district,
+          role_type: roleType, designation: designation,
+          is_active: 1,
+          email_verified: false,
+          email_verify_token: hashedVerifyTok,
+          email_verify_expires: new Date(Date.now() + 86400000),
+          pwd_reset_token: hashedResetTok,
+          pwd_reset_expires: new Date(Date.now() + 86400000),
+          phone_verified: true,
         });
+ 
+        // ── Same Firebase account creation as manual create ──
+        try {
+          await createFirebaseUser(email, tempPassword);
+          console.log(`[Firebase] User created: ${email}`);
+        } catch (fbErr) {
+          console.error(`[Firebase] Failed to create user ${email}:`, fbErr.message);
+        }
+ 
+        const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
+ 
+        // ── FIX: await the send so a failure is caught and reported ──
+        // (previously fire-and-forget with only a console.error — the admin
+        // had no way of knowing mail delivery failed for a given row)
+        try {
+          await sendMail(
+            email,
+            '[BRP AMS] Your Account is Ready — Set Your Password',
+            welcomeEmailHtml(name, empId, role, resetUrl)
+          );
+        } catch (mailErr) {
+          console.error(`[BulkUpload] Email failed for ${email}:`, mailErr.message);
+          results.errors.push({ row: rowNum, reason: `User created but email failed to send: ${mailErr.message}` });
+        }
+ 
+        // ── Small delay between sends so we don't hammer the SMTP relay ──
+        // Many providers (including free-tier SMTP) throttle or silently
+        // drop messages sent in a tight rapid-fire loop. 300ms is usually
+        // enough headroom; raise this if you're still seeing drops.
+        await new Promise(r => setTimeout(r, 300));
+ 
         results.created++;
+      } catch (rowErr) {
+        // A single bad row no longer aborts the whole upload
+        console.error(`[BulkUpload] Row ${rowNum} failed:`, rowErr.message);
+        results.errors.push({ row: rowNum, reason: rowErr.message || 'Unknown error' });
+        results.skipped++;
       }
     }
-    
-    res.json({ success: true, message: `Bulk upload complete — ${results.created} created, ${results.updated} updated, ${results.skipped} skipped`, data: results });
-  } catch (err) { 
-    console.error('Bulk upload error:', err); 
-    res.status(500).json({ success: false, message: 'Server error: ' + err.message }); 
+ 
+    res.json({
+      success: true,
+      message: `Bulk upload complete — ${results.created} created, ${results.updated} updated, ${results.skipped} skipped`,
+      data: results,
+    });
+  } catch (err) {
+    console.error('Bulk upload error:', err);
+    res.status(500).json({ success: false, message: 'Server error: ' + err.message });
   }
 });
+ 
 
 // ── POST /api/users/profile-photo ─────────────────────────────────────────
 router.post(

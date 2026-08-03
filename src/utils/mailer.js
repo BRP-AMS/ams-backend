@@ -94,12 +94,15 @@ console.log(`[Mailer] Primary mode: ${primaryMode.toUpperCase()}  |  from: ${raw
  * @param {object} options  - { type: 'VERIFY_EMAIL' | 'PASSWORD_RESET', password: '...' }
  */
 const sendMail = async (to, subject, html, options = {}) => {
+  const attempts = []; // collect what we tried + why each one failed, for a useful error if everything fails
+
   // ── Try Google Apps Script relay first (HTTPS, works on Render) ──
   if (GMAIL_RELAY_URL) {
     try {
       return await sendViaGmailRelay(to, subject, html);
     } catch (err) {
       console.error('[Email/GmailRelay] ❌ Failed:', err.message, '— trying fallback...');
+      attempts.push(`gmail_relay: ${err.message}`);
     }
   }
 
@@ -109,22 +112,37 @@ const sendMail = async (to, subject, html, options = {}) => {
       return await sendViaSMTP(to, subject, html);
     } catch (err) {
       console.error('[Email/SMTP] ❌ Failed:', err.message, '— trying fallback...');
+      attempts.push(`smtp: ${err.message}`);
     }
   }
 
   // ── Firebase fallback (password reset / verify only) ──
   if (FIREBASE_API_KEY) {
-    const type = options.type
-      || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
-          ? 'VERIFY_EMAIL'
-          : 'PASSWORD_RESET');
-    if (type === 'VERIFY_EMAIL') {
-      return sendVerificationEmail(to, options.password);
+    try {
+      const type = options.type
+        || (subject.toLowerCase().includes('verify') || subject.toLowerCase().includes('welcome')
+            ? 'VERIFY_EMAIL'
+            : 'PASSWORD_RESET');
+      if (type === 'VERIFY_EMAIL') {
+        return await sendVerificationEmail(to, options.password);
+      }
+      return await sendPasswordResetEmail(to);
+    } catch (err) {
+      console.error('[Email/Firebase] ❌ Failed:', err.message);
+      attempts.push(`firebase: ${err.message}`);
     }
-    return sendPasswordResetEmail(to);
   }
 
-  console.error('[Email] ⚠️  No email provider available! Skipping:', subject, '→', to);
+  // ── FIX: throw instead of silently swallowing ──
+  // Previously this branch just logged and returned undefined, so
+  // `await sendMail(...)` anywhere in the app (bulk-upload, manual create,
+  // password reset) could never detect or report a failed send — every
+  // call site thought it "succeeded" even when nothing was delivered.
+  const reason = attempts.length
+    ? attempts.join(' | ')
+    : 'No email provider configured (GMAIL_RELAY_URL / SMTP_HOST / FIREBASE_API_KEY all unset)';
+  console.error('[Email] ⚠️  All delivery methods failed. Skipping:', subject, '→', to, '|', reason);
+  throw new Error(reason);
 };
 
 module.exports = { sendMail, transporter, mode: primaryMode, sendPasswordResetEmail, sendVerificationEmail, createFirebaseUser };

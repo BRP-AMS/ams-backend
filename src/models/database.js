@@ -349,7 +349,29 @@ const customOptionSchema = new mongoose.Schema({
 }, { timestamps: true });
 customOptionSchema.index({ category: 1, value: 1 }, { unique: true });
 const CustomOption = mongoose.model('CustomOption', customOptionSchema);
+const customBlockSchema = new mongoose.Schema({
+  district:   { type: String, required: true },
+  block_name: { type: String, required: true },
+  added_by:   { type: String, ref: 'User', default: null },
+}, { timestamps: true });
+customBlockSchema.index({ district: 1, block_name: 1 }, { unique: true });
+const CustomBlock = mongoose.model('CustomBlock', customBlockSchema);
 
+// ── Department Master ──────────────────────────────────────────────────────
+const customDepartmentSchema = new mongoose.Schema({
+  name:     { type: String, required: true, unique: true },
+  added_by: { type: String, ref: 'User', default: null },
+}, { timestamps: { createdAt: 'created_at', updatedAt: false } });
+
+const CustomDepartment = mongoose.model('CustomDepartment', customDepartmentSchema);
+
+// ── Geocode Cache ─────────────────────────────────────────────────────────
+const geoCacheSchema = new mongoose.Schema({
+  key:     { type: String, unique: true, required: true }, // "lat2dp,lng2dp"
+  payload: { type: mongoose.Schema.Types.Mixed, required: true },
+}, { timestamps: { createdAt: 'created_at', updatedAt: false } });
+
+const GeoCache = mongoose.model('GeoCache', geoCacheSchema);
 // ── Connect ───────────────────────────────────────────────────────────────
 
 const connectionPromise = mongoose.connect(MONGO_URI, {
@@ -376,6 +398,10 @@ module.exports = {
    MsmeMaster,
    MsmeProposal,
   CustomOption,
+  CustomOption,
+  CustomBlock,
+  CustomDepartment,
+  GeoCache,
   connectionPromise,
   ActivitySchedule,
   ScheduleDocument,

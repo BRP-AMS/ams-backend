@@ -24,6 +24,40 @@ const PORT = process.env.PORT || 10000;
 
 app.set('trust proxy', 1);
 
+// ── CORS — must be FIRST, before helmet and everything else ───────────────
+// Raw middleware so CORS headers are stamped on EVERY response (including
+// error responses) before any other middleware can interfere.
+const ALLOWED_ORIGINS = [
+  'https://monitermark.brptripura.com',
+  'https://mm-service.brptripura.com',
+  process.env.FRONTEND_URL,
+  process.env.BACKEND_URL,
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://103.44.0.48:3000',
+  'http://erp.brptripura.com',
+].filter(Boolean);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  } else if (!origin) {
+    // same-origin or non-browser client — allow
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-register-secret');
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24h preflight cache
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end(); // short-circuit preflight here, always
+  }
+  next();
+});
+
 // ── Security & Middleware ─────────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -49,22 +83,6 @@ app.use(helmet({
 }));
 
 const isProd = process.env.NODE_ENV === 'production';
-const ALLOWED_ORIGINS = [
-  'https://monitermark.brptripura.com',
-  'https://mm-service.brptripura.com',
-  process.env.FRONTEND_URL,
-  process.env.BACKEND_URL,
-  'http://localhost:3000', 'http://localhost:3001', 'http://103.44.0.48:3000','http://erp.brptripura.com'
-].filter(Boolean);
-const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-};
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions)); // explicit preflight handler for all routes
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');

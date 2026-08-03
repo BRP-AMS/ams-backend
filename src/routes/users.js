@@ -335,7 +335,10 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
     const crypto  = require('crypto');
     const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
 
-    const users = await User.find({ is_active: 1, role: { $nin: ['super_admin'] } }).select('_id name email emp_id role').lean();
+    const users = await User.find({ is_active: 1, role: { $nin: ['super_admin', 'admin'] } }).select('_id name email emp_id role').lean();
+
+    // Respond immediately — bulk send runs in background to avoid Render's 30s request timeout
+    res.json({ success: true, message: `Sending password reset emails to ${users.length} users in background (link expires in ${expiryLabel}). Check server logs for results.` });
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     let sent = 0, failed = 0;
@@ -369,14 +372,14 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
   <p style="margin:0;color:#94a3b8;font-size:12px;">Do not reply to this email · BRP AMS Automated System</p>
 </td></tr></table></td></tr></table></body></html>`);
         sent++;
-        await sleep(400); // avoid Gmail SMTP rate-limit on bulk sends
+        await sleep(400);
       } catch (e) {
         console.error(`[ResetAll] Failed for ${target.email}:`, e.message);
         failed++;
         await sleep(400);
       }
     }
-    res.json({ success: true, message: `Password reset emails sent to ${sent} users${failed ? `, ${failed} failed` : ''} (link expires in ${expiryLabel})` });
+    console.log(`[ResetAll] Done — sent: ${sent}, failed: ${failed}, expiry: ${expiryLabel}`);
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error: ' + err.message });

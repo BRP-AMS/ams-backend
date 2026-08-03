@@ -194,6 +194,66 @@ router.get('/bulk-upload/template', authenticate, authorize('super_admin', 'admi
   }
 });
 
+// ── GET /api/users/export-reset-links ────────────────────────────────────
+// Generates fresh 24-hour reset links for all active employees/managers/HR
+// and returns an Excel file — no SMTP required, admin shares links directly.
+router.get('/export-reset-links', authenticate, authorize('super_admin', 'admin'), async (req, res) => {
+  try {
+    const crypto   = require('crypto');
+    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const users    = await User.find({ is_active: 1, role: { $nin: ['super_admin', 'admin'] } })
+                               .select('_id name email emp_id role assigned_block assigned_district')
+                               .sort({ name: 1 })
+                               .lean();
+
+    const rows = [];
+    for (const u of users) {
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const hashTok  = crypto.createHash('sha256').update(rawToken).digest('hex');
+      await User.findByIdAndUpdate(u._id, {
+        $set: { pwd_reset_token: hashTok, pwd_reset_expires: new Date(Date.now() + 24 * 60 * 60 * 1000) }
+      });
+      rows.push({
+        name:     u.name,
+        emp_id:   u.emp_id,
+        email:    u.email,
+        role:     u.role,
+        block:    u.assigned_block    || '',
+        district: u.assigned_district || '',
+        reset_link: `${FRONTEND}/reset-password?token=${rawToken}`,
+      });
+    }
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Reset Links');
+    ws.columns = [
+      { header: 'Name',        key: 'name',       width: 28 },
+      { header: 'Emp ID',      key: 'emp_id',     width: 14 },
+      { header: 'Email',       key: 'email',      width: 32 },
+      { header: 'Role',        key: 'role',       width: 12 },
+      { header: 'Block',       key: 'block',      width: 20 },
+      { header: 'District',    key: 'district',   width: 18 },
+      { header: 'Reset Link (valid 24 hrs)', key: 'reset_link', width: 80 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    rows.forEach(r => ws.addRow(r));
+    ws.getColumn('reset_link').eachCell((cell, rowNum) => {
+      if (rowNum === 1) return;
+      cell.value = { text: 'Click to reset', hyperlink: cell.value };
+      cell.font  = { color: { argb: 'FF0563C1' }, underline: true };
+    });
+
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="reset-links-${Date.now()}.xlsx"`);
+    res.send(buf);
+    console.log(`[ExportResetLinks] Generated ${rows.length} links by ${req.user.emp_id}`);
+  } catch (err) {
+    console.error('[ExportResetLinks]', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ── GET /api/users/:id ────────────────────────────────────────────────────
 // Includes scan_papers array — used by ReportsPage to show employee scans
 router.get('/:id', authenticate, async (req, res) => {
@@ -322,70 +382,6 @@ router.post('/', authenticate, authorize('admin', 'super_admin'), [
   } catch (err) { 
     console.error(err); 
     res.status(500).json({ success: false, message: 'Server error' }); 
-  }
-});
-
-// ── GET /api/users/export-reset-links ────────────────────────────────────
-// Generates fresh 24-hour reset links for all active employees/managers/HR
-// and returns an Excel file — no SMTP required, admin shares links directly.
-router.get('/export-reset-links', authenticate, authorize('super_admin', 'admin'), async (req, res) => {
-  try {
-    const crypto   = require('crypto');
-    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
-    const users    = await User.find({ is_active: 1, role: { $nin: ['super_admin', 'admin'] } })
-                               .select('_id name email emp_id role assigned_block assigned_district')
-                               .sort({ name: 1 })
-                               .lean();
-
-    // Generate fresh 24h tokens for every user in one pass
-    const rows = [];
-    for (const u of users) {
-      const rawToken = crypto.randomBytes(32).toString('hex');
-      const hashTok  = crypto.createHash('sha256').update(rawToken).digest('hex');
-      await User.findByIdAndUpdate(u._id, {
-        $set: { pwd_reset_token: hashTok, pwd_reset_expires: new Date(Date.now() + 24 * 60 * 60 * 1000) }
-      });
-      rows.push({
-        name:     u.name,
-        emp_id:   u.emp_id,
-        email:    u.email,
-        role:     u.role,
-        block:    u.assigned_block    || '',
-        district: u.assigned_district || '',
-        reset_link: `${FRONTEND}/reset-password?token=${rawToken}`,
-      });
-    }
-
-    // Build Excel workbook
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Reset Links');
-    ws.columns = [
-      { header: 'Name',        key: 'name',       width: 28 },
-      { header: 'Emp ID',      key: 'emp_id',     width: 14 },
-      { header: 'Email',       key: 'email',      width: 32 },
-      { header: 'Role',        key: 'role',       width: 12 },
-      { header: 'Block',       key: 'block',      width: 20 },
-      { header: 'District',    key: 'district',   width: 18 },
-      { header: 'Reset Link (valid 24 hrs)', key: 'reset_link', width: 80 },
-    ];
-    ws.getRow(1).font = { bold: true };
-    rows.forEach(r => ws.addRow(r));
-
-    // Make the reset link column clickable
-    ws.getColumn('reset_link').eachCell((cell, rowNum) => {
-      if (rowNum === 1) return;
-      cell.value = { text: 'Click to reset', hyperlink: cell.value };
-      cell.font  = { color: { argb: 'FF0563C1' }, underline: true };
-    });
-
-    const buf = await wb.xlsx.writeBuffer();
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="reset-links-${Date.now()}.xlsx"`);
-    res.send(buf);
-    console.log(`[ExportResetLinks] Generated ${rows.length} links by ${req.user.emp_id}`);
-  } catch (err) {
-    console.error('[ExportResetLinks]', err.message);
-    res.status(500).json({ success: false, message: err.message });
   }
 });
 

@@ -64,7 +64,7 @@ const corsOptions = {
   credentials: true,
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // explicit preflight handler for all routes
+app.options(/.*/, cors(corsOptions)); // explicit preflight handler for all routes
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');

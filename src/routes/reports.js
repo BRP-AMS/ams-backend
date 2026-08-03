@@ -50,7 +50,7 @@ const TRIPURA_BLOCKS = [
   'Ramchandraghat','Rupaichari','Sabroom','Salema','Sonamura','Surma','Teliamura',
 ];
 const TRIPURA_DISTRICTS = [
-  'Dhalai','Gomati','Khowai','North Tripura','Sepahijala',
+  'Dhalai','Gomati','Khowai','North Tripura','Sipahijala',
   'South Tripura','Unakoti','West Tripura',
 ];
 const ALL_TRIPURA = [...TRIPURA_BLOCKS, ...TRIPURA_DISTRICTS, 'Tripura'];

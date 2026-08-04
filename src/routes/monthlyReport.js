@@ -3,7 +3,7 @@ const router     = express.Router();
 const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { authenticate: protect } = require('../middleware/auth');
-const { MonthlyReport } =require('../models/database');
+const { User,MonthlyReport } =require('../models/database');
 const { employeeFolderLabel } = require('../utils/folderlabel');
 
 cloudinary.config({
@@ -28,11 +28,40 @@ const uploadToCloudinary = (buffer, options) =>
   });
 
 // ── GET /api/monthly-report — current user's last 3 months ──────────────
+// router.get('/', protect, async (req, res) => {
+//   try {
+//     const reports = await MonthlyReport.find({ user_id: req.user.id })
+//       .sort({ month_key: -1 })
+//       .limit(3);
+//     res.json({ success: true, data: reports });
+//   } catch (err) {
+//     res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+// ── GET /api/monthly-report — own reports, or another user's (role-gated) ──
 router.get('/', protect, async (req, res) => {
   try {
-    const reports = await MonthlyReport.find({ user_id: req.user.id })
-      .sort({ month_key: -1 })
-      .limit(3);
+    const { user_id } = req.query;
+    let targetUserId = req.user.id;
+    let limit = 3; // default: employee's own recent-3 view
+
+    if (user_id && user_id !== req.user.id) {
+      if (req.user.role === 'employee') {
+        return res.status(403).json({ success: false, message: 'Forbidden' });
+      }
+      if (req.user.role === 'manager') {
+        const member = await User.findOne({ _id: user_id, manager_id: req.user.id });
+        if (!member) return res.status(403).json({ success: false, message: 'Not your team member' });
+      }
+      // admin / hr / super_admin: no extra check — can view anyone
+      targetUserId = user_id;
+      limit = 0; // no cap when viewing someone else's full history
+    }
+
+    let query = MonthlyReport.find({ user_id: targetUserId }).sort({ month_key: -1 });
+    if (limit) query = query.limit(limit);
+    const reports = await query;
+
     res.json({ success: true, data: reports });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

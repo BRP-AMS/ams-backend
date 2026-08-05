@@ -284,9 +284,91 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'super_a
         assigned_block:    { $arrayElemAt: ['$emp.assigned_block',    0] },
       }},
       { $project: { emp: 0 } },
-      { $sort: { date: -1, created_at: -1 } },
+      { $sort: { emp_code: 1, date: 1 } },
       { $limit: 5000 },
     ]);
+
+    // ── Group records by employee (emp_code ASC already from sort) ──────────
+    const empGroups = [];
+    const empIndex  = new Map();
+    for (const r of records) {
+      const key = r.emp_code || String(r.emp_id);
+      if (!empIndex.has(key)) {
+        const g = { info: r, rows: [] };
+        empGroups.push(g);
+        empIndex.set(key, g);
+      }
+      empIndex.get(key).rows.push(r);
+    }
+
+    // ── Total-time helpers ───────────────────────────────────────────────────
+    const calcTotalMins = (checkin, checkout) => {
+      if (!checkin || !checkout) return 0;
+      try {
+        const [ch, cm] = checkin.split(':').map(Number);
+        const [oh, om] = checkout.split(':').map(Number);
+        return Math.max(0, (oh * 60 + om) - (ch * 60 + cm));
+      } catch { return 0; }
+    };
+
+    const calcTotalTime = (checkin, checkout) => {
+      const mins = calcTotalMins(checkin, checkout);
+      if (!mins) return '';
+      const h = Math.floor(mins / 60), m = mins % 60;
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    };
+
+    // Color thresholds matching checkout rules (attendance.js)
+    // >= 9h → green (ideal)  |  >= 6h → teal (full day)
+    // >= 4h → amber (half day)  |  < 4h → red (emergency)
+    const timeColor = (mins) => {
+      if (!mins) return null;
+      const h = mins / 60;
+      if (h >= 9) return { pdf: '#059669', xl: 'FF059669' }; // green
+      if (h >= 6) return { pdf: '#0D9488', xl: 'FF0D9488' }; // teal  — full day
+      if (h >= 4) return { pdf: '#D97706', xl: 'FFD97706' }; // amber — half day
+      return            { pdf: '#DC2626', xl: 'FFDC2626' }; // red   — emergency
+    };
+
+    // ── Per-employee attendance summary ──────────────────────────────────────
+    const calcSummary = (rows) => {
+      const s = {
+        total: rows.length,
+        working: 0,   // checked in, not a leave/holiday
+        holidays: 0,
+        leaves: 0,
+        missed: 0,    // missed checkout (blocked)
+        absent: 0,    // no checkin, no leave, no holiday
+        approved: 0,
+        pending: 0,
+        rejected: 0,
+        leaveTypes: {},
+      };
+      rows.forEach(r => {
+        const isMissed  = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
+        const isHoliday = (r.duty_type || '').toLowerCase().includes('holiday');
+        const isLeave   = r.duty_type === 'Leave' || !!r.leave_type;
+
+        if (isMissed)        s.missed++;
+        if (isHoliday)       s.holidays++;
+        else if (isLeave)  { s.leaves++; const lt = (r.leave_type || 'Leave').trim(); s.leaveTypes[lt] = (s.leaveTypes[lt] || 0) + 1; }
+        else if (r.checkin_time) s.working++;
+        else                 s.absent++;
+
+        if (r.status === 'Approved')       s.approved++;
+        else if (r.status === 'Pending')   s.pending++;
+        else if (r.status === 'Rejected')  s.rejected++;
+      });
+      return s;
+    };
+
+    const fmtLeaveBreakdown = (leaveTypes) => {
+      const parts = Object.entries(leaveTypes).map(([k, v]) => `${k}:${v}`).join(', ');
+      return parts ? ` (${parts})` : '';
+    };
+
+    const summaryLine = (s) =>
+      `Total: ${s.total} days  |  Working: ${s.working}  |  Holidays: ${s.holidays}  |  Leaves: ${s.leaves}${fmtLeaveBreakdown(s.leaveTypes)}  |  Missed Checkout: ${s.missed}  |  Absent: ${s.absent}  ||  Approved: ${s.approved}  Pending: ${s.pending}  Rejected: ${s.rejected}`;
 
     const tag = [status || 'All', startDate, endDate].filter(Boolean).join('_');
 
@@ -299,145 +381,363 @@ router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'super_a
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
 
-      const PAGE_W = 841.89, MARGIN = 24;
-      const NAVY = '#1E3A5F', NAVY_H = '#152C47', ALT_BG = '#EDF2F7';
-      const WHITE = '#FFFFFF', BORDER = '#CBD5E1', TEXT_D = '#0F172A', TEXT_M = '#475569';
+      const PAGE_W = 841.89, PAGE_H = 595.28, MARGIN = 24;
+      const NAVY   = '#1E3A5F', NAVY_H = '#152C47', NAVY_EMP = '#2D5A8E';
+      const SUM_BG = '#0F4C2A', SUM_FG = '#DCFCE7';
+      const SUB_BG = '#E8EFF7', ALT_BG = '#F4F7FB';
+      const LEAVE_APR = '#DCFCE7'; // green  — approved leave
+      const LEAVE_PND = '#FEF9C3'; // yellow — applied/pending
+      const LEAVE_REJ = '#FEE2E2'; // red    — rejected
+      const WHITE  = '#FFFFFF', BORDER = '#CBD5E1', TEXT_D = '#0F172A';
 
-      // cols: Sl, Date, Emp Code, Name, Designation, District, Block, Check-In, Check-Out, Hours, Status
-      const cols  = [28, 64, 58, 110, 82, 82, 88, 62, 64, 44, 80];
-      const heads = ['Sl', 'Date', 'Emp ID', 'Name', 'Designation', 'District', 'Block', 'Check-In', 'Check-Out', 'Hrs', 'Status'];
+      const cols  = [80, 68, 68, 60, 90, 90];
+      const TOTAL_COL = cols.length;
+      const heads = ['Date', 'Check-In', 'Check-Out', 'Total Time', 'Duty Type', 'Leave Type'];
       const tableW = cols.reduce((s, c) => s + c, 0);
-      const ROW_H = 18, HEAD_H = 24;
+      const ROW_H = 16, SUB_H = 18, EMP_H = 22, SUM_H = 32, BANNER_H = 50;
 
       const generatedDate = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
 
-      // Banner
-      doc.rect(0, 0, PAGE_W, 52).fill(NAVY_H);
-      doc.fillColor(WHITE).fontSize(14).font('Helvetica-Bold')
+      doc.rect(0, 0, PAGE_W, BANNER_H).fill(NAVY_H);
+      doc.fillColor(WHITE).fontSize(13).font('Helvetica-Bold')
         .text('BRP — Attendance Queue Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
-      doc.fontSize(8).font('Helvetica').fillColor('#BAD3ED')
-        .text(`Filter: ${status || 'All'}  ·  ${startDate || ''} ${startDate && endDate ? '→' : ''} ${endDate || ''}  ·  ${records.length} records  ·  Generated: ${generatedDate}`, MARGIN, 32, { width: PAGE_W - MARGIN * 2, align: 'center' });
+      doc.fontSize(7.5).font('Helvetica').fillColor('#BAD3ED')
+        .text(
+          `Filter: ${status || 'All'}  ·  Period: ${startDate || 'All'} → ${endDate || 'All'}  ·  ${empGroups.length} employee(s)  ·  Generated: ${generatedDate}`,
+          MARGIN, 32, { width: PAGE_W - MARGIN * 2, align: 'center' }
+        );
 
-      let y = 60;
+      let y = BANNER_H + 8;
 
-      const drawHeader = (yPos) => {
-        doc.rect(MARGIN, yPos, tableW, HEAD_H).fill(NAVY);
+      const ensureSpace = (needed) => {
+        if (y + needed > PAGE_H - 20) {
+          doc.addPage({ size: 'A4', layout: 'landscape', margin: 0 });
+          y = 16;
+        }
+      };
+
+      const drawSubHeader = (yPos) => {
+        doc.rect(MARGIN, yPos, tableW, SUB_H).fill(SUB_BG);
         let x = MARGIN;
-        doc.fillColor(WHITE).fontSize(7).font('Helvetica-Bold');
+        doc.fillColor(NAVY).fontSize(7).font('Helvetica-Bold');
         heads.forEach((h, i) => {
-          doc.text(h, x + 3, yPos + 8, { width: cols[i] - 5, lineBreak: false });
+          doc.text(h, x + 4, yPos + 5, { width: cols[i] - 6, lineBreak: false });
           x += cols[i];
         });
       };
 
       const drawRowBorders = (yPos, rh) => {
-        doc.moveTo(MARGIN, yPos + rh).lineTo(MARGIN + tableW, yPos + rh).strokeColor(BORDER).lineWidth(0.3).stroke();
+        doc.moveTo(MARGIN, yPos + rh).lineTo(MARGIN + tableW, yPos + rh)
+          .strokeColor(BORDER).lineWidth(0.25).stroke();
         let vx = MARGIN;
-        cols.forEach(w => {
+        for (let i = 0; i <= TOTAL_COL; i++) {
           doc.moveTo(vx, yPos).lineTo(vx, yPos + rh).strokeColor(BORDER).lineWidth(0.2).stroke();
-          vx += w;
-        });
-        doc.moveTo(vx, yPos).lineTo(vx, yPos + rh).strokeColor(BORDER).lineWidth(0.2).stroke();
+          if (i < TOTAL_COL) vx += cols[i];
+        }
       };
 
-      drawHeader(y);
-      y += HEAD_H;
+      empGroups.forEach(({ info, rows }, gi) => {
+        const sum = calcSummary(rows);
+        ensureSpace(EMP_H + SUB_H + ROW_H + SUM_H);
+        if (gi > 0) y += 8;
 
-      records.forEach((r, i) => {
-        if (y + ROW_H > 565) { // near bottom of page
-          doc.addPage({ size: 'A4', layout: 'landscape', margin: 0 });
-          y = 16;
-          drawHeader(y);
-          y += HEAD_H;
-        }
-        const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
-        const rowStatus = isMissed ? 'Missed Checkout' : (r.status || '');
-        const cells = [
-          String(i + 1),
-          r.date || '',
-          r.emp_code || '',
-          r.emp_name || '',
-          r.designation || '',
-          r.assigned_district || '',
-          r.assigned_block || '',
-          r.checkin_time || '',
-          r.checkout_time || (isMissed ? 'Missed' : ''),
-          r.worked_hours != null ? r.worked_hours.toFixed(1) : '',
-          rowStatus,
-        ];
-        if (i % 2 === 1) doc.rect(MARGIN, y, tableW, ROW_H).fill(ALT_BG);
-        const statusColor = rowStatus === 'Approved' ? '#059669' : rowStatus === 'Rejected' ? '#DC2626' : rowStatus === 'Missed Checkout' ? '#B45309' : TEXT_M;
-        let x = MARGIN;
-        doc.fontSize(7).font('Helvetica');
-        cells.forEach((cell, ci) => {
-          const color = ci === cells.length - 1 ? statusColor : TEXT_D;
-          doc.fillColor(color).text(String(cell), x + 3, y + 5, { width: cols[ci] - 5, lineBreak: false, ellipsis: true });
-          x += cols[ci];
+        // Employee header banner
+        const empLabel = [info.emp_code || '—', info.emp_name || '—', info.designation || '', info.assigned_district || '', info.assigned_block || ''].filter(Boolean).join('  ·  ');
+        doc.rect(MARGIN, y, tableW, EMP_H).fill(NAVY_EMP);
+        doc.fillColor(WHITE).fontSize(8.5).font('Helvetica-Bold')
+          .text(empLabel, MARGIN + 8, y + 7, { width: tableW - 12, lineBreak: false, ellipsis: true });
+        doc.fillColor('#BAD3ED').fontSize(7).font('Helvetica')
+          .text(`${rows.length} record${rows.length !== 1 ? 's' : ''}`, MARGIN + tableW - 64, y + 8, { width: 56, align: 'right', lineBreak: false });
+        y += EMP_H;
+
+        // Column sub-header
+        drawSubHeader(y);
+        y += SUB_H;
+
+        // Data rows
+        rows.forEach((r, ri) => {
+          ensureSpace(ROW_H + 2);
+          const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
+          const totalTime = calcTotalTime(r.checkin_time, r.checkout_time);
+          const cells = [
+            r.date || '',
+            r.checkin_time || '—',
+            r.checkout_time || (isMissed ? 'Missed' : '—'),
+            totalTime,
+            r.duty_type || '',
+            r.leave_type || '',
+          ];
+          const isLeave = r.duty_type === 'Leave' || !!r.leave_type;
+          const lvStatus = r.leave_status || r.status || '';
+          const rowBg = isLeave
+            ? (lvStatus === 'Approved' ? LEAVE_APR : lvStatus === 'Rejected' ? LEAVE_REJ : LEAVE_PND)
+            : (ri % 2 === 1 ? ALT_BG : null);
+          if (rowBg) doc.rect(MARGIN, y, tableW, ROW_H).fill(rowBg);
+          let x = MARGIN;
+          doc.fontSize(7).font('Helvetica');
+          const ttPdfColor = timeColor(calcTotalMins(r.checkin_time, r.checkout_time))?.pdf;
+          cells.forEach((cell, ci) => {
+            const color = ci === 3 && ttPdfColor ? ttPdfColor
+                        : ci === 5 && cell       ? '#7C3AED'   // leave type → purple
+                        : TEXT_D;
+            doc.fillColor(color).text(String(cell), x + 4, y + 4, { width: cols[ci] - 6, lineBreak: false, ellipsis: true });
+            x += cols[ci];
+          });
+          drawRowBorders(y, ROW_H);
+          y += ROW_H;
         });
-        drawRowBorders(y, ROW_H);
-        y += ROW_H;
+
+        // Outer border around data
+        doc.rect(MARGIN, y - (SUB_H + rows.length * ROW_H), tableW, SUB_H + rows.length * ROW_H).stroke(BORDER);
+
+        // ── Per-employee summary band ──────────────────────────────────────
+        ensureSpace(SUM_H);
+        doc.rect(MARGIN, y, tableW, SUM_H).fill(SUM_BG);
+
+        // Row 1: Working / Holidays / Leaves / Missed / Absent
+        const leaveDetail = `${sum.leaves}${fmtLeaveBreakdown(sum.leaveTypes)}`;
+        const line1 = `Working Days: ${sum.working}     Holidays: ${sum.holidays}     Leaves: ${leaveDetail}     Missed Checkout: ${sum.missed}     Absent: ${sum.absent}     Total Days: ${sum.total}`;
+        doc.fillColor(SUM_FG).fontSize(7.5).font('Helvetica-Bold')
+          .text(line1, MARGIN + 8, y + 5, { width: tableW - 14, lineBreak: false, ellipsis: true });
+
+        // Row 2: Approval status breakdown
+        const line2 = `Approved: ${sum.approved}     Pending: ${sum.pending}     Rejected: ${sum.rejected}`;
+        doc.fillColor('#86EFAC').fontSize(7).font('Helvetica')
+          .text(line2, MARGIN + 8, y + 18, { width: tableW - 14, lineBreak: false });
+
+        y += SUM_H;
       });
 
-      // outer border
-      doc.rect(MARGIN, 60, tableW, y - 60).stroke(BORDER);
+      // ── Grand-total summary table at end of PDF ──────────────────────────
+      ensureSpace(30 + empGroups.length * 16 + 30);
+      y += 16;
+      doc.rect(MARGIN, y, tableW, 22).fill(NAVY_H);
+      doc.fillColor(WHITE).fontSize(9).font('Helvetica-Bold')
+        .text('Summary — All Employees', MARGIN + 8, y + 6, { width: tableW - 14, lineBreak: false });
+      y += 22;
+
+      // Grand-total sub-header
+      const gtCols  = [60, 110, 55, 55, 55, 55, 55, 55, 55, 55];
+      const gtHeads = ['Emp ID', 'Name', 'Total', 'Working', 'Holidays', 'Leaves', 'Missed', 'Absent', 'Approved', 'Pend/Rej'];
+      const gtW = gtCols.reduce((s, c) => s + c, 0);
+
+      const drawGtHdr = (yPos) => {
+        doc.rect(MARGIN, yPos, gtW, 18).fill(SUB_BG);
+        let x = MARGIN;
+        doc.fillColor(NAVY).fontSize(7).font('Helvetica-Bold');
+        gtHeads.forEach((h, i) => {
+          doc.text(h, x + 3, yPos + 5, { width: gtCols[i] - 4, lineBreak: false });
+          x += gtCols[i];
+        });
+      };
+      drawGtHdr(y);
+      y += 18;
+
+      empGroups.forEach(({ info, rows }, gi) => {
+        ensureSpace(16);
+        const s = calcSummary(rows);
+        const leaveStr = `${s.leaves}${fmtLeaveBreakdown(s.leaveTypes)}`;
+        const cells = [
+          info.emp_code || '', info.emp_name || '', String(s.total),
+          String(s.working), String(s.holidays), leaveStr,
+          String(s.missed), String(s.absent), String(s.approved),
+          `${s.pending}/${s.rejected}`,
+        ];
+        if (gi % 2 === 1) doc.rect(MARGIN, y, gtW, 16).fill(ALT_BG);
+        let x = MARGIN;
+        doc.fontSize(7).font('Helvetica').fillColor(TEXT_D);
+        cells.forEach((cell, ci) => {
+          doc.text(String(cell), x + 3, y + 4, { width: gtCols[ci] - 4, lineBreak: false, ellipsis: true });
+          x += gtCols[ci];
+        });
+        doc.moveTo(MARGIN, y + 16).lineTo(MARGIN + gtW, y + 16).strokeColor(BORDER).lineWidth(0.2).stroke();
+        y += 16;
+      });
+
+      // Grand totals row
+      const grand = empGroups.reduce((acc, { rows }) => {
+        const s = calcSummary(rows);
+        acc.total += s.total; acc.working += s.working; acc.holidays += s.holidays;
+        acc.leaves += s.leaves; acc.missed += s.missed; acc.absent += s.absent;
+        acc.approved += s.approved; acc.pending += s.pending; acc.rejected += s.rejected;
+        return acc;
+      }, { total:0, working:0, holidays:0, leaves:0, missed:0, absent:0, approved:0, pending:0, rejected:0 });
+
+      doc.rect(MARGIN, y, gtW, 18).fill('#1E3A5F');
+      const grandCells = ['TOTAL', `${empGroups.length} employees`, String(grand.total), String(grand.working), String(grand.holidays), String(grand.leaves), String(grand.missed), String(grand.absent), String(grand.approved), `${grand.pending}/${grand.rejected}`];
+      let gx = MARGIN;
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor(WHITE);
+      grandCells.forEach((cell, ci) => {
+        doc.text(String(cell), gx + 3, y + 5, { width: gtCols[ci] - 4, lineBreak: false, ellipsis: true });
+        gx += gtCols[ci];
+      });
 
       doc.end();
       return;
     }
 
-    // ── Excel export ────────────────────────────────────────────────────────
+    // ── Excel export (grouped by employee) ─────────────────────────────────
     const wb = new ExcelJS.Workbook();
     wb.creator = 'RAMP AMS';
-    const ws = wb.addWorksheet('Attendance Queue');
+    const ws  = wb.addWorksheet('Attendance Detail');
+    const wss = wb.addWorksheet('Summary');       // second sheet: cross-employee summary
 
-    ws.columns = [
-      { header: 'Sl No',        key: 'sl',           width: 7  },
-      { header: 'Date',         key: 'date',          width: 14 },
-      { header: 'Emp Code',     key: 'emp_code',      width: 12 },
-      { header: 'Name',         key: 'name',          width: 24 },
-      { header: 'Designation',  key: 'designation',   width: 16 },
-      { header: 'District',     key: 'district',      width: 16 },
-      { header: 'Block',        key: 'block',         width: 20 },
-      { header: 'Duty Type',    key: 'duty_type',     width: 14 },
-      { header: 'Check-In',     key: 'checkin',       width: 12 },
-      { header: 'Check-Out',    key: 'checkout',      width: 12 },
-      { header: 'Hours Worked', key: 'hours',         width: 14 },
-      { header: 'Leave Type',   key: 'leave_type',    width: 16 },
-      { header: 'Leave Status', key: 'leave_status',  width: 14 },
-      { header: 'Status',       key: 'status',        width: 18 },
-    ];
+    // ── Attendance Detail sheet ─────────────────────────────────────────────
+    ws.getColumn(1).width = 14; // Date
+    ws.getColumn(2).width = 13; // Check-In
+    ws.getColumn(3).width = 13; // Check-Out
+    ws.getColumn(4).width = 13; // Total Time
+    ws.getColumn(5).width = 16; // Duty Type
+    ws.getColumn(6).width = 18; // Leave Type
 
-    const hdr = ws.getRow(1);
-    hdr.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
-    hdr.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
-    hdr.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-    hdr.height    = 22;
+    const NCOLS = 6;
+    const FILL_EMP   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2D5A8E' } };
+    const FILL_SUBHD = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD0E4F7' } };
+    const FILL_SUM      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F4C2A' } };
+    const FILL_ALT      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4F7FB' } };
+    const FILL_WHT      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    const FILL_LV_APR   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } }; // green  — approved
+    const FILL_LV_PND   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF9C3' } }; // yellow — applied/pending
+    const FILL_LV_REJ   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } }; // red    — rejected
+    const THIN_BORDER = { style: 'thin', color: { argb: 'FFCBD5E1' } };
+    const CELL_BORDER = { top: THIN_BORDER, bottom: THIN_BORDER, left: THIN_BORDER, right: THIN_BORDER };
+    const FONT_WHITE  = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Calibri' };
+    const FONT_SUBHD  = { bold: true, color: { argb: 'FF1E3A5F' }, size: 9,  name: 'Calibri' };
+    const FONT_DATA   = { size: 9, name: 'Calibri' };
+    const FONT_SUM    = { bold: true, color: { argb: 'FFDCFCE7' }, size: 9, name: 'Calibri' };
 
-    records.forEach((r, i) => {
-      const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
-      const row = ws.addRow({
-        sl:          i + 1,
-        date:        r.date                   || '',
-        emp_code:    r.emp_code               || '',
-        name:        r.emp_name               || '',
-        designation: r.designation            || '',
-        district:    r.assigned_district      || '',
-        block:       r.assigned_block         || '',
-        duty_type:   r.duty_type              || '',
-        checkin:     r.checkin_time           || '',
-        checkout:    r.checkout_time || (isMissed ? 'Missed' : ''),
-        hours:       r.worked_hours != null ? Number(r.worked_hours.toFixed(2)) : '',
-        leave_type:  r.leave_type             || '',
-        leave_status: r.leave_status          || '',
-        status:      isMissed ? 'Missed Checkout' : (r.status || ''),
+    const styleRow = (row, fill, font, height = 15, hAlign = 'center') => {
+      row.height = height;
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.fill = fill; cell.font = font; cell.border = CELL_BORDER;
+        cell.alignment = { vertical: 'middle', horizontal: hAlign, wrapText: false };
       });
-      if (i % 2 === 1) {
-        row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F4F8' } };
-      }
+    };
+
+    const mergedCell = (row, fill, font, text, hAlign = 'left') => {
+      ws.mergeCells(row.number, 1, row.number, NCOLS);
+      const c = row.getCell(1);
+      c.value = text; c.fill = fill; c.font = font; c.border = CELL_BORDER;
+      c.alignment = { vertical: 'middle', horizontal: hAlign, wrapText: false };
+    };
+
+    empGroups.forEach(({ info, rows }, gi) => {
+      const sum = calcSummary(rows);
+
+      // Employee header (merged)
+      const empLabel = [info.emp_code || '', info.emp_name || '', info.designation || '', info.assigned_district || '', info.assigned_block || ''].filter(Boolean).join('   |   ');
+      const empRow = ws.addRow(['', '', '', '', '']);
+      empRow.height = 20;
+      mergedCell(empRow, FILL_EMP, FONT_WHITE, empLabel);
+
+      // Column sub-header
+      const subRow = ws.addRow(['Date', 'Check-In', 'Check-Out', 'Total Time', 'Duty Type', 'Leave Type']);
+      styleRow(subRow, FILL_SUBHD, FONT_SUBHD, 15);
+
+      // Data rows
+      rows.forEach((r, ri) => {
+        const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
+        const dataRow = ws.addRow([
+          r.date || '',
+          r.checkin_time || '',
+          r.checkout_time || (isMissed ? 'Missed' : ''),
+          calcTotalTime(r.checkin_time, r.checkout_time),
+          r.duty_type || '',
+          r.leave_type || '',
+        ]);
+        const isLeaveRow = r.duty_type === 'Leave' || !!r.leave_type;
+        const lvSt = r.leave_status || r.status || '';
+        const rowFill = isLeaveRow
+          ? (lvSt === 'Approved' ? FILL_LV_APR : lvSt === 'Rejected' ? FILL_LV_REJ : FILL_LV_PND)
+          : (ri % 2 === 0 ? FILL_WHT : FILL_ALT);
+        styleRow(dataRow, rowFill, FONT_DATA, 15);
+        // Override Total Time (col 4) font colour based on duration thresholds
+        const ttXlColor = timeColor(calcTotalMins(r.checkin_time, r.checkout_time))?.xl;
+        if (ttXlColor) {
+          const ttCell = dataRow.getCell(4);
+          ttCell.font = { ...FONT_DATA, color: { argb: ttXlColor }, bold: true };
+        }
+      });
+
+      // ── Per-employee summary row (2 lines in 2 rows, merged) ──
+      const leaveDetail = `${sum.leaves}${fmtLeaveBreakdown(sum.leaveTypes)}`;
+
+      const sumRow1 = ws.addRow(['', '', '', '', '']);
+      sumRow1.height = 16;
+      mergedCell(sumRow1, FILL_SUM, FONT_SUM,
+        `Working Days: ${sum.working}   |   Holidays: ${sum.holidays}   |   Leaves: ${leaveDetail}   |   Missed Checkout: ${sum.missed}   |   Absent: ${sum.absent}   |   Total: ${sum.total} days`);
+
+      const sumRow2 = ws.addRow(['', '', '', '', '']);
+      sumRow2.height = 15;
+      mergedCell(sumRow2, FILL_SUM, { ...FONT_SUM, bold: false, color: { argb: 'FF86EFAC' }, size: 8 },
+        `Approved: ${sum.approved}   |   Pending: ${sum.pending}   |   Rejected: ${sum.rejected}`);
+
+      if (gi < empGroups.length - 1) ws.addRow([]);
     });
 
-    ws.autoFilter = { from: 'A1', to: 'N1' };
-    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    ws.views = [{ state: 'normal' }];
+
+    // ── Summary sheet ───────────────────────────────────────────────────────
+    const SCOLS = 10;
+    [18, 22, 10, 12, 12, 16, 12, 10, 12, 14].forEach((w, i) => { wss.getColumn(i + 1).width = w; });
+
+    const FILL_SNAV  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+    const FILL_SHDR  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD0E4F7' } };
+    const FILL_SALT  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF4F7FB' } };
+    const FILL_SGRD  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F4C2A' } };
+    const CB = { top: THIN_BORDER, bottom: THIN_BORDER, left: THIN_BORDER, right: THIN_BORDER };
+    const sStyle = (cell, fill, font, hAlign = 'center') => {
+      cell.fill = fill; cell.font = font; cell.border = CB;
+      cell.alignment = { vertical: 'middle', horizontal: hAlign, wrapText: false };
+    };
+
+    // Title
+    const titleRow = wss.addRow(['Attendance Summary Report', ...Array(SCOLS - 1).fill('')]);
+    titleRow.height = 24;
+    wss.mergeCells(titleRow.number, 1, titleRow.number, SCOLS);
+    sStyle(titleRow.getCell(1), FILL_SNAV, { bold: true, color: { argb: 'FFFFFFFF' }, size: 13, name: 'Calibri' }, 'center');
+
+    // Period row
+    const periodRow = wss.addRow([`Filter: ${status || 'All'}   Period: ${startDate || 'All'} → ${endDate || 'All'}   Generated: ${new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}`, ...Array(SCOLS - 1).fill('')]);
+    periodRow.height = 16;
+    wss.mergeCells(periodRow.number, 1, periodRow.number, SCOLS);
+    sStyle(periodRow.getCell(1), { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EFF7' } }, { size: 9, color: { argb: 'FF1E3A5F' }, name: 'Calibri' }, 'center');
+
+    wss.addRow([]);
+
+    // Column headers
+    const sHdrRow = wss.addRow(['Emp ID', 'Name', 'Total Days', 'Working', 'Holidays', 'Leaves', 'Missed', 'Absent', 'Approved', 'Pend / Rej']);
+    sHdrRow.height = 16;
+    sHdrRow.eachCell((cell, col) => sStyle(cell, FILL_SHDR, { bold: true, color: { argb: 'FF1E3A5F' }, size: 9, name: 'Calibri' }));
+    wss.views = [{ state: 'frozen', ySplit: sHdrRow.number }];
+
+    // Per-employee rows
+    const grandTotals = { total:0, working:0, holidays:0, leaves:0, missed:0, absent:0, approved:0, pending:0, rejected:0 };
+    empGroups.forEach(({ info, rows }, gi) => {
+      const s = calcSummary(rows);
+      Object.keys(grandTotals).forEach(k => { grandTotals[k] += s[k]; });
+      const leaveStr = `${s.leaves}${fmtLeaveBreakdown(s.leaveTypes)}`;
+      const row = wss.addRow([
+        info.emp_code || '', info.emp_name || '',
+        s.total, s.working, s.holidays, leaveStr,
+        s.missed, s.absent, s.approved, `${s.pending} / ${s.rejected}`,
+      ]);
+      row.height = 15;
+      row.eachCell((cell, col) => {
+        const hAlign = col <= 2 ? 'left' : 'center';
+        sStyle(cell, gi % 2 === 0 ? FILL_WHT : FILL_SALT, FONT_DATA, hAlign);
+      });
+    });
+
+    // Grand-total row
+    const gtRow = wss.addRow([
+      'GRAND TOTAL', `${empGroups.length} employees`,
+      grandTotals.total, grandTotals.working, grandTotals.holidays,
+      grandTotals.leaves, grandTotals.missed, grandTotals.absent,
+      grandTotals.approved, `${grandTotals.pending} / ${grandTotals.rejected}`,
+    ]);
+    gtRow.height = 18;
+    gtRow.eachCell(cell => sStyle(cell, FILL_SGRD, FONT_SUM, 'center'));
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Queue_${tag}.xlsx"`);
@@ -484,7 +784,7 @@ router.get('/:id', authenticate, async (req, res) => {
 // POST /api/attendance/checkin
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/checkin', authenticate, authorize('employee'), upload.single('selfie'), [
-  body('dutyType').isIn(['Office Duty', 'On Duty']),
+  body('dutyType').isIn(['Office Duty', 'On Duty', 'On Duty Away']),
   body('latitude').isFloat(),
   body('longitude').isFloat(),
 ], async (req, res) => {

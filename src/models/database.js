@@ -74,7 +74,7 @@ const attendanceRecordSchema = new mongoose.Schema({
   emp_id:               { type: String, ref: 'User', required: true },
   date:                 { type: String, required: true },
   end_date:             { type: String, default: null },
-  duty_type:            { type: String, enum: ['Office Duty', 'On Duty', 'Leave'], required: true },
+  duty_type:            { type: String, enum: ['Office Duty', 'On Duty', 'On Duty Away', 'Leave'], required: true },
   sector:               { type: String, default: null },
   description:          { type: String, default: null },
   status:               { type: String, enum: ['Draft', 'Pending', 'Approved', 'Rejected'], default: 'Draft' },
@@ -353,6 +353,25 @@ const geoCacheSchema = new mongoose.Schema({
 
 const GeoCache = mongoose.model('GeoCache', geoCacheSchema);
 
+// ── ODA (On-Duty Away) Requests ────────────────────────────────────────────
+const odaRequestSchema = new mongoose.Schema({
+  _id:           { type: String },
+  emp_id:        { type: String, ref: 'User', required: true },
+  from_date:     { type: String, required: true },   // 'YYYY-MM-DD'
+  to_date:       { type: String, required: true },   // 'YYYY-MM-DD'
+  duty_type:     { type: String, enum: ['Training', 'Head Office Visit', 'District Meeting', 'Election Duty', 'Other'], required: true },
+  location_name: { type: String, required: true },
+  reason:        { type: String, required: true },
+  status:        { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  approved_by:   { type: String, ref: 'User', default: null },
+  admin_remark:  { type: String, default: null },
+  actioned_at:   { type: Date, default: null },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+odaRequestSchema.index({ emp_id: 1, status: 1 });
+odaRequestSchema.index({ from_date: 1, to_date: 1 });
+odaRequestSchema.index({ status: 1 });
+const ODARequest = mongoose.model('ODARequest', odaRequestSchema);
+
 // ── Connect ───────────────────────────────────────────────────────────────
 
 const connectionPromise = mongoose.connect(MONGO_URI, {
@@ -376,9 +395,8 @@ module.exports = {
   RevokedToken,
   Activity,
   ActivityDocument,
-   MsmeMaster,
+  MsmeMaster,
   MsmeProposal,
-
   CustomOption,
   CustomBlock,
   connectionPromise,
@@ -386,4 +404,5 @@ module.exports = {
   ScheduleDocument,
   GeoCache,
   CustomDepartment,
+  ODARequest,
 };

@@ -237,6 +237,219 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/attendance/export — Excel export for manager/admin queue
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/export', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const { status, startDate, endDate, empId, format = 'excel' } = req.query;
+    const match = {};
+
+    if (req.user.role === 'manager') {
+      if (empId) {
+        const emp = await User.findOne({ _id: empId, manager_id: req.user.id }).lean();
+        if (!emp) return res.status(403).json({ success: false, message: 'Not your team member' });
+        match.emp_id = empId;
+      } else {
+        const team = await User.find({ manager_id: req.user.id }).select('_id').lean();
+        match.emp_id = { $in: team.map(m => m._id) };
+      }
+    } else if (empId) {
+      match.emp_id = empId;
+    }
+
+    if (status) {
+      if (status === 'Pending') {
+        const todayIST = istDateStr();
+        match.$or = [
+          { status: 'Pending' },
+          { status: 'Draft', date: { $lt: todayIST }, checkin_time: { $ne: null }, checkout_time: null },
+        ];
+      } else {
+        match.status = status;
+      }
+    }
+    if (startDate) match.date = { ...match.date, $gte: startDate };
+    if (endDate)   match.date = { ...match.date, $lte: endDate };
+
+    const records = await AttendanceRecord.aggregate([
+      { $match: match },
+      { $lookup: { from: 'users', localField: 'emp_id', foreignField: '_id', as: 'emp' } },
+      { $addFields: {
+        emp_name:          { $arrayElemAt: ['$emp.name',              0] },
+        emp_code:          { $arrayElemAt: ['$emp.emp_id',            0] },
+        designation:       { $arrayElemAt: ['$emp.designation',       0] },
+        assigned_district: { $arrayElemAt: ['$emp.assigned_district', 0] },
+        assigned_block:    { $arrayElemAt: ['$emp.assigned_block',    0] },
+      }},
+      { $project: { emp: 0 } },
+      { $sort: { date: -1, created_at: -1 } },
+      { $limit: 5000 },
+    ]);
+
+    const tag = [status || 'All', startDate, endDate].filter(Boolean).join('_');
+
+    // ── PDF export ──────────────────────────────────────────────────────────
+    if (format === 'pdf') {
+      const PDFDocument = require('pdfkit');
+      const doc = new PDFDocument({ margin: 0, size: 'A4', layout: 'landscape' });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Queue_${tag}.pdf"`);
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+      doc.pipe(res);
+
+      const PAGE_W = 841.89, MARGIN = 24;
+      const NAVY = '#1E3A5F', NAVY_H = '#152C47', ALT_BG = '#EDF2F7';
+      const WHITE = '#FFFFFF', BORDER = '#CBD5E1', TEXT_D = '#0F172A', TEXT_M = '#475569';
+
+      // cols: Sl, Date, Emp Code, Name, Designation, District, Block, Check-In, Check-Out, Hours, Status
+      const cols  = [28, 64, 58, 110, 82, 82, 88, 62, 64, 44, 80];
+      const heads = ['Sl', 'Date', 'Emp ID', 'Name', 'Designation', 'District', 'Block', 'Check-In', 'Check-Out', 'Hrs', 'Status'];
+      const tableW = cols.reduce((s, c) => s + c, 0);
+      const ROW_H = 18, HEAD_H = 24;
+
+      const generatedDate = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' });
+
+      // Banner
+      doc.rect(0, 0, PAGE_W, 52).fill(NAVY_H);
+      doc.fillColor(WHITE).fontSize(14).font('Helvetica-Bold')
+        .text('BRP — Attendance Queue Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
+      doc.fontSize(8).font('Helvetica').fillColor('#BAD3ED')
+        .text(`Filter: ${status || 'All'}  ·  ${startDate || ''} ${startDate && endDate ? '→' : ''} ${endDate || ''}  ·  ${records.length} records  ·  Generated: ${generatedDate}`, MARGIN, 32, { width: PAGE_W - MARGIN * 2, align: 'center' });
+
+      let y = 60;
+
+      const drawHeader = (yPos) => {
+        doc.rect(MARGIN, yPos, tableW, HEAD_H).fill(NAVY);
+        let x = MARGIN;
+        doc.fillColor(WHITE).fontSize(7).font('Helvetica-Bold');
+        heads.forEach((h, i) => {
+          doc.text(h, x + 3, yPos + 8, { width: cols[i] - 5, lineBreak: false });
+          x += cols[i];
+        });
+      };
+
+      const drawRowBorders = (yPos, rh) => {
+        doc.moveTo(MARGIN, yPos + rh).lineTo(MARGIN + tableW, yPos + rh).strokeColor(BORDER).lineWidth(0.3).stroke();
+        let vx = MARGIN;
+        cols.forEach(w => {
+          doc.moveTo(vx, yPos).lineTo(vx, yPos + rh).strokeColor(BORDER).lineWidth(0.2).stroke();
+          vx += w;
+        });
+        doc.moveTo(vx, yPos).lineTo(vx, yPos + rh).strokeColor(BORDER).lineWidth(0.2).stroke();
+      };
+
+      drawHeader(y);
+      y += HEAD_H;
+
+      records.forEach((r, i) => {
+        if (y + ROW_H > 565) { // near bottom of page
+          doc.addPage({ size: 'A4', layout: 'landscape', margin: 0 });
+          y = 16;
+          drawHeader(y);
+          y += HEAD_H;
+        }
+        const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
+        const rowStatus = isMissed ? 'Missed Checkout' : (r.status || '');
+        const cells = [
+          String(i + 1),
+          r.date || '',
+          r.emp_code || '',
+          r.emp_name || '',
+          r.designation || '',
+          r.assigned_district || '',
+          r.assigned_block || '',
+          r.checkin_time || '',
+          r.checkout_time || (isMissed ? 'Missed' : ''),
+          r.worked_hours != null ? r.worked_hours.toFixed(1) : '',
+          rowStatus,
+        ];
+        if (i % 2 === 1) doc.rect(MARGIN, y, tableW, ROW_H).fill(ALT_BG);
+        const statusColor = rowStatus === 'Approved' ? '#059669' : rowStatus === 'Rejected' ? '#DC2626' : rowStatus === 'Missed Checkout' ? '#B45309' : TEXT_M;
+        let x = MARGIN;
+        doc.fontSize(7).font('Helvetica');
+        cells.forEach((cell, ci) => {
+          const color = ci === cells.length - 1 ? statusColor : TEXT_D;
+          doc.fillColor(color).text(String(cell), x + 3, y + 5, { width: cols[ci] - 5, lineBreak: false, ellipsis: true });
+          x += cols[ci];
+        });
+        drawRowBorders(y, ROW_H);
+        y += ROW_H;
+      });
+
+      // outer border
+      doc.rect(MARGIN, 60, tableW, y - 60).stroke(BORDER);
+
+      doc.end();
+      return;
+    }
+
+    // ── Excel export ────────────────────────────────────────────────────────
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'RAMP AMS';
+    const ws = wb.addWorksheet('Attendance Queue');
+
+    ws.columns = [
+      { header: 'Sl No',        key: 'sl',           width: 7  },
+      { header: 'Date',         key: 'date',          width: 14 },
+      { header: 'Emp Code',     key: 'emp_code',      width: 12 },
+      { header: 'Name',         key: 'name',          width: 24 },
+      { header: 'Designation',  key: 'designation',   width: 16 },
+      { header: 'District',     key: 'district',      width: 16 },
+      { header: 'Block',        key: 'block',         width: 20 },
+      { header: 'Duty Type',    key: 'duty_type',     width: 14 },
+      { header: 'Check-In',     key: 'checkin',       width: 12 },
+      { header: 'Check-Out',    key: 'checkout',      width: 12 },
+      { header: 'Hours Worked', key: 'hours',         width: 14 },
+      { header: 'Leave Type',   key: 'leave_type',    width: 16 },
+      { header: 'Leave Status', key: 'leave_status',  width: 14 },
+      { header: 'Status',       key: 'status',        width: 18 },
+    ];
+
+    const hdr = ws.getRow(1);
+    hdr.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    hdr.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+    hdr.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    hdr.height    = 22;
+
+    records.forEach((r, i) => {
+      const isMissed = r.status === 'Draft' && r.checkin_time && !r.checkout_time;
+      const row = ws.addRow({
+        sl:          i + 1,
+        date:        r.date                   || '',
+        emp_code:    r.emp_code               || '',
+        name:        r.emp_name               || '',
+        designation: r.designation            || '',
+        district:    r.assigned_district      || '',
+        block:       r.assigned_block         || '',
+        duty_type:   r.duty_type              || '',
+        checkin:     r.checkin_time           || '',
+        checkout:    r.checkout_time || (isMissed ? 'Missed' : ''),
+        hours:       r.worked_hours != null ? Number(r.worked_hours.toFixed(2)) : '',
+        leave_type:  r.leave_type             || '',
+        leave_status: r.leave_status          || '',
+        status:      isMissed ? 'Missed Checkout' : (r.status || ''),
+      });
+      if (i % 2 === 1) {
+        row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F4F8' } };
+      }
+    });
+
+    ws.autoFilter = { from: 'A1', to: 'N1' };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Queue_${tag}.xlsx"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (err) {
+    console.error('[attendance/export]', err);
+    res.status(500).json({ success: false, message: 'Export failed: ' + err.message });
+  }
+});
+
 // GET /api/attendance/:id
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/:id', authenticate, async (req, res) => {

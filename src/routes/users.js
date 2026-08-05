@@ -720,19 +720,22 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
       district:  'District Assignment',
       hr:        'HR (Competent Authority) Assignment',
     };
-    const label   = labelMap[type] || `${type} Change`;
-    const title   = `Request: ${label}`;
-    const message = `${emp.name} (${emp.emp_id}) has requested: ${label}.${note ? ` Note: ${note}` : ''}`;
-    
+    const label     = labelMap[type] || `${type} Change`;
+    const title     = `Request: ${label}`;
+    const message   = `${emp.name} (${emp.emp_id}) has requested: ${label}.${note ? ` Note: ${note}` : ''}`;
+    const actionMap = { photo: 'photo-update', manager: 'manager-assignment', hr: 'hr-assignment', district: 'district-assignment', block: 'block-assignment', role_type: 'designation-change', location: 'location-change' };
+    const action    = actionMap[type] || '';
+    const link      = `/admin/users?editUser=${req.user.id}${action ? `&action=${action}` : ''}`;
+
     if (admins.length) {
-      await Notification.insertMany(admins.map(a => ({ 
-        _id: uuidv4(), 
-        user_id: a._id, 
-        title, 
-        message, 
-        type: 'warning', 
-        is_read: 0, 
-        link: `/admin/users?editUser=${req.user.id}` 
+      await Notification.insertMany(admins.map(a => ({
+        _id: uuidv4(),
+        user_id: a._id,
+        title,
+        message,
+        type: 'warning',
+        is_read: 0,
+        link,
       })));
     }
     
@@ -760,14 +763,14 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
     const message = note ? `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}). Note: ${note}` : `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}).`;
     
     if (admins.length) {
-      await Notification.insertMany(admins.map(a => ({ 
-        _id: uuidv4(), 
-        user_id: a._id, 
-        title, 
-        message, 
-        type: 'warning', 
-        is_read: 0, 
-        link: `/admin/users?editUser=${req.user.id}` 
+      await Notification.insertMany(admins.map(a => ({
+        _id: uuidv4(),
+        user_id: a._id,
+        title,
+        message,
+        type: 'warning',
+        is_read: 0,
+        link: `/admin/users?editUser=${req.user.id}&action=location-change`,
       })));
     }
     

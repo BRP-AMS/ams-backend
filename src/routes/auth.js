@@ -20,7 +20,7 @@ const notify = (userId, title, message, type = 'info', link = null) =>
 const notifyPasswordChange = async (user) => {
   try {
     const msg = `${user.name} (${user.emp_id}) reset their password.`;
-    const link = '/admin/users';
+    const link = `/admin/users?editUser=${user._id}&action=reset-password`;
     const recipients = [];
     if (user.manager_id) recipients.push(String(user.manager_id));
     const admins = await User.find({ role: { $in: ['admin', 'super_admin'] }, is_active: 1 }).select('_id').lean();

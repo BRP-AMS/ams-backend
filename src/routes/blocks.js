@@ -65,6 +65,25 @@ router.post('/', authenticate, authorize('admin', 'super_admin'), async (req, re
   }
 });
 
+// PUT /api/blocks/rename-district — rename all blocks under a district (must be before /:id)
+router.put('/rename-district', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
+  try {
+    const { oldDistrict, newDistrict } = req.body;
+    if (!oldDistrict?.trim() || !newDistrict?.trim()) {
+      return res.status(400).json({ success: false, message: 'oldDistrict and newDistrict required' });
+    }
+    const trimmed = newDistrict.trim();
+    const conflict = await CustomBlock.findOne({ district: trimmed });
+    if (conflict && conflict.district !== oldDistrict.trim()) {
+      return res.status(409).json({ success: false, message: 'A district with that name already exists' });
+    }
+    const result = await CustomBlock.updateMany({ district: oldDistrict.trim() }, { $set: { district: trimmed } });
+    res.json({ success: true, updated: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // PUT /api/blocks/:id — rename any block
 router.put('/:id', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {

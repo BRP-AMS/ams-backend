@@ -108,7 +108,14 @@ app.use((req, res, next) => {
   next();
 });
 
-const limiter = rateLimit({ windowMs: 2 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
+// 600 req/2min per IP — accommodates 90-user morning rush (~4 calls each = 360 req)
+const limiter = rateLimit({
+  windowMs:        2 * 60 * 1000,
+  max:             600,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  keyGenerator:    (req) => req.ip || req.headers['x-forwarded-for'] || 'unknown',
+});
 app.use('/api/', limiter);
 
 // ── Models ────────────────────────────────────────────────────────────────

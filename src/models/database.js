@@ -305,6 +305,18 @@ const scheduleDocumentSchema = new mongoose.Schema({
 }, { timestamps: { createdAt: 'created_at', updatedAt: false } });
 
 scheduleDocumentSchema.index({ schedule_id: 1 });
+const monthlyReportSchema = new mongoose.Schema({
+  user_id:     { type: String, ref: 'User', required: true },
+  month_key:   { type: String, required: true },      // "2026-06"
+  file_name:   { type: String, required: true },
+  file_type:   { type: String, default: null },
+  file_url:    { type: String, required: true },      // Cloudinary URL
+  public_id:   { type: String, default: null },       // for Cloudinary deletion
+  uploaded_at: { type: Date, default: Date.now },
+  // expires_at removed — reports are kept forever, deletion is manual only (see DELETE routes)
+}, { timestamps: { createdAt: 'created_at', updatedAt: false } });
+
+monthlyReportSchema.index({ user_id: 1, month_key: 1 }, { unique: true });
 
 // ── Models ────────────────────────────────────────────────────────────────
 
@@ -318,6 +330,7 @@ const ActivityDocument = mongoose.model('ActivityDocument', activityDocumentSche
 const ActivitySchedule = mongoose.model('ActivitySchedule', activityScheduleSchema);
 const ScheduleDocument = mongoose.model('ScheduleDocument', scheduleDocumentSchema);
 const MsmeMaster       = mongoose.model('MsmeMaster',       msmeMasterSchema);
+const MonthlyReport    = mongoose.model('MonthlyReport',    monthlyReportSchema);
 // ── Custom Dropdown Options (shared across all users) ─────────────────────
 const customOptionSchema = new mongoose.Schema({
   _id:      { type: String },
@@ -405,4 +418,5 @@ module.exports = {
   GeoCache,
   CustomDepartment,
   ODARequest,
+  MonthlyReport
 };

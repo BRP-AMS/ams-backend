@@ -371,6 +371,7 @@ app.use('/api/msme',              require('./src/routes/msme'));
 app.use('/api/custom-options',    require('./src/routes/custom-options'));
 app.use('/api/blocks',            require('./src/routes/blocks'));
 app.use('/api/departments',       require('./src/routes/departments'));
+app.use('/api/monthly-report',    require('./src/routes/monthlyReport'));
 app.use('/api/oda',               require('./src/routes/oda'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
 app.use('/api/file',              require('./src/routes/file'));

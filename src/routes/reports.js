@@ -114,70 +114,21 @@ const getNthSaturday = iso => {
 
 const isNonWorkingDay = iso => {
   const dow = new Date(iso + 'T00:00:00+05:30').getDay();
-  return dow === 0 || dow === 6; // Sunday + all Saturdays
+  if (dow === 0) return true;                          // Sunday
+  if (dow === 6) return true;
+  return false;
 };
 
-const isWeekend  = iso => isNonWorkingDay(iso); // kept for PDF total WO count
-const dayNum     = iso => new Date(iso+'T00:00:00+05:30').getDate();
-const monAbbr    = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
-const _DA        = ['S','M','T','W','Th','F','S'];
-const dayAbbrFn  = iso => _DA[new Date(iso+'T00:00:00+05:30').getDay()];
+const isWeekend = iso => isNonWorkingDay(iso); // kept for PDF total WO count
+const dayNum    = iso => new Date(iso+'T00:00:00+05:30').getDate();
+const monAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
+const dayAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,weekday:'short'});
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
 const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-1)%26)+s;c=Math.floor((c-1)/26);} return s; };
 
 /**
  * toCode — determines cell code for one attendance record
- *
- * Leave status rules:
- *   Pending  → '' (blank — not yet decided, don't mark absent)
- *   Approved → 'L'
- *   Rejected + no re-check-in → 'L' (LOP / loss-of-pay)
- *   Rejected + re-checked in  → fall through to P/OD location logic
- *
- * Regular attendance:
- *   Rejected → 'A'
- *   Present with location → P or OD
  */
-// const toCode = (rec, assignedBlock, assignedDistrict) => {
-//   if (!rec) return 'A';
-
-//   // ── Leave records ──────────────────────────────────────────────────────────
-//   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
-//   if (isLeave) {
-//     const ls = rec.leave_status || rec.status || 'Pending';
-//     if (ls === 'Pending')  return '';   // leave pending → blank (don't penalise)
-  
-// if (ls === 'Approved') {
-//   const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
-//   const hasCheckin = rec.checkin_time || rec.checkinTime;
-//   if (!(isHalfDay && hasCheckin)) return 'L';
-//   // Half Day + has check-in → fall through to P / OD logic below
-// }
-//     if (ls === 'Rejected') {
-//       // Employee re-checked in after rejection → treat as normal attendance
-//       const hasCheckin = rec.checkin_time || rec.checkinTime;
-//       if (!hasCheckin) return 'L'; // rejected + no re-check-in → L (LOP)
-//       // Has a real check-in after rejection → fall through to P/OD logic below
-//     }
-//   }
-
-//   // ── Regular attendance (or rejected leave with actual re-check-in) ─────────
-//   if (rec.status === 'Rejected') return 'A';
-
-//   const addr = rec.location_address || rec.locationAddress || '';
-
-//   // No assignment → always P (can't determine otherwise)
-//   if (!assignedBlock && !assignedDistrict) return 'P';
-
-//   const matchesAssigned =
-//     (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
-//     (assignedDistrict && matchesLocation(addr, assignedDistrict));
-
-//   if (matchesAssigned)  return 'P';   // at assigned workplace
-//   if (isInTripura(addr)) return 'OD'; // elsewhere in Tripura
-//   return ''; // outside all known Tripura locations
-// };
-
 // ── reports.js  ·  toCode() ───────────────────────────────────────────────
 const toCode = (rec, assignedBlock, assignedDistrict) => {
   if (!rec) return 'A';
@@ -186,7 +137,7 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
-    if (ls === 'Pending') return 'LA';
+    if (ls === 'Pending') return '';
     if (ls === 'Approved') {
       const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
       const hasCheckin = rec.checkin_time || rec.checkinTime;
@@ -203,7 +154,7 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   // ── Regular attendance ─────────────────────────────────────────────────────
   if (rec.status === 'Rejected') return 'A';
 
-  // ✅ NEW: duty_type drives P vs OD — location is only a fallback
+  // duty_type drives P vs OD — location is only a fallback
   const dutyType = (rec.duty_type || '').trim();
 
   if (dutyType === 'On Duty') return 'OD';   // employee chose "On Duty (Field)"
@@ -255,51 +206,61 @@ router.get('/export',
     // Priority: employee (own) → specific empId → managerId team → manager (own team) → all
     let employees = [];
 
+    const EMP_SELECT = '_id name emp_id created_at assigned_block assigned_district role_type designation';
+
     if (role === 'employee') {
       // Always own record only
       const me = await User.findById(req.user.id)
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
+        .select(EMP_SELECT).lean();
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
       // Specific employee selected in dropdown (any privileged role)
       const specific = await User.findById(toObjId(empId))
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
+        .select(EMP_SELECT).lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
 
     } else if (managerId && String(managerId).trim() !== '') {
       // Manager's entire team selected (HR / super_admin / admin use-case)
       employees = await User.find({ manager_id:toObjId(managerId), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
 
     } else if (role === 'manager') {
       // Manager viewing own team
       employees = await User.find({ manager_id:toObjId(req.user.id), is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
 
     } else {
       // admin / hr / super_admin — all employees
       employees = await User.find({ role:'employee', is_active:{$ne:false} })
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').sort({emp_id:1}).lean();
+        .select(EMP_SELECT).sort({emp_id:1}).lean();
     }
 
     if (!employees.length)
       return res.status(404).json({success:false,message:'No employees found'});
 
-    // ── Signature: Reporting Officer (govt field officer) for employee reports ──
-    let roName = '';
-    let roDesignation = '';
-    if (role === 'employee') {
-      // Use the employee's own stored Reporting Officer (govt official)
-      const emp = await User.findById(req.user.id).select('reporting_officer_name reporting_officer_designation').lean();
-      roName        = emp?.reporting_officer_name        || '';
-      roDesignation = emp?.reporting_officer_designation || '';
+    // ── Manager / Reporting Officer name for signature ──────────────────────────
+    let managerName = '';
+    if (role === 'manager') {
+      const mgr = await User.findById(req.user.id).select('name').lean();
+      managerName = mgr?.name || '';
+    } else if (role === 'employee') {
+      // FIX: employee's own download must show their Reporting Officer
+      // (set on the employee's profile page), NOT the assigned BRP manager.
+      const emp = await User.findById(req.user.id)
+        .select('reporting_officer_name reporting_officer_designation').lean();
+      managerName = emp?.reporting_officer_name
+        ? (emp.reporting_officer_designation
+            ? `${emp.reporting_officer_designation}. ${emp.reporting_officer_name}`
+            : emp.reporting_officer_name)
+        : '';
+    } else if (managerId && String(managerId).trim() !== '') {
+      // HR/super_admin filtered by a specific manager — show that manager's name
+      const mgr = await User.findById(toObjId(managerId)).select('name').lean();
+      managerName = mgr?.name || '';
     }
-    // Compose label: "Designation. Name"
-    const mgrLabel = roName
-      ? (roDesignation ? `${roName} (${roDesignation})` : roName)
-      : '';
+    // admin/hr/super_admin without manager filter → no single manager; leave blank
 
     // ── Attendance records ─────────────────────────────────────────────────────
     const recFilter = {
@@ -314,29 +275,14 @@ router.get('/export',
     for (const r of rawRecs) {
       const eid = String(r.emp_id);
       if (!recIdx[eid]) recIdx[eid] = {};
-      const isLeave = r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim());
-      // For multi-day leave records, expand across every date in the range
-      let datesToIndex = [r.date];
-      if (isLeave && r.end_date && r.end_date > r.date) {
-        datesToIndex = [];
-        const cur = new Date(r.date + 'T00:00:00');
-        const end = new Date(r.end_date + 'T00:00:00');
-        while (cur <= end) {
-          const iso = cur.toLocaleDateString('en-CA');
-          if (iso >= startDate && iso <= endDate) datesToIndex.push(iso);
-          cur.setDate(cur.getDate() + 1);
-        }
-      }
-      for (const d of datesToIndex) {
-        const existing = recIdx[eid][d];
-        const existingIsRejectedLeave =
-          existing &&
-          (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
-          (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
-        // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
-        if (!existing || existingIsRejectedLeave) {
-          recIdx[eid][d] = r;
-        }
+      const existing = recIdx[eid][r.date];
+      const existingIsRejectedLeave =
+        existing &&
+        (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
+        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+      // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
+      if (!existing || existingIsRejectedLeave) {
+        recIdx[eid][r.date] = r;
       }
     }
 
@@ -347,30 +293,17 @@ router.get('/export',
         : null;
       const ab = emp.assigned_block    || null;
       const ad = emp.assigned_district || null;
-      const leaveCounts = { halfDay: 0, emergency: 0, casual: 0, other: 0 };
 
-      const cells = dates.map(iso => {
-        if (isNonWorkingDay(iso))           return 'WO'; // Sunday or 2nd/4th Sat
-        if (joinDate && iso < joinDate)     return '';   // pre-join → blank
-        if (isHoliday(iso))                 return 'H';  // public holiday
-        const rec = recIdx[String(emp._id)]?.[iso];
-        if (rec) {
-          const isLv = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
-          if (isLv) {
-            const ls = rec.leave_status || rec.status || 'Pending';
-            if (ls === 'Approved') {
-              const lt = String(rec.leave_type || '').toLowerCase();
-              if (lt.includes('half')) leaveCounts.halfDay++;
-              else if (lt.includes('emergency')) leaveCounts.emergency++;
-              else if (lt.includes('casual')) leaveCounts.casual++;
-              else leaveCounts.other++;
-            }
-          }
-        }
-        return toCode(rec, ab, ad);
-      });
-
-      return { emp, cells, leaveCounts };
+    return {
+        emp,
+        cells: dates.map(iso => {
+          if (isNonWorkingDay(iso))           return 'WO'; // Sunday or 2nd/4th Sat
+          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
+          if (isHoliday(iso))                 return 'H';  // public holiday
+          const rec = recIdx[String(emp._id)]?.[iso];
+          return toCode(rec, ab, ad);
+        }),
+      };
     });
 
     const sd = new Date(startDate+'T00:00:00+05:30');
@@ -393,12 +326,10 @@ router.get('/export',
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 
    const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
-      const FILL_LA   = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFEF9C3'}};
       const codeFill = (code, rf) => {
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         if (code==='H')             return FILL_HOL;
-        if (code==='LA')            return FILL_LA;
         return rf;
       };   
 
@@ -419,7 +350,7 @@ router.get('/export',
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
-        Object.assign(ws.getCell(1,2),{value:'Attendance details of RAMP MSME',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
+        Object.assign(ws.getCell(1,2),{value:'Attendance details of BRP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
         ws.getRow(1).height=24;
 
         mc(ws,2,2,2,LAST);
@@ -430,20 +361,20 @@ router.get('/export',
         mc(ws,3,2,3,half-1);
         Object.assign(ws.getCell(3,2),{value:'Location Name: Tripura',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         mc(ws,3,half,3,LAST);
-        Object.assign(ws.getCell(3,half),{value:'Project Name: RAMP MSME',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
+        Object.assign(ws.getCell(3,half),{value:'Project Name: Block Resource Person',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
-        ws.getRow(4).height=multiMonth?36:24;
-        ws.getColumn(2).width=9; ws.getColumn(3).width=16;
+        ws.getRow(4).height=multiMonth?38:26;
+        ws.getColumn(2).width=9; ws.getColumn(3).width=16; ws.getColumn(4).width=14;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
         const setHdr=(col,val)=>{
           const c=ws.getCell(4,col); c.value=val; c.font=HF; c.fill=FILL_WHT; c.border=CBDR;
-          c.alignment={horizontal:'center',vertical:'center',wrapText:col>3};
-          ws.getColumn(col).width=col===2?9:col===3?16:col===4?12:4.2;
+          c.alignment={horizontal:'center',vertical:'center',wrapText:col>4};
+          ws.getColumn(col).width=col===2?9:col===3?16:col===4?14:4.2;
         };
         setHdr(2,'Emp code'); setHdr(3,'Employee Name'); setHdr(4,'Designation');
-        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayAbbrFn(iso)}\n${dayNum(iso)}\n${monAbbr(iso)}`:`${dayAbbrFn(iso)}\n${dayNum(iso)}`));
+        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`:`${dayNum(iso)}\n${dayAbbr(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -451,11 +382,11 @@ router.get('/export',
           const rf=idx%2===0?FILL_WHT:FILL_ALT;
           const c2=ws.getCell(rowN,2); c2.value=emp.emp_id; c2.border=CBDR; c2.fill=rf; c2.alignment={horizontal:'center',vertical:'center',wrapText:false}; c2.font={size:10,name:'Calibri'}; c2.protection={locked:true};
           const c3=ws.getCell(rowN,3); c3.value=emp.name;   c3.border=CBDR; c3.fill=rf; c3.alignment={horizontal:'left',  vertical:'center',wrapText:false}; c3.font={size:10,name:'Calibri'}; c3.protection={locked:true};
-          const c4=ws.getCell(rowN,4); c4.value=emp.role_type||''; c4.border=CBDR; c4.fill=rf; c4.alignment={horizontal:'center',vertical:'center',wrapText:false}; c4.font={size:9,name:'Calibri',color:{argb:'FF555555'}}; c4.protection={locked:true};
+          const c4=ws.getCell(rowN,4); c4.value=emp.role_type||emp.designation||''; c4.border=CBDR; c4.fill=rf; c4.alignment={horizontal:'center',vertical:'center',wrapText:false}; c4.font={size:9,name:'Calibri'}; c4.protection={locked:true};
           cells.forEach((code,i)=>{
             const c=ws.getCell(rowN,5+i); c.value=code; c.border=CBDR;
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
-            c.font={bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':code==='LA'?'FFB45309':'FF000000'}};
+            c.font={bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
           });
         });
@@ -469,12 +400,11 @@ router.get('/export',
          {code:'L',label:'Leave / LOP',isRed:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
-         {code:'LA',label:'Leave Applied (Pending)',isRed:false,isLA:true},
-        ].forEach(({code,label,isRed,isAmber,isLA},i)=>{
+        ].forEach(({code,label,isRed,isAmber},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
-          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:isLA?FILL_LA:FILL_WHT; cc.border=CBDR;
+          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT; cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':isLA?'FFB45309':'FF000000'}};
+          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         
@@ -505,27 +435,47 @@ router.get('/export',
         sumRow('No of Holidays (H)',hCount);
 
         if(empList.length===1){
-          const er=5;
-          const lc0 = empList[0].leaveCounts || { halfDay:0, emergency:0, casual:0, other:0 };
-          const eff0 = +(lc0.halfDay * 0.5 + lc0.emergency + lc0.casual + lc0.other).toFixed(1);
-          sumRow('No of Present / worked (P+OD)',`=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
-          sumRow('No of Leaves (L)',`=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
-          sumRow('  Half Day Leaves (each = 0.5 day)', lc0.halfDay);
-          sumRow('  Emergency Leaves', lc0.emergency);
-          sumRow('  Casual Leaves', lc0.casual);
-          if (lc0.other > 0) sumRow('  Other Leaves', lc0.other);
-          sumRow('Total Effective Leaves', eff0);
-          sumRow('No of Absent (A)',`=COUNTIF(${fDC}${er}:${lDC}${er},"A")+COUNTIF(${fDC}${er}:${lDC}${er},"LA")`);
-          sumRow('No of Leave Applied / Pending (LA)',`=COUNTIF(${fDC}${er}:${lDC}${er},"LA")`);
-        } else {
+  const er=5;
+  const empIdStr = String(empList[0].emp._id);
+
+  // Pull this employee's leave-type records for the date range
+  const empLeaveRecs = rawRecs.filter(r =>
+    String(r.emp_id) === empIdStr &&
+    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim()))
+  );
+
+  const byType = t => empLeaveRecs.filter(r => String(r.leave_type||'').toLowerCase().includes(t));
+  const halfDayRecs   = byType('half');
+  const emergencyRecs = byType('emergency');
+  const casualRecs    = byType('casual');
+  const pendingRecs   = empLeaveRecs.filter(r => (r.leave_status || r.status || 'Pending') === 'Pending');
+
+  // Effective leave days: matches toCode()'s L logic, half-day counts as 0.5
+  const effectiveLeaves = empLeaveRecs.reduce((sum, r) => {
+    const ls = r.leave_status || r.status || 'Pending';
+    if (ls === 'Pending') return sum;
+    const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
+    const hasCheckin = r.checkin_time || r.checkinTime;
+    if (ls === 'Approved') return (isHalf && hasCheckin) ? sum : sum + (isHalf ? 0.5 : 1);
+    if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
+    return sum;
+  }, 0);
+
+  sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
+  sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
+  sumRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
+  sumRow('No of Emergency Leaves', emergencyRecs.length);
+  sumRow('No of Casual Leaves', casualRecs.length);
+  sumRow('Total Effective Leaves', effectiveLeaves);
+  sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
+  sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
+}else {
           // ── Table header row ────────────────────────────────────────────────
           r++; ws.getRow(r).height = 17;
           ws.getColumn(2).width = 22; ws.getColumn(3).width = 16;
           ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
-          ws.getColumn(6).width = 14; ws.getColumn(7).width = 16;
-          ws.getColumn(8).width = 14;
 
-          [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves (L)','FFB45309'], ['No of Absent','FFB91C1C'], ['Half Day Leaves','FF7C3AED'], ['Eff. Leaves Total','FF0369A1'], ['Leave Applied (LA)','FFD97706']].forEach(([hdr, argb], i) => {
+          [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C']].forEach(([hdr, argb], i) => {
             const c = ws.getCell(r, 2 + i);
             c.value = hdr; c.fill = FILL_SUBH; c.border = CBDR;
             c.font = { bold: true, size: 10, color: { argb }, name: 'Calibri' };
@@ -533,12 +483,10 @@ router.get('/export',
           });
 
           // ── One row per employee ────────────────────────────────────────────
-          empList.forEach(({ emp, leaveCounts: lc }, idx) => {
+          empList.forEach(({ emp }, idx) => {
             r++; ws.getRow(r).height = 15;
             const rf  = idx % 2 === 0 ? FILL_WHT : FILL_ALT;
             const er  = 5 + idx;
-            const lcr = lc || { halfDay:0, emergency:0, casual:0, other:0 };
-            const effLv = +(lcr.halfDay * 0.5 + lcr.emergency + lcr.casual + lcr.other).toFixed(1);
 
             const cn = ws.getCell(r, 2);
             cn.value = emp.name; cn.fill = rf; cn.border = CBDR;
@@ -560,37 +508,15 @@ router.get('/export',
             cl.protection = { locked: true };
 
             const ca = ws.getCell(r, 5);
-            ca.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"A")+COUNTIF(${fDC}${er}:${lDC}${er},"LA")` };
+            ca.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"A")` };
             ca.fill = rf; ca.border = CBDR;
             ca.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB91C1C' } };
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
-
-            const chd = ws.getCell(r, 6);
-            chd.value = lcr.halfDay;
-            chd.fill = rf; chd.border = CBDR;
-            chd.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF7C3AED' } };
-            chd.alignment = { horizontal: 'center', vertical: 'center' };
-            chd.protection = { locked: true };
-
-            const ceff = ws.getCell(r, 7);
-            ceff.value = effLv;
-            ceff.fill = rf; ceff.border = CBDR;
-            ceff.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF0369A1' } };
-            ceff.alignment = { horizontal: 'center', vertical: 'center' };
-            ceff.protection = { locked: true };
-
-            const cla = ws.getCell(r, 8);
-            cla.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LA")` };
-            cla.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFFEF9C3' } };
-            cla.border = CBDR;
-            cla.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB45309' } };
-            cla.alignment = { horizontal: 'center', vertical: 'center' };
-            cla.protection = { locked: true };
           });
         }
 
-        outerBorder(ws, SR, 2, r, 8);
+        outerBorder(ws, SR, 2, r, 5);
 
         // ── Signatures ────────────────────────────────────────────────────────
         r+=3; ws.getRow(r).height=20;
@@ -609,7 +535,7 @@ router.get('/export',
           ws.getCell(r,8).font={bold:true,size:15,name:'Calibri',color:{argb:'FF1F3864'}};
           mc(ws,r,12,r,13);
           const mgrSigCell=ws.getCell(r,12);
-          mgrSigCell.value=mgrName||'';
+          mgrSigCell.value=mgrName?`(${mgrName})`:'';
           mgrSigCell.font={italic:true,size:10,name:'Calibri',color:{argb:'FF555555'}};
           mgrSigCell.alignment={horizontal:'center',vertical:'bottom'};
           mgrSigCell.border={bottom:{style:'medium',color:{argb:'FF1F3864'}}};
@@ -625,26 +551,28 @@ router.get('/export',
         };
         ws.protect('BRP-READONLY',{
           selectLockedCells:true,selectUnlockedCells:true,
-          formatCells:false,formatColumns:true,formatRows:true,
-          insertRows:false,insertColumns:false,
+          formatCells:false,insertRows:false,insertColumns:false,
           deleteRows:false,deleteColumns:false,sort:false,
         });
       };
 
       if(role==='employee'){
-        buildSheet(wb.addWorksheet('My Attendance'),matrix,`${matrix[0]?.emp.name} Summary`,mgrLabel,holCount);
+        buildSheet(wb.addWorksheet('My Attendance'),matrix,`${matrix[0]?.emp.name} Summary`,managerName,holCount);
       } else {
         const allName =role==='manager'?'Team Report':'All emp Reports';
         const allTitle=role==='manager'?'Team Summary':'Total Summary';
-        buildSheet(wb.addWorksheet(allName),matrix,allTitle,mgrLabel,holCount);
+        buildSheet(wb.addWorksheet(allName),matrix,allTitle,managerName,holCount);
         matrix.forEach(({emp,cells})=>{
           const name=emp.name.replace(/[:\\/?*[\]]/g,'').substring(0,31);
-          buildSheet(wb.addWorksheet(name),[{emp,cells}],`${emp.name} Summary`,mgrLabel,holCount);
+          buildSheet(wb.addWorksheet(name),[{emp,cells}],`${emp.name} Summary`,managerName,holCount);
         });
       }
 
+      const fnamePrefix = matrix.length === 1
+        ? `${(matrix[0].emp.name||'').replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'')}_${matrix[0].emp.emp_id||''}_`
+        : '';
       res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition',`attachment; filename="BRP_Attendance_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Content-Disposition',`attachment; filename="${fnamePrefix}BRP_Attendance_${startDate}_to_${endDate}.xlsx"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
@@ -661,37 +589,50 @@ router.get('/export',
       doc.pipe(res);
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
-      const CC=52,CN=120,CD=70,CT=36;
+      const CC=52,CN=105,CD=64,CT=36;
       const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/dates.length);
-      const RH=20;
+      const RH=14;
       const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+dates.length*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
-      const drawHdr=y=>{
-        doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of RAMP MSME',ML,y+5,{width:tW,align:'center'});
-        doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#666').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
-        doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-           .text('Location: Tripura',ML+4,y+37).text('Project: RAMP MSME',ML+tW/2,y+37);
-        const y2=y+46; const HH=20;
-        [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
-          doc.rect(x,y2,w,HH).fill('#FFF').stroke('#AAA');
-          doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text(l,x+2,y2+7,{width:w-4,align:'center'});
-        });
-        dates.forEach((iso,i)=>{
-          const x=xD+i*dW;
-          doc.rect(x,y2,dW,HH).fill('#FFF').stroke('#AAA');
-          doc.fillColor('#888888').fontSize(5).font('Helvetica').text(dayAbbrFn(iso),x+1,y2+2,{width:dW-2,align:'center'});
-          doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold').text(String(dayNum(iso)),x+1,y2+11,{width:dW-2,align:'center'});
-        });
-        doc.rect(xT,y2,CT,HH).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold').text('P+OD',xT+2,y2+7,{width:CT-4,align:'center'});
-        return y2+HH;
-      };
+     const drawHdr=y=>{
+  doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
+  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
+  doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
+  doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
+  doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
+  doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
+     .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
 
+  const y2=y+46;
+  const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
+
+  [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
+    doc.rect(x,y2,w,HRH).fill('#FFF').stroke('#AAA');
+    doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+       .text(l,x+2,y2+(HRH-9)/2,{width:w-4,align:'center'});
+  });
+
+  dates.forEach((iso,i)=>{
+    const x=xD+i*dW;
+    doc.rect(x,y2,dW,HRH).fill('#FFF').stroke('#AAA');
+    doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
+       .text(String(dayNum(iso)),x+1,y2+3,{width:dW-2,align:'center'});
+    doc.fillColor('#555').fontSize(5).font('Helvetica')
+       .text(dayAbbr(iso),x+1,y2+11,{width:dW-2,align:'center'});
+    if (multiMonth) {
+      doc.fillColor('#888').fontSize(5).font('Helvetica')
+         .text(monAbbr(iso),x+1,y2+19,{width:dW-2,align:'center'});
+    }
+  });
+
+  doc.rect(xT,y2,CT,HRH).fill('#FFF').stroke('#AAA');
+  doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+     .text('Total',xT+2,y2+(HRH-9)/2,{width:CT-4,align:'center'});
+
+  return y2+HRH;
+};
       let y=drawHdr(ML);
       matrix.forEach(({emp,cells},idx)=>{
         if(y+RH>PH-60){addPage();y=drawHdr(28);}
@@ -699,15 +640,15 @@ router.get('/export',
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
         doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
         doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
-        doc.fillColor('#555').fontSize(6.5).font('Helvetica').text(emp.role_type||'',xDes+2,y+3,{width:CD-4,align:'center'});
+        doc.font('Helvetica').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
         let pres=0;
         cells.forEach((code,i)=>{
           const x=xD+i*dW;
           const isRed=code==='L'||code==='A';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':code==='LA'?'#FEF9C3':bg;
+          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
           doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
           if(code){
-            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':code==='LA'?'#B45309':'#000000').fontSize(6).font('Helvetica-Bold')
+            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
                .text(code,x+1,y+3,{width:dW-2,align:'center'});
           }
           if(code==='P'||code==='OD') pres++;
@@ -725,11 +666,10 @@ router.get('/export',
        {code:'L',label:'Leave / LOP',red:true},
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
-       {code:'LA',label:'Leave Applied (Pending)',red:false,amber:true},
-      ].forEach(({code,label,red,amber})=>{
+      ].forEach(({code,label,red})=>{
         const bw=14,lw=76;
-        doc.rect(lx,y,bw,10).fill(red?'#FF4444':amber?'#FEF9C3':'#FFFFFF').stroke('#999');
-        doc.fillColor(red?'#FFFFFF':amber?'#B45309':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+        doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
+        doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
         lx+=bw+lw+4;
       });
@@ -737,14 +677,7 @@ router.get('/export',
 
       // Summary
       y+=4; if(y+130>PH-60){addPage();y=40;}
-      // Auto-size name column from actual data before drawing anything
-      const _statColW = 62;
-      doc.font('Helvetica-Bold').fontSize(8.5);
-      const _maxNamePt = matrix.length > 1
-        ? Math.max(100, Math.min(320, Math.max(...matrix.map(({ emp }) => doc.widthOfString(emp.name || '')))))
-        : 180;
-      const SW = _maxNamePt + 12 + _statColW * 4;
-      const SRH=16,SX=ML; let sy=y;
+      const SW=240,SRH=16,SX=ML; let sy=y;
       const pdfRow=(label,value,type='row')=>{
         if(type==='title'){doc.rect(SX,sy,SW,SRH).fill('#FFF').stroke('#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
         else if(type==='sub'){doc.rect(SX,sy,SW,SRH).fill('#E8EDF4').stroke('#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
@@ -763,58 +696,70 @@ router.get('/export',
       pdfRow('No of Holidays (H)',holCount);
 
       if (matrix.length === 1) {
-        const { cells, leaveCounts: lc } = matrix[0];
-        const effLeaves = +(lc.halfDay * 0.5 + lc.emergency + lc.casual + lc.other).toFixed(1);
-        pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
-        pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
-        pdfRow('  Half Day Leaves (each = 0.5 day)', lc.halfDay);
-        pdfRow('  Emergency Leaves',             lc.emergency);
-        pdfRow('  Casual Leaves',                lc.casual);
-        if (lc.other > 0) pdfRow('  Other Leaves', lc.other);
-        pdfRow('Total Effective Leaves', effLeaves);
-        pdfRow('No of Absent (A)',               cells.filter(c => c==='A'||c==='LA').length);
-        pdfRow('No of Leave Applied / Pending (LA)', cells.filter(c => c==='LA').length);
-      } else {
+  const cells   = matrix[0].cells;
+  const empIdStr = String(matrix[0].emp._id);
+
+  const empLeaveRecs = rawRecs.filter(r =>
+    String(r.emp_id) === empIdStr &&
+    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim()))
+  );
+  const byType = t => empLeaveRecs.filter(r => String(r.leave_type||'').toLowerCase().includes(t));
+  const halfDayRecs   = byType('half');
+  const emergencyRecs = byType('emergency');
+  const casualRecs    = byType('casual');
+  const pendingRecs   = empLeaveRecs.filter(r => (r.leave_status || r.status || 'Pending') === 'Pending');
+  const effectiveLeaves = empLeaveRecs.reduce((sum, r) => {
+    const ls = r.leave_status || r.status || 'Pending';
+    if (ls === 'Pending') return sum;
+    const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
+    const hasCheckin = r.checkin_time || r.checkinTime;
+    if (ls === 'Approved') return (isHalf && hasCheckin) ? sum : sum + (isHalf ? 0.5 : 1);
+    if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
+    return sum;
+  }, 0);
+
+  pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
+  pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
+  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
+  pdfRow('No of Emergency Leaves',                 emergencyRecs.length);
+  pdfRow('No of Casual Leaves',                    casualRecs.length);
+  pdfRow('Total Effective Leaves',                 effectiveLeaves);
+  pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
+  pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);
+} else {
         sy++;
-        const C0 = _maxNamePt + 12;
-        const C1 = _statColW;
-        const C2 = _statColW;
-        const C3 = _statColW;
-        const C4 = _statColW;
+        const TW = SW;
+        const C0 = TW * 0.46;
+        const C1 = TW * 0.18;
+        const C2 = TW * 0.18;
+        const C3 = TW * 0.18;
 
-        doc.rect(SX,              sy, C0, SRH).fill('#E8EDF4').stroke('#000');
-        doc.rect(SX+C0,           sy, C1, SRH).fill('#D1FAE5').stroke('#000');
-        doc.rect(SX+C0+C1,        sy, C2, SRH).fill('#FEF3C7').stroke('#000');
-        doc.rect(SX+C0+C1+C2,     sy, C3, SRH).fill('#FEE2E2').stroke('#000');
-        doc.rect(SX+C0+C1+C2+C3,  sy, C4, SRH).fill('#FEF9C3').stroke('#000');
+        doc.rect(SX,        sy, C0, SRH).fill('#E8EDF4').stroke('#000');
+        doc.rect(SX+C0,     sy, C1, SRH).fill('#D1FAE5').stroke('#000');
+        doc.rect(SX+C0+C1,  sy, C2, SRH).fill('#FEF3C7').stroke('#000');
+        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill('#FEE2E2').stroke('#000');
 
-        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',      SX+4,             sy+4, {width:C0-8});
-        doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',       SX+C0,            sy+4, {width:C1,align:'center'});
-        doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Eff. Leaves',   SX+C0+C1,         sy+4, {width:C2,align:'center'});
-        doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',        SX+C0+C1+C2,      sy+4, {width:C3,align:'center'});
-        doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('LA',            SX+C0+C1+C2+C3,   sy+4, {width:C4,align:'center'});
+        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    sy+4, {width:C0-8});
+        doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   sy+4, {width:C1,align:'center'});
+        doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,sy+4, {width:C2,align:'center'});
+        doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,sy+4,{width:C3,align:'center'});
         sy += SRH;
 
-        matrix.forEach(({ emp, cells, leaveCounts: lc }, idx) => {
+        matrix.forEach(({ emp, cells }, idx) => {
           const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-          doc.rect(SX,              sy, C0, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0,           sy, C1, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1,        sy, C2, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1+C2,     sy, C3, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1+C2+C3,  sy, C4, SRH).fill('#FEF9C3').stroke('#CCCCCC');
+          doc.rect(SX,          sy, C0, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0,       sy, C1, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0+C1,    sy, C2, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill(bg).stroke('#CCCCCC');
 
-          const pres    = cells.filter(c => c==='P'||c==='OD').length;
-          const abs     = cells.filter(c => c==='A'||c==='LA').length;
-          const laCount = cells.filter(c => c==='LA').length;
-          const lcr     = lc || { halfDay:0, emergency:0, casual:0, other:0 };
-          const effLv   = +(lcr.halfDay * 0.5 + lcr.emergency + lcr.casual + lcr.other).toFixed(1);
-          const effStr  = effLv % 1 === 0 ? String(effLv) : effLv.toFixed(1);
+          const pres = cells.filter(c => c==='P'||c==='OD').length;
+          const lv   = cells.filter(c => c==='L').length;
+          const abs  = cells.filter(c => c==='A').length;
 
-          doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,      SX+4,              sy+3, {width:C0-8,lineBreak:false,ellipsis:true});
-          doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres),  SX+C0,             sy+3, {width:C1,align:'center'});
-          doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(effStr,        SX+C0+C1,          sy+3, {width:C2,align:'center'});
-          doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),   SX+C0+C1+C2,       sy+3, {width:C3,align:'center'});
-          doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(laCount),SX+C0+C1+C2+C3,   sy+3, {width:C4,align:'center'});
+          doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,     SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
+          doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres), SX+C0,  sy+3,{width:C1,align:'center'});
+          doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),   SX+C0+C1,sy+3,{width:C2,align:'center'});
+          doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),  SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
           sy += SRH;
         });
       }
@@ -822,47 +767,34 @@ router.get('/export',
       // Signatures (employee download only)
       sy+=24; if(sy+30>PH-28){addPage();sy=40;}
       const sigLineW=140;
+if (role === 'employee') {
+  // Employee Sign
+  doc.fillColor('#1F3864').fontSize(12).font('Helvetica-Bold').text('Employee Sign:', ML, sy);
+  doc.moveTo(ML + 110, sy + 12).lineTo(ML + 110 + sigLineW, sy + 12).stroke('#999');
 
-      if (role === 'employee') {
-        const nameLabel = mgrLabel || '';
-        const roSigX   = ML + sigLineW + 140;
-        const nameValW = 260;
-        const lH       = 32; // line-height between stacked fields
+  // Reporting Officer block — CSS matched to reference layout
+  const roX = ML + 110 + sigLineW + 80;
+  doc.fillColor('#1F3864').fontSize(12).font('Helvetica-Bold').text('Reporting Officer:', roX, sy);
 
-        // ── Employee Sign (left) ─────────────────────────────────────
-        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold')
-           .text('Employee Sign:', ML, sy, { lineBreak: false });
-        // 1 blank line gap, then signature line
-        doc.moveTo(ML, sy + lH*2).lineTo(ML + sigLineW, sy + lH*2).stroke('#1F3864');
+  const lineGap = 30;
+  let ry = sy + lineGap;
 
-        // ── Reporting Officer (right) ────────────────────────────────
-        doc.fillColor('#1F3864').fontSize(11).font('Helvetica-Bold')
-           .text('Reporting Officer:', roSigX, sy, { lineBreak: false });
+  // Name/Designation — thin grey line, value (if known) sits above the line
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Name/Designation:', roX, ry);
+  if (managerName) {
+    doc.fillColor('#333').fontSize(10).font('Helvetica-Oblique')
+       .text(managerName, roX + 100, ry - 9, { width: sigLineW });
+  }
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW, ry + 9).stroke('#999');
 
-        // Row 1: Name/Designation label (fixed position)
-        doc.fillColor('#555').fontSize(9).font('Helvetica')
-           .text('Name/Designation:', roSigX, sy + lH, { lineBreak: false });
-        // Name value — allow wrapping; doc.y tracks bottom of text
-        if (nameLabel) {
-          doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold')
-             .text(nameLabel, roSigX + 95, sy + lH, { width: nameValW });
-        } else {
-          doc.moveTo(roSigX + 95, sy + lH + 2).lineTo(roSigX + 95 + nameValW, sy + lH + 2).stroke('#999');
-          doc.y = sy + lH + 10;
-        }
+  ry += lineGap + 10;
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Signature & Stamp:', roX, ry);
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW, ry + 9).stroke('#1F3864');
 
-        // Row 2: Signature & Stamp — positioned below wherever name ended
-        const sigY = doc.y + lH * 2;
-        doc.fillColor('#555').fontSize(9).font('Helvetica')
-           .text('Signature & Stamp:', roSigX, sigY, { lineBreak: false });
-        doc.moveTo(roSigX + 95, sigY + 2).lineTo(roSigX + 95 + nameValW, sigY + 2).stroke('#1F3864');
-
-        // Row 3: Date — pushed well below Signature & Stamp
-        const dateY = sigY + 55;
-        doc.fillColor('#555').fontSize(9).font('Helvetica')
-           .text('Date:', roSigX, dateY, { lineBreak: false });
-        doc.moveTo(roSigX + 30, dateY + 2).lineTo(roSigX + 30 + 140, dateY + 2).stroke('#1F3864');
-      }
+  ry += lineGap + 10;
+  doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Date:', roX, ry);
+  doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW * 0.55, ry + 9).stroke('#999');
+}
 
       doc.end();
       return;
@@ -1198,12 +1130,8 @@ router.get('/dashboard-stats', authenticate, async (req,res)=>{
     const today=new Date().toISOString().split('T')[0];
     const thisMonth=today.substring(0,7);
     const empFilter={};
-    if(req.user.role==='employee'){
-      empFilter.emp_id=toObjId(req.user.id);
-    } else if(req.user.role==='manager'){
-      const teamMembers=await User.find({manager_id:req.user.id}).select('_id').lean();
-      empFilter.emp_id={$in:teamMembers.map(m=>m._id)};
-    }
+    if(req.user.role==='employee')     empFilter.emp_id    =toObjId(req.user.id);
+    else if(req.user.role==='manager') empFilter.manager_id=toObjId(req.user.id);
     const monthStart=`${thisMonth}-01`;
     const [year,month]=thisMonth.split('-').map(Number);
     const nextMonth=month===12?`${year+1}-01-01`:`${year}-${String(month+1).padStart(2,'0')}-01`;
@@ -1225,5 +1153,178 @@ router.get('/dashboard-stats', authenticate, async (req,res)=>{
     res.status(500).json({success:false,message:'Server error',error:err.message});
   }
 });
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/reports/daily-log-export
+//  Single-employee daily log: Date | Check-In | Check-Out | Total Time | Duty Type | Leave Type
+//  status: 'All' | 'Today Check-in' | 'Pending' | 'Approved' | 'Rejected'  (mirrors the queue tabs)
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/daily-log-export',
+  authenticate,
+  authorize('super_admin','admin','hr','manager','employee'),
+  async (req, res) => {
+  try {
+    const { format='excel', empId, status='All' } = req.query;
+    let { startDate, endDate } = req.query;
+    const role = req.user.role;
 
+    const targetEmpId = role === 'employee' ? req.user.id : empId;
+    if (!targetEmpId)
+      return res.status(400).json({success:false,message:'empId is required'});
+
+    const emp = await User.findById(toObjId(targetEmpId))
+      .select('_id name emp_id assigned_block assigned_district role_type designation')
+      .lean();
+    if (!emp) return res.status(404).json({success:false,message:'Employee not found'});
+
+    // "Today Check-in" tab forces the date range to today
+    if (status === 'Today Check-in') startDate = endDate = todayIST();
+    if (!startDate || !endDate)
+      return res.status(400).json({success:false,message:'startDate and endDate are required'});
+
+    const recFilter = { date:{$gte:startDate,$lte:endDate}, emp_id: emp._id };
+    if (status && !['All','Today Check-in'].includes(status)) recFilter.status = status;
+
+    let recs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
+    if (status === 'Today Check-in') recs = recs.filter(r => r.checkin_time || r.checkinTime);
+
+    const fmtHM = mins => `${Math.floor(mins/60)}h ${mins%60}m`;
+    const rows = recs.map(r => {
+      const ci = r.checkin_time || r.checkinTime;
+      const co = r.checkout_time || r.checkoutTime;
+      let total = '', coDisplay = '';
+      if (ci && co) {
+        const mins = Math.round((new Date(co)-new Date(ci))/60000);
+        total = mins>0 ? fmtHM(mins) : '';
+        coDisplay = new Date(co).toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false});
+      } else if (ci && !co) {
+        coDisplay = 'Missed';
+      }
+      return {
+        date: r.date,
+        checkin: ci ? new Date(ci).toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false}) : '',
+        checkout: coDisplay,
+        total,
+        dutyType: r.duty_type || '',
+        leaveType: r.leave_type || '',
+        missedCheckout: !!(ci && !co),
+      };
+    });
+
+    const workingDays    = rows.filter(r => r.dutyType==='Office Duty' || r.dutyType==='On Duty').length;
+    const holidays        = recs.filter(r => (r.duty_type||'').toLowerCase()==='holiday').length;
+    const leaves            = recs.filter(r => r.duty_type==='Leave' || (r.leave_type && String(r.leave_type).trim())).length;
+    const missedCheckout  = rows.filter(r => r.missedCheckout).length;
+    const absent            = recs.filter(r => (r.duty_type||'').toLowerCase()==='absent' ||
+                              (r.status==='Rejected' && !(r.checkin_time||r.checkinTime))).length;
+    const totalDays         = rows.length;
+    const approved           = recs.filter(r => (r.leave_status||r.status)==='Approved').length;
+    const pending             = recs.filter(r => (r.leave_status||r.status)==='Pending').length;
+    const rejected             = recs.filter(r => (r.leave_status||r.status)==='Rejected').length;
+
+    const headerLine = [emp.emp_id, emp.name, emp.assigned_district, emp.assigned_block]
+      .filter(Boolean).join('  |  ');
+
+    if (format === 'excel') {
+      const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS';
+      const ws = wb.addWorksheet('Daily Log');
+
+      const NAVY  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF1F3864'}};
+      const LBLUE = {type:'pattern',pattern:'solid',fgColor:{argb:'FFDCE6F1'}};
+      const GREEN = {type:'pattern',pattern:'solid',fgColor:{argb:'FF375623'}};
+      const GREEN2= {type:'pattern',pattern:'solid',fgColor:{argb:'FFA9D18E'}};
+      const CBDR  = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}},left:{style:'thin',color:{argb:'FFCCCCCC'}},right:{style:'thin',color:{argb:'FFCCCCCC'}}};
+
+      const COLS = ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'];
+      ws.mergeCells(1,1,1,COLS.length);
+      Object.assign(ws.getCell(1,1),{value:headerLine,font:{bold:true,size:12,color:{argb:'FFFFFFFF'}},fill:NAVY,alignment:{horizontal:'left',vertical:'center'}});
+      ws.getRow(1).height=22;
+
+      COLS.forEach((h,i)=>{
+        const c=ws.getCell(2,i+1);
+        c.value=h; c.font={bold:true,size:10,color:{argb:'FF1F3864'}}; c.fill=LBLUE; c.border=CBDR;
+        c.alignment={horizontal:'center',vertical:'center'};
+        ws.getColumn(i+1).width = i===0?12:i===3?12:16;
+      });
+
+      rows.forEach((r,idx)=>{
+        const rn=3+idx;
+        [r.date,r.checkin,r.checkout,r.total,r.dutyType,r.leaveType].forEach((v,i)=>{
+          const c=ws.getCell(rn,i+1);
+          c.value=v||''; c.border=CBDR; c.font={size:10};
+          c.alignment={horizontal:i===0?'left':'center',vertical:'center'};
+        });
+      });
+
+      let r = 3+rows.length+1;
+      ws.mergeCells(r,1,r,COLS.length);
+      Object.assign(ws.getCell(r,1),{
+        value:`Working Days: ${workingDays}  |  Holidays: ${holidays}  |  Leaves: ${leaves}  |  Missed Checkout: ${missedCheckout}  |  Absent: ${absent}  |  Total: ${totalDays} days`,
+        font:{bold:true,size:10,color:{argb:'FFFFFFFF'}}, fill:GREEN, alignment:{horizontal:'left',vertical:'center'},
+      });
+      ws.getRow(r).height=18;
+
+      r++;
+      ws.mergeCells(r,1,r,COLS.length);
+      Object.assign(ws.getCell(r,1),{
+        value:`Approved: ${approved}  |  Pending: ${pending}  |  Rejected: ${rejected}`,
+        font:{bold:true,size:10,color:{argb:'FF1F3864'}}, fill:GREEN2, alignment:{horizontal:'left',vertical:'center'},
+      });
+      ws.getRow(r).height=18;
+
+      res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition',`attachment; filename="${(emp.name||'Employee').replace(/[^a-zA-Z0-9]+/g,'_')}_DailyLog_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    if (format === 'pdf') {
+      const doc = new PDFDoc({size:'A4',layout:'portrait',margins:{top:30,bottom:30,left:30,right:30}});
+      res.setHeader('Content-Type','application/pdf');
+      res.setHeader('Content-Disposition',`attachment; filename="${(emp.name||'Employee').replace(/[^a-zA-Z0-9]+/g,'_')}_DailyLog_${startDate}_to_${endDate}.pdf"`);
+      res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
+      doc.pipe(res);
+
+      const ML=30, PW=doc.page.width-60;
+      doc.rect(ML,ML,PW,22).fill('#1F3864');
+      doc.fillColor('#FFFFFF').fontSize(11).font('Helvetica-Bold').text(headerLine,ML+6,ML+6,{width:PW-12});
+
+      let y = ML+22;
+      const colX=[ML, ML+70, ML+150, ML+230, ML+310, ML+410];
+      const colW=[70,80,80,80,100,80];
+      ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
+        doc.rect(ML,y,PW,16).fill('#DCE6F1').stroke('#AAAAAA');
+        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text(h,colX[i]+2,y+4,{width:colW[i]-4,align:'center'});
+      });
+      y+=16;
+
+      rows.forEach((r,idx)=>{
+        if (y+14>doc.page.height-100){doc.addPage();y=30;}
+        doc.rect(ML,y,PW,14).fill(idx%2===0?'#FFFFFF':'#F7F7F7').stroke('#DDDDDD');
+        [r.date,r.checkin,r.checkout,r.total,r.dutyType,r.leaveType].forEach((v,i)=>{
+          doc.fillColor('#000').fontSize(7.5).font('Helvetica')
+             .text(String(v||''),colX[i]+2,y+3,{width:colW[i]-4,align:i===0?'left':'center',lineBreak:false,ellipsis:true});
+        });
+        y+=14;
+      });
+
+      y+=6;
+      doc.rect(ML,y,PW,18).fill('#375623');
+      doc.fillColor('#FFFFFF').fontSize(8).font('Helvetica-Bold')
+         .text(`Working Days: ${workingDays}  |  Holidays: ${holidays}  |  Leaves: ${leaves}  |  Missed Checkout: ${missedCheckout}  |  Absent: ${absent}  |  Total: ${totalDays} days`,ML+6,y+5,{width:PW-12});
+      y+=18;
+      doc.rect(ML,y,PW,18).fill('#A9D18E');
+      doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold')
+         .text(`Approved: ${approved}  |  Pending: ${pending}  |  Rejected: ${rejected}`,ML+6,y+5,{width:PW-12});
+
+      doc.end();
+      return;
+    }
+
+    res.status(400).json({success:false,message:'format must be excel or pdf'});
+  } catch(err){
+    console.error('[DailyLogExport]',err);
+    res.status(500).json({success:false,message:'Export failed',error:err.message});
+  }
+});
 module.exports = router;

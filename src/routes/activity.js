@@ -113,7 +113,7 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
 
 // ── GET /api/activity ──────────────────────────────────────────────────
 router.get('/', authenticate, [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly']),
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'custom']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
   query('block').optional().trim(),
@@ -290,60 +290,32 @@ router.get('/stats/block-wise', authenticate, authorize('admin', 'manager', 'hr'
 // ── GET /api/activity/stats/my ────────────────────────────────────────
 // Returns activity stats for the logged-in user for a given date range.
 // Used by the profile page for current-month and all-time toggles.
-router.get('/stats/my', authenticate, async (req, res) => {
+
+
+router.get('/stats/my', authenticate, [
+  query('startDate').optional().isISO8601(),
+  query('endDate').optional().isISO8601(),
+], validate, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    if (!startDate || !endDate)
-      return res.status(400).json({ success: false, message: 'startDate and endDate required' });
+    const { start, end } = dateRangeFromFilter('monthly', startDate, endDate);
 
-    const userId = String(req.user.id);
-    const empId  = req.user.emp_id;
-
-    // Activity records in range (support both uuid _id and legacy emp_id in user_id field)
-    const actIds = [userId, empId].filter(Boolean);
-    const actMatch = {
-      user_id:       actIds.length === 1 ? actIds[0] : { $in: actIds },
-      activity_date: { $gte: startDate, $lte: endDate },
-    };
-
-    // Total activity records submitted
-    const totalActivities = await Activity.countDocuments(actMatch);
-
-    // Unique days that have at least one activity
-    const daysWithAct = await Activity.aggregate([
-      { $match: actMatch },
-      { $group: { _id: '$activity_date' } },
-      { $count: 'total' },
-    ]);
-    const completedDays = daysWithAct[0]?.total || 0;
-
-    // Attendance days (days with a check-in) in range
-    // emp_id in AttendanceRecord is always the MongoDB _id (userId), not the emp code
-    const attMatch = {
-      emp_id:       userId,
-      date:         { $gte: startDate, $lte: endDate },
-      checkin_time: { $exists: true, $ne: null },
-    };
-    const workingDays = await AttendanceRecord.countDocuments(attMatch);
-
-    const pendingDays  = Math.max(0, workingDays - completedDays);
-    const performance  = workingDays > 0 ? Math.round((completedDays / workingDays) * 100) : 0;
-
-    res.json({
-      success: true,
-      data: {
-        completed:       completedDays,
-        totalActivities,
-        pending:         pendingDays,
-        workingDays,
-        performance:     `${performance}%`,
-      },
+    const completed = await Activity.countDocuments({
+      user_id: req.user.id,
+      activity_date: { $gte: start, $lte: end },
     });
+
+    const pending = 0; // placeholder — see NOTE above
+    const TARGET  = 4; // matches /stats/compliance threshold
+    const performance = `${Math.min(100, Math.round((completed / TARGET) * 100))}%`;
+
+    res.json({ success: true, data: { completed, pending, performance }, start, end });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
 
 // ── GET /api/activity/stats/compliance ───────────────────────────────
 router.get('/stats/compliance', authenticate, authorize('admin', 'manager', 'hr'), async (req, res) => {
@@ -378,20 +350,25 @@ router.get('/stats/compliance', authenticate, authorize('admin', 'manager', 'hr'
 
 // ── GET /api/activity/report/excel ────────────────────────────────────
 router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'custom']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
 ], validate, async (req, res) => {
   try {
     const { filter = 'monthly', startDate, endDate } = req.query;
     let start, end;
-    const matchFilter = {};
-    if (filter !== 'all') {
-      ({ start, end } = dateRangeFromFilter(filter, startDate, endDate));
-      matchFilter.activity_date = { $gte: start, $lte: end };
-    } else {
-      start = 'All'; end = 'All';
-    }
+const matchFilter = {};
+if (startDate && endDate) {
+  // Explicit custom range always wins, regardless of filter value
+  start = startDate;
+  end   = endDate;
+  matchFilter.activity_date = { $gte: start, $lte: end };
+} else if (filter !== 'all') {
+  ({ start, end } = dateRangeFromFilter(filter));
+  matchFilter.activity_date = { $gte: start, $lte: end };
+} else {
+  start = 'All'; end = 'All';
+}
     if (req.user.role === 'employee') {
       matchFilter.user_id = req.user.id;
     } else if (req.user.role === 'manager') {
@@ -478,7 +455,9 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
     }
 
     const buf = await wb.xlsx.writeBuffer();
-    const filename = filter === 'all' ? 'activities_all.xlsx' : `activities_${start}_${end}.xlsx`;
+    const filename = (startDate && endDate)
+  ? `activities_${start}_${end}.xlsx`
+  : (filter === 'all' ? 'activities_all.xlsx' : `activities_${start}_${end}.xlsx`);
     res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buf);
@@ -489,21 +468,26 @@ router.get('/report/excel', authenticate, authorize('admin', 'manager', 'employe
 });
 // ── GET /api/activity/report/pdf ──────────────────────────────────────
 router.get('/report/pdf', authenticate, authorize('admin', 'manager', 'employee', 'hr', 'super_admin'), [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'all']),
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'custom']),
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
 ], validate, async (req, res) => {
   try {
     const PDFDocument = require('pdfkit');
     const { filter = 'monthly', startDate, endDate } = req.query;
-    let start, end;
-    const matchFilter = {};
-    if (filter !== 'all') {
-      ({ start, end } = dateRangeFromFilter(filter, startDate, endDate));
-      matchFilter.activity_date = { $gte: start, $lte: end };
-    } else {
-      start = 'All'; end = 'All';
-    }
+   let start, end;
+const matchFilter = {};
+if (startDate && endDate) {
+  // Explicit custom range always wins, regardless of filter value
+  start = startDate;
+  end   = endDate;
+  matchFilter.activity_date = { $gte: start, $lte: end };
+} else if (filter !== 'all') {
+  ({ start, end } = dateRangeFromFilter(filter));
+  matchFilter.activity_date = { $gte: start, $lte: end };
+} else {
+  start = 'All'; end = 'All';
+}
     if (req.user.role === 'employee') {
       matchFilter.user_id = req.user.id;
     } else if (req.user.role === 'manager') {

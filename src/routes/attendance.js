@@ -8,13 +8,19 @@ const { AttendanceRecord, User, Notification, AuditLog } = require('../models/da
 const { authenticate, authorize }                         = require('../middleware/auth');
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
-
+const { employeeFolderPath } = require('../config/cloudinary');
 // ── IST helpers ───────────────────────────────────────────────────────────
 const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' });
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
-
+// ── Slug helper for folder names (e.g. "Krishna Kumar" → "krishna-kumar") ──
+const slugify = (str = '') =>
+  String(str)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'user';
 // ── Multer — selfie images ────────────────────────────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -531,50 +537,94 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours`;
         }
     
-        await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updateFields });
+    //         }
     
-        // Notify manager only if NOT auto-approved
-        if (!isAutoApproved && record.manager_id) {
-          const emp = await User.findById(req.user.id).select('name').lean();
-          const hoursLabel = hoursElapsed >= 6
-            ? `Full day (${workedHours.toFixed(1)} hrs)`
-            : hoursElapsed >= 4
-            ? `Half Day (${workedHours.toFixed(1)} hrs)`
-            : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
-          await notify(
-            record.manager_id,
-            'New Attendance Pending',
-            `${emp.name}'s attendance for ${record.date} is pending approval — ${hoursLabel}`,
-            'warning', record._id, '/manager/queue'
-          );
-        }
+    //     // Notify employee about auto-approval
+    //     if (isAutoApproved) {
+    //       await notify(
+    //         record.emp_id,
+    //         '✅ Attendance Auto-Approved',
+    //         `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
+    //         'success', record._id, '/employee/history'
+    //       );
+    //     }
     
-        // Notify employee about auto-approval
-        if (isAutoApproved) {
-          await notify(
-            record.emp_id,
-            '✅ Attendance Auto-Approved',
-            `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
-            'success', record._id, '/employee/history'
-          );
-        }
+    //     await AuditLog.create({
+    //       _id: uuidv4(), user_id: req.user.id,
+    //       action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
+    //       entity_type: 'attendance', entity_id: record._id,
+    //     });
     
-        await AuditLog.create({
-          _id: uuidv4(), user_id: req.user.id,
-          action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
-          entity_type: 'attendance', entity_id: record._id,
-        });
+    //     const updated = await AttendanceRecord.findById(record._id).lean();
+    //     res.json({
+    //       success: true,
+    //       message: isAutoApproved
+    //         ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
+    //         : 'Checked out and submitted for approval',
+    //       autoApproved:          isAutoApproved,
+    //       faceConfidence:        checkoutFaceConfidence,
+    //       data: formatRecord(updated),
+    //     });
+    //   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+    // });
     
-        const updated = await AttendanceRecord.findById(record._id).lean();
-        res.json({
-          success: true,
-          message: isAutoApproved
-            ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
-            : 'Checked out and submitted for approval',
-          autoApproved:          isAutoApproved,
-          faceConfidence:        checkoutFaceConfidence,
-          data: formatRecord(updated),
-        });
+        // ATOMIC guarded write — only succeeds if checkout_time is STILL null
+// right now. If the 9-hour auto-checkout cron beat this request to it,
+// updated will be null and nothing gets overwritten either way.
+const updated = await AttendanceRecord.findOneAndUpdate(
+  { _id: record._id, checkout_time: null },
+  { $set: updateFields },
+  { new: true }
+).lean();
+
+if (!updated) {
+  return res.status(409).json({
+    success: false,
+    message: 'This record was already auto-checked-out by the system. Please refresh and check your attendance history.',
+  });
+}
+
+// Notify manager only if NOT auto-approved
+if (!isAutoApproved && record.manager_id) {
+  const emp = await User.findById(req.user.id).select('name').lean();
+  const hoursLabel = hoursElapsed >= 6
+    ? `Full day (${workedHours.toFixed(1)} hrs)`
+    : hoursElapsed >= 4
+    ? `Half Day (${workedHours.toFixed(1)} hrs)`
+    : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
+  await notify(
+    record.manager_id,
+    'New Attendance Pending',
+    `${emp.name}'s attendance for ${record.date} is pending approval — ${hoursLabel}`,
+    'warning', record._id, '/manager/queue'
+  );
+}
+
+// Notify employee about auto-approval
+if (isAutoApproved) {
+  await notify(
+    record.emp_id,
+    '✅ Attendance Auto-Approved',
+    `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
+    'success', record._id, '/employee/history'
+  );
+}
+
+await AuditLog.create({
+  _id: uuidv4(), user_id: req.user.id,
+  action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
+  entity_type: 'attendance', entity_id: record._id,
+});
+
+res.json({
+  success: true,
+  message: isAutoApproved
+    ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
+    : 'Checked out and submitted for approval',
+  autoApproved:   isAutoApproved,
+  faceConfidence: checkoutFaceConfidence,
+  data: formatRecord(updated),
+});
       } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
     });
     
@@ -976,7 +1026,7 @@ router.delete('/clear-scan', authenticate, authorize('employee'), async (req, re
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Signed reports endpoints
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
 router.post('/upload-signed-report', authenticate, uploadSignedReport.single('signedReport'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
@@ -991,8 +1041,8 @@ router.post('/upload-signed-report', authenticate, uploadSignedReport.single('si
     // }
     const monthLabel = new Date(`${month}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
     const targetUser  = await User.findById(targetEmpId).select('emp_id name').lean();
-    const folderLabel = `${slugify(targetUser?.name)}(${targetUser?.emp_id || targetEmpId})`;
-    const signedPath = await uploadFile(req.file.buffer, `ams/employees/${folderLabel}/signed-reports`, req.file.originalname, req.file.mimetype);
+   const folderPath = employeeFolderPath(targetUser?.emp_id, targetEmpId);
+const signedPath = await uploadFile(req.file.buffer, `${folderPath}/signed-reports`, req.file.originalname, req.file.mimetype);
     // const entry = { path: signedPath, name: req.file.originalname, month, month_label: monthLabel, uploaded_at: new Date(), uploaded_by: req.user.id };
     // const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 3);
     // await User.findByIdAndUpdate(targetEmpId, { $pull: { signed_reports: { uploaded_at: { $lt: cutoff } } } }, { strict: false });

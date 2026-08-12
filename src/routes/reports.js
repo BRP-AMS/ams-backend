@@ -1157,6 +1157,10 @@ router.get('/dashboard-stats', authenticate, async (req,res)=>{
 //  GET /api/reports/daily-log-export
 //  Single-employee daily log: Date | Check-In | Check-Out | Total Time | Duty Type | Leave Type
 //  status: 'All' | 'Today Check-in' | 'Pending' | 'Approved' | 'Rejected'  (mirrors the queue tabs)
+//
+//  Check-In colour rule:  before 10:00 AM → green (good) | at/after 10:00 AM → red (late)
+//  Check-Out colour rule: before 4:00 PM  → red (early)  | at/after 5:30 PM  → green (good)
+//                         between 4:00–5:30 PM → neutral (no fill)
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/daily-log-export',
   authenticate,
@@ -1185,28 +1189,83 @@ router.get('/daily-log-export',
     if (status && !['All','Today Check-in'].includes(status)) recFilter.status = status;
 
     let recs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
-    if (status === 'Today Check-in') recs = recs.filter(r => r.checkin_time || r.checkinTime);
+    if (status === 'Today Check-in') {
+      recs = recs.filter(r =>
+        r.checkin_time || r.checkinTime || r.check_in_time || r.checkIn
+      );
+    }
 
-    const fmtHM = mins => `${Math.floor(mins/60)}h ${mins%60}m`;
+    // ── Safe time parsing: handles ISO datetime, plain "HH:mm", epoch, or Date ──
+    const parseDateTime = (dateStr, timeVal) => {
+      if (!timeVal) return null;
+      if (timeVal instanceof Date) return isNaN(timeVal) ? null : timeVal;
+      if (typeof timeVal === 'number') {
+        const d = new Date(timeVal);
+        return isNaN(d) ? null : d;
+      }
+      if (typeof timeVal === 'string') {
+        // Full ISO date/datetime string
+        if (/^\d{4}-\d{2}-\d{2}/.test(timeVal) || timeVal.includes('T')) {
+          const d = new Date(timeVal);
+          return isNaN(d) ? null : d;
+        }
+        // Plain "HH:mm" or "HH:mm:ss" — combine with the record's own date
+        const m = timeVal.match(/^(\d{1,2}):(\d{2})(:(\d{2}))?/);
+        if (m && dateStr) {
+          const d = new Date(`${dateStr}T${m[1].padStart(2,'0')}:${m[2]}:${m[4]||'00'}+05:30`);
+          return isNaN(d) ? null : d;
+        }
+      }
+      return null;
+    };
+
+    const fmtHM   = mins => `${Math.floor(mins/60)}h ${mins%60}m`;
+    const timeStr = d => d ? d.toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false}) : '';
+
+    // Threshold buckets — matches the legend (Check-In: 10 AM · Check-Out: 4 PM / 5:30 PM)
+    const CHECKIN_CUTOFF = 10*60;         // 10:00 AM in minutes
+    const CHECKOUT_EARLY = 16*60;         // 4:00 PM
+    const CHECKOUT_FULL  = 17*60 + 30;    // 5:30 PM
+    const minsOfDay = d => d.getHours()*60 + d.getMinutes();
+
+    const checkinStatus = d => {
+      if (!d) return null;
+      return minsOfDay(d) < CHECKIN_CUTOFF ? 'good' : 'late'; // green / red
+    };
+    const checkoutStatus = d => {
+      if (!d) return null;
+      const m = minsOfDay(d);
+      if (m < CHECKOUT_EARLY) return 'early';   // red
+      if (m >= CHECKOUT_FULL) return 'good';    // green
+      return null;                              // neutral, between 4–5:30
+    };
+
     const rows = recs.map(r => {
-      const ci = r.checkin_time || r.checkinTime;
-      const co = r.checkout_time || r.checkoutTime;
-      let total = '', coDisplay = '';
+      const ciRaw = r.checkin_time ?? r.checkinTime ?? r.check_in_time ?? r.checkIn;
+      const coRaw = r.checkout_time ?? r.checkoutTime ?? r.check_out_time ?? r.checkOut;
+      const ci = parseDateTime(r.date, ciRaw);
+      const co = parseDateTime(r.date, coRaw);
+
+      let total = '';
+      let coDisplay = '';
       if (ci && co) {
-        const mins = Math.round((new Date(co)-new Date(ci))/60000);
-        total = mins>0 ? fmtHM(mins) : '';
-        coDisplay = new Date(co).toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false});
+        const mins = Math.round((co - ci) / 60000);
+        total = mins > 0 ? fmtHM(mins) : '';
+        coDisplay = timeStr(co);
       } else if (ci && !co) {
         coDisplay = 'Missed';
       }
+
       return {
         date: r.date,
-        checkin: ci ? new Date(ci).toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false}) : '',
+        checkin: ci ? timeStr(ci) : '',
         checkout: coDisplay,
         total,
         dutyType: r.duty_type || '',
         leaveType: r.leave_type || '',
         missedCheckout: !!(ci && !co),
+        checkinFlag:  checkinStatus(ci),
+        checkoutFlag: co ? checkoutStatus(co) : null,
       };
     });
 
@@ -1215,7 +1274,7 @@ router.get('/daily-log-export',
     const leaves            = recs.filter(r => r.duty_type==='Leave' || (r.leave_type && String(r.leave_type).trim())).length;
     const missedCheckout  = rows.filter(r => r.missedCheckout).length;
     const absent            = recs.filter(r => (r.duty_type||'').toLowerCase()==='absent' ||
-                              (r.status==='Rejected' && !(r.checkin_time||r.checkinTime))).length;
+                              (r.status==='Rejected' && !(r.checkin_time||r.checkinTime||r.check_in_time||r.checkIn))).length;
     const totalDays         = rows.length;
     const approved           = recs.filter(r => (r.leave_status||r.status)==='Approved').length;
     const pending             = recs.filter(r => (r.leave_status||r.status)==='Pending').length;
@@ -1224,38 +1283,84 @@ router.get('/daily-log-export',
     const headerLine = [emp.emp_id, emp.name, emp.assigned_district, emp.assigned_block]
       .filter(Boolean).join('  |  ');
 
+    // ── Filename helper — used by both formats ────────────────────────────
+    const sanitize = s => String(s||'').trim().replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+    const rangePart = status === 'Today Check-in' ? sanitize(startDate) : `${startDate}_to_${endDate}`;
+    const fnameBase = `${sanitize(emp.name)}${emp.emp_id?'_'+sanitize(emp.emp_id):''}_${sanitize(status)}_${rangePart}`;
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  EXCEL
+    // ══════════════════════════════════════════════════════════════════════
     if (format === 'excel') {
       const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS';
       const ws = wb.addWorksheet('Daily Log');
 
-      const NAVY  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF1F3864'}};
-      const LBLUE = {type:'pattern',pattern:'solid',fgColor:{argb:'FFDCE6F1'}};
-      const GREEN = {type:'pattern',pattern:'solid',fgColor:{argb:'FF375623'}};
-      const GREEN2= {type:'pattern',pattern:'solid',fgColor:{argb:'FFA9D18E'}};
-      const CBDR  = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}},left:{style:'thin',color:{argb:'FFCCCCCC'}},right:{style:'thin',color:{argb:'FFCCCCCC'}}};
+      const NAVY   = {type:'pattern',pattern:'solid',fgColor:{argb:'FF1F3864'}};
+      const LBLUE  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFDCE6F1'}};
+      const GREEN  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF375623'}};
+      const GREEN2 = {type:'pattern',pattern:'solid',fgColor:{argb:'FFA9D18E'}};
+      const FILL_GOOD = {type:'pattern',pattern:'solid',fgColor:{argb:'FFD1FAE5'}};
+      const FILL_LATE = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFEE2E2'}};
+      const COLOR_GOOD = 'FF047857';
+      const COLOR_LATE = 'FFB91C1C';
+      const CBDR = {
+        top:{style:'thin',color:{argb:'FFCCCCCC'}}, bottom:{style:'thin',color:{argb:'FFCCCCCC'}},
+        left:{style:'thin',color:{argb:'FFCCCCCC'}}, right:{style:'thin',color:{argb:'FFCCCCCC'}},
+      };
 
-      const COLS = ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'];
-      ws.mergeCells(1,1,1,COLS.length);
-      Object.assign(ws.getCell(1,1),{value:headerLine,font:{bold:true,size:12,color:{argb:'FFFFFFFF'}},fill:NAVY,alignment:{horizontal:'left',vertical:'center'}});
-      ws.getRow(1).height=22;
+     const COLS = ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'];
 
-      COLS.forEach((h,i)=>{
-        const c=ws.getCell(2,i+1);
-        c.value=h; c.font={bold:true,size:10,color:{argb:'FF1F3864'}}; c.fill=LBLUE; c.border=CBDR;
-        c.alignment={horizontal:'center',vertical:'center'};
-        ws.getColumn(i+1).width = i===0?12:i===3?12:16;
-      });
+// Row 1 — employee info banner
+ws.mergeCells(1,1,1,COLS.length);
+Object.assign(ws.getCell(1,1),{
+  value:headerLine,
+  font:{bold:true,size:12,color:{argb:'FFFFFFFF'}},
+  fill:NAVY,
+  alignment:{horizontal:'left',vertical:'center'},
+});
+ws.getRow(1).height=22;
 
-      rows.forEach((r,idx)=>{
-        const rn=3+idx;
+// Row 2 — filter/period line
+ws.mergeCells(2,1,2,COLS.length);
+Object.assign(ws.getCell(2,1),{
+  value: `Filter: ${status}   |   Period: ${status==='Today Check-in' ? startDate : `${startDate} to ${endDate}`}`,
+  font:{italic:true,size:9,color:{argb:'FF555555'}},
+  alignment:{horizontal:'left',vertical:'center'},
+});
+ws.getRow(2).height=15;
+
+// Row 3 — column headers (THIS is the block that must run, once, for ALL 6 columns)
+COLS.forEach((h,i)=>{
+  const c=ws.getCell(3,i+1);
+  c.value = h;
+  c.font  = {bold:true,size:10,color:{argb:'FF1F3864'}};
+  c.fill  = LBLUE;
+  c.border = CBDR;
+  c.alignment = {horizontal:'center',vertical:'center'};
+  ws.getColumn(i+1).width = i===0?12:i===3?12:16;
+});
+
+// Data rows start at row 4
+rows.forEach((r,idx)=>{
+  const rn=4+idx;
         [r.date,r.checkin,r.checkout,r.total,r.dutyType,r.leaveType].forEach((v,i)=>{
           const c=ws.getCell(rn,i+1);
           c.value=v||''; c.border=CBDR; c.font={size:10};
           c.alignment={horizontal:i===0?'left':'center',vertical:'center'};
+
+          // Column 2 (index 1) = Check-In, Column 3 (index 2) = Check-Out
+          if (i===1 && r.checkinFlag) {
+            c.fill = r.checkinFlag==='good' ? FILL_GOOD : FILL_LATE;
+            c.font = {size:10, bold:true, color:{argb: r.checkinFlag==='good' ? COLOR_GOOD : COLOR_LATE}};
+          }
+          if (i===2 && r.checkoutFlag) {
+            c.fill = r.checkoutFlag==='good' ? FILL_GOOD : FILL_LATE;
+            c.font = {size:10, bold:true, color:{argb: r.checkoutFlag==='good' ? COLOR_GOOD : COLOR_LATE}};
+          }
         });
       });
 
-      let r = 3+rows.length+1;
+      let r = 4+rows.length+1;
       ws.mergeCells(r,1,r,COLS.length);
       Object.assign(ws.getCell(r,1),{
         value:`Working Days: ${workingDays}  |  Holidays: ${holidays}  |  Leaves: ${leaves}  |  Missed Checkout: ${missedCheckout}  |  Absent: ${absent}  |  Total: ${totalDays} days`,
@@ -1272,16 +1377,19 @@ router.get('/daily-log-export',
       ws.getRow(r).height=18;
 
       res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition',`attachment; filename="${(emp.name||'Employee').replace(/[^a-zA-Z0-9]+/g,'_')}_DailyLog_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Content-Disposition',`attachment; filename="${fnameBase}.xlsx"`);
       res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    //  PDF
+    // ══════════════════════════════════════════════════════════════════════
     if (format === 'pdf') {
       const doc = new PDFDoc({size:'A4',layout:'portrait',margins:{top:30,bottom:30,left:30,right:30}});
       res.setHeader('Content-Type','application/pdf');
-      res.setHeader('Content-Disposition',`attachment; filename="${(emp.name||'Employee').replace(/[^a-zA-Z0-9]+/g,'_')}_DailyLog_${startDate}_to_${endDate}.pdf"`);
+      res.setHeader('Content-Disposition',`attachment; filename="${fnameBase}.pdf"`);
       res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
       doc.pipe(res);
 
@@ -1290,6 +1398,10 @@ router.get('/daily-log-export',
       doc.fillColor('#FFFFFF').fontSize(11).font('Helvetica-Bold').text(headerLine,ML+6,ML+6,{width:PW-12});
 
       let y = ML+22;
+      doc.fillColor('#555555').fontSize(8).font('Helvetica-Oblique')
+         .text(`Filter: ${status}   |   Period: ${status==='Today Check-in' ? startDate : `${startDate} to ${endDate}`}`,ML,y+3,{width:PW});
+      y += 16;
+
       const colX=[ML, ML+70, ML+150, ML+230, ML+310, ML+410];
       const colW=[70,80,80,80,100,80];
       ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
@@ -1302,7 +1414,10 @@ router.get('/daily-log-export',
         if (y+14>doc.page.height-100){doc.addPage();y=30;}
         doc.rect(ML,y,PW,14).fill(idx%2===0?'#FFFFFF':'#F7F7F7').stroke('#DDDDDD');
         [r.date,r.checkin,r.checkout,r.total,r.dutyType,r.leaveType].forEach((v,i)=>{
-          doc.fillColor('#000').fontSize(7.5).font('Helvetica')
+          let color = '#000000';
+          if (i===1 && r.checkinFlag)  color = r.checkinFlag==='good'  ? '#047857' : '#B91C1C';
+          if (i===2 && r.checkoutFlag) color = r.checkoutFlag==='good' ? '#047857' : '#B91C1C';
+          doc.fillColor(color).fontSize(7.5).font(color==='#000000' ? 'Helvetica' : 'Helvetica-Bold')
              .text(String(v||''),colX[i]+2,y+3,{width:colW[i]-4,align:i===0?'left':'center',lineBreak:false,ellipsis:true});
         });
         y+=14;

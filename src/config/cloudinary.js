@@ -1,12 +1,11 @@
 // src/config/cloudinary.js
-const cloudinary            = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const multer                = require('multer');
+const cloudinary = require('cloudinary').v2;
+const multer      = require('multer');
 
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'drvvupxhz',
-  api_key:    process.env.CLOUDINARY_API_KEY    || '719965482646155',
-  api_secret: process.env.CLOUDINARY_API_SECRET || 'SWqebIRK3O8-GsVvb-uzLe16vcg',
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME ,
+  api_key:    process.env.CLOUDINARY_API_KEY    ,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
   secure:     true,
 });
 
@@ -16,30 +15,54 @@ const getResourceType = (mimetype) => {
   return 'raw';
 };
 
-const makeStorage = (folder) => new CloudinaryStorage({
-  cloudinary,
-  params: async (req, file) => {
-    const ext      = file.originalname.split('.').pop().toLowerCase();
-    const baseName = file.originalname.replace(/\.[^/.]+$/, '').replace(/\s+/g, '_');
-    const isImage  = file.mimetype.startsWith('image/');
+// ── Shared employee-folder naming helper ───────────────────────────────────
+// Single source of truth so EVERY route that uploads employee files
+// (signed reports, monthly reports, reapply docs, etc.) nests under the
+// SAME parent folder, e.g. "krishna(456)", instead of each route building
+// its own (different) folder string.
+const slugify = (str = '') =>
+  String(str)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'user';
 
-    return {
-      folder,
-      resource_type: 'auto',
-      // Images don't need extension, files (pdf/docx/xlsx) MUST have extension
-      public_id: isImage
-        ? `${Date.now()}_${baseName}`
-        : `${Date.now()}_${baseName}.${ext}`,
-      ...(isImage && {
-        transformation: [{ quality: 'auto', fetch_format: 'auto' }],
-      }),
-    };
-  },
-});
+// name -> "krishna", empId/fallbackId -> "456"  =>  "krishna(456)"
+const employeeFolderPath = (empId, fallbackId) =>
+  `users/${empId || fallbackId}`;
+
+// Upload a buffer to Cloudinary (replaces multer-storage-cloudinary)
+const uploadBufferToCloudinary = (buffer, options) =>
+  new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(options, (err, result) =>
+      err ? reject(err) : resolve(result)
+    );
+    stream.end(buffer);
+  });
+
+// Builds Cloudinary upload params for a given file (mirrors the old
+// makeStorage() params function, but called manually after multer
+// buffers the file in memory).
+const buildUploadOptions = (folder, file) => {
+  const ext      = file.originalname.split('.').pop().toLowerCase();
+  const baseName = file.originalname.replace(/\.[^/.]+$/, '').replace(/\s+/g, '_');
+  const isImage  = file.mimetype.startsWith('image/');
+
+  return {
+    folder,
+    resource_type: 'auto',
+    public_id: isImage
+      ? `${Date.now()}_${baseName}`
+      : `${Date.now()}_${baseName}.${ext}`,
+    ...(isImage && {
+      transformation: [{ quality: 'auto', fetch_format: 'auto' }],
+    }),
+  };
+};
 
 // ── Selfie uploader (checkin / checkout photos) ───────────────────────────
 const selfieUploader = multer({
-  storage: makeStorage('brp/attendance/selfies'),
+  storage: multer.memoryStorage(),
   limits:  { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
@@ -49,7 +72,7 @@ const selfieUploader = multer({
 
 // ── Activity document uploader ────────────────────────────────────────────
 const activityUploader = multer({
-  storage: makeStorage('brp/activities/documents'),
+  storage: multer.memoryStorage(),
   limits:  { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
@@ -60,7 +83,7 @@ const activityUploader = multer({
 
 // ── Schedule attachment uploader ──────────────────────────────────────────
 const scheduleUploader = multer({
-  storage: makeStorage('brp/schedules/attachments'),
+  storage: multer.memoryStorage(),
   limits:  { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xlsx/;
@@ -71,7 +94,7 @@ const scheduleUploader = multer({
 
 // ── Reapply docs uploader (attendance re-apply) ───────────────────────────
 const reapplyUploader = multer({
-  storage: makeStorage('brp/attendance/reapply'),
+  storage: multer.memoryStorage(),
   limits:  { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const allowed = /jpeg|jpg|png|gif|pdf|doc|docx/;
@@ -117,4 +140,8 @@ module.exports = {
   reapplyUploader,
   bulkExcelUploader,
   deleteFromCloudinary,
+  slugify,
+ employeeFolderPath, 
+  uploadBufferToCloudinary,
+  buildUploadOptions,
 };

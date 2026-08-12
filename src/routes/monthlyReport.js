@@ -4,7 +4,7 @@ const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { authenticate: protect } = require('../middleware/auth');
 const { User, MonthlyReport } = require('../models/database');
-
+const { employeeFolderPath } = require('../config/cloudinary');
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
@@ -25,8 +25,8 @@ const currentMonthKey = () => {
 };
 
 // Simple, safe folder label built straight from the user — no external helper needed.
-const safeSegment = (v) => String(v || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-const employeeFolder = (userId, empId) => safeSegment(empId) || safeSegment(userId);
+// const safeSegment = (v) => String(v || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+// const employeeFolder = (userId, empId) => safeSegment(empId) || safeSegment(userId);
 
 // ── GET /api/monthly-report — full history, own or (role-gated) another user's ──
 router.get('/', protect, async (req, res) => {
@@ -55,6 +55,7 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
+
 // ── POST /api/monthly-report/upload — EMPLOYEES ONLY ─────────────────────
 router.post('/upload', protect, upload.single('file'), async (req, res) => {
   try {
@@ -79,11 +80,14 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
 
     const isImage = req.file.mimetype.startsWith('image/');
     const isPdf   = req.file.mimetype === 'application/pdf';
-    const folderLabel = employeeFolder(req.user.id, req.user.emp_id);
+
+    const currentUser = await User.findById(req.user.id).select('emp_id').lean();
+    const folderPath  = employeeFolderPath(currentUser?.emp_id, req.user.id);
+
     const result = await uploadToCloudinary(req.file.buffer, {
-      folder:          `ams/employees/${folderLabel}/monthly_reports`,
+      folder:          `${folderPath}/monthly_reports`,
       resource_type:   (isImage || isPdf) ? 'image' : 'raw',
-      public_id:       `${folderLabel}_activity_report_${month_key}`,
+      public_id:       `activity_report_${month_key}`,
       use_filename:    true,
       unique_filename: false,
     });

@@ -1404,11 +1404,11 @@ rows.forEach((r,idx)=>{
 
       const colX=[ML, ML+70, ML+150, ML+230, ML+310, ML+410];
       const colW=[70,80,80,80,100,80];
-      ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
-        doc.rect(ML,y,PW,16).fill('#DCE6F1').stroke('#AAAAAA');
-        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text(h,colX[i]+2,y+4,{width:colW[i]-4,align:'center'});
-      });
-      y+=16;
+    ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
+  doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold')
+     .text(h, colX[i]+2, y+4, { width: colW[i]-4, align: 'center' });
+});
+y += 16;
 
       rows.forEach((r,idx)=>{
         if (y+14>doc.page.height-100){doc.addPage();y=30;}

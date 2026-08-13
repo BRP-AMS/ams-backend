@@ -341,6 +341,17 @@ cron.schedule('0 18-23 * * *', async () => {
 //     console.error('[AutoCheckout Cron] Error:', err.message);
 //   }
 // });
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 3 — Every 15 min: Auto-checkout employees after 9 hours OR at 23:59 IST
+//
+// Whichever comes first:
+//   a) check-in time + 9 hours  (matches AUTO_APPROVE_HOURS in checkout route)
+//   b) 23:59 IST of the record's date  (EOD cutoff — day change safety net)
+//
+// If the employee checks out manually first, this cron does nothing to
+// that record — the atomic guard below only fires when checkout_time is
+// STILL null at the moment this cron writes.
+// ─────────────────────────────────────────────────────────────────────────────
 cron.schedule('*/15 * * * *', async () => {
   try {
     const unchecked = await AttendanceRecord.find({
@@ -377,13 +388,15 @@ cron.schedule('*/15 * * * *', async () => {
       const updated = await AttendanceRecord.findOneAndUpdate(
         { _id: record._id, checkout_time: null, status: 'Draft' },
         { $set: {
-            checkout_time:    checkoutTime,
-            worked_hours:     workedHours,
-            is_auto_checkout: true,
-            status:           'Approved',
-            actioned_at:      now,
-            manager_remark:   remark,
-            submitted_at:     now,
+            checkout_time:             checkoutTime,
+            worked_hours:              workedHours,
+            is_auto_checkout:          true,
+            status:                    'Approved',
+            actioned_by:               null,
+            actioned_at:               now,
+            manager_remark:            remark,
+            submitted_at:              now,
+            checkout_location_address: 'System Auto-Checkout (no GPS captured)',
         }},
         { new: true }
       );

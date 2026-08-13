@@ -571,60 +571,62 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
         // ATOMIC guarded write — only succeeds if checkout_time is STILL null
 // right now. If the 9-hour auto-checkout cron beat this request to it,
 // updated will be null and nothing gets overwritten either way.
-const updated = await AttendanceRecord.findOneAndUpdate(
-  { _id: record._id, checkout_time: null },
-  { $set: updateFields },
-  { new: true }
-).lean();
+// ATOMIC guarded write — only succeeds if checkout_time is STILL null
+        // right now. If the 9-hour auto-checkout cron beat this request to
+        // it, `updated` will be null and nothing gets overwritten either way.
+        const updated = await AttendanceRecord.findOneAndUpdate(
+          { _id: record._id, checkout_time: null },
+          { $set: updateFields },
+          { new: true }
+        ).lean();
 
-if (!updated) {
-  return res.status(409).json({
-    success: false,
-    message: 'This record was already auto-checked-out by the system. Please refresh and check your attendance history.',
-  });
-}
+        if (!updated) {
+          return res.status(409).json({
+            success: false,
+            message: 'This record was already auto-checked-out by the system. Please refresh and check your attendance history.',
+          });
+        }
 
-// Notify manager only if NOT auto-approved
-if (!isAutoApproved && record.manager_id) {
-  const emp = await User.findById(req.user.id).select('name').lean();
-  const hoursLabel = hoursElapsed >= 6
-    ? `Full day (${workedHours.toFixed(1)} hrs)`
-    : hoursElapsed >= 4
-    ? `Half Day (${workedHours.toFixed(1)} hrs)`
-    : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
-  await notify(
-    record.manager_id,
-    'New Attendance Pending',
-    `${emp.name}'s attendance for ${record.date} is pending approval — ${hoursLabel}`,
-    'warning', record._id, '/manager/queue'
-  );
-}
-
-// Notify employee about auto-approval
-if (isAutoApproved) {
-  await notify(
-    record.emp_id,
-    '✅ Attendance Auto-Approved',
-    `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
-    'success', record._id, '/employee/history'
-  );
-}
-
-await AuditLog.create({
-  _id: uuidv4(), user_id: req.user.id,
-  action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
-  entity_type: 'attendance', entity_id: record._id,
-});
-
-res.json({
-  success: true,
-  message: isAutoApproved
-    ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
-    : 'Checked out and submitted for approval',
-  autoApproved:   isAutoApproved,
-  faceConfidence: checkoutFaceConfidence,
-  data: formatRecord(updated),
-});
+        // Notify manager only if NOT auto-approved
+        if (!isAutoApproved && record.manager_id) {
+          const emp = await User.findById(req.user.id).select('name').lean();
+          const hoursLabel = hoursElapsed >= 9
+            ? `Full day (${workedHours.toFixed(1)} hrs)`
+            : hoursElapsed >= 4
+            ? `Half Day (${workedHours.toFixed(1)} hrs)`
+            : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
+          await notify(
+            record.manager_id,
+            'New Attendance Pending',
+            `${emp.name}'s attendance for ${record.date} is pending approval — ${hoursLabel}`,
+            'warning', record._id, '/manager/queue'
+          );
+        }
+    
+        // Notify employee about auto-approval
+        if (isAutoApproved) {
+          await notify(
+            record.emp_id,
+            '✅ Attendance Auto-Approved',
+            `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
+            'success', record._id, '/employee/history'
+          );
+        }
+    
+        await AuditLog.create({
+          _id: uuidv4(), user_id: req.user.id,
+          action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
+          entity_type: 'attendance', entity_id: record._id,
+        });
+    
+        res.json({
+          success: true,
+          message: isAutoApproved
+            ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
+            : 'Checked out and submitted for approval',
+          autoApproved: isAutoApproved,
+          data: formatRecord(updated),
+        });
       } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
     });
     

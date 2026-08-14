@@ -13,7 +13,7 @@ const userSchema = new mongoose.Schema({
   name:              { type: String, required: true },
   email:             { type: String, unique: true, required: true },
   password_hash:     { type: String, required: true },
-  role:              { type: String, enum: ['employee', 'manager', 'admin', 'hr', 'super_admin'], required: true },
+  role:              { type: String, enum: ['employee', 'manager', 'admin', 'hr', 'super_admin', 'department_portal'], required: true },
   role_type:         { type: String, default: null },
   department:        { type: String, required: true },
   manager_id:        { type: String, ref: 'User', default: null },
@@ -44,6 +44,8 @@ const userSchema = new mongoose.Schema({
   // ── Account lockout ─────────────────────────────────────────────────
   failed_login_attempts: { type: Number, default: 0 },
   login_locked_until:    { type: Date, default: null },
+  // ── Session management ───────────────────────────────────────────────
+  active_session_jti:    { type: String, default: null },
 // ── Profile Photo ─────────────────────────────────────────────────────────
 profile_photo_path:      { type: String, default: null },  // Cloudinary URL
 profile_photo_uploaded:  { type: Date,   default: null },  // when first uploaded

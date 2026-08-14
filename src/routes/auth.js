@@ -192,8 +192,8 @@ router.post('/login', loginLimiter, [
     // If input looks like an email, search by email; otherwise search by emp_id
     const isEmailInput = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw);
     const query = isEmailInput
-      ? { email: raw.toLowerCase(), is_active: 1 }
-      : { emp_id: raw, is_active: 1 };
+      ? { email: raw.toLowerCase(), is_active: { $ne: 0 } }
+      : { emp_id: raw,              is_active: { $ne: 0 } };
     const user = await User.findOne(query).lean();
 
     // Account lockout check
@@ -238,11 +238,13 @@ router.post('/login', loginLimiter, [
     // Reset failed login attempts on successful login
     await User.findByIdAndUpdate(user._id, { $set: { failed_login_attempts: 0, login_locked_until: null } });
 
+    const sessionJti = uuidv4();
     const token = jwt.sign(
-      { id: user._id, role: user.role, emp_id: user.emp_id },
+      { id: user._id, role: user.role, emp_id: user.emp_id, jti: sessionJti },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
     );
+    await User.findByIdAndUpdate(user._id, { $set: { active_session_jti: sessionJti } });
 
     await AuditLog.create({ _id: uuidv4(), user_id: user._id, action: 'LOGIN', ip_address: req.ip });
 
@@ -499,6 +501,7 @@ router.post('/reset-password-otp', otpLimiter, [
 // ── POST /api/auth/reset-password ────────────────────────────────────────
 router.post('/reset-password', [
   body('token').notEmpty().withMessage('Reset token is required'),
+  body('otp').notEmpty().withMessage('OTP is required'),
   body('newPassword')
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters')
     .matches(/[A-Z]/).withMessage('Must contain at least one uppercase letter')
@@ -506,7 +509,7 @@ router.post('/reset-password', [
     .matches(/[!@#$%^&*(),.?":{}|<>]/).withMessage('Must contain at least one special character'),
 ], validate, async (req, res) => {
   try {
-    const { token, newPassword } = req.body;
+    const { token, otp, newPassword } = req.body;
     const hashedTok = hashToken(token);
 
     const user = await User.findOne({
@@ -517,6 +520,12 @@ router.post('/reset-password', [
 
     if (!user)
       return res.status(400).json({ success: false, message: 'Reset link is invalid or has expired.' });
+
+    // Verify OTP
+    if (!user.pwd_reset_otp || !user.pwd_reset_otp_expires || new Date() > new Date(user.pwd_reset_otp_expires))
+      return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+    if (user.pwd_reset_otp !== hashToken(otp))
+      return res.status(400).json({ success: false, message: 'Invalid OTP. Please check your email.' });
 
     await User.findByIdAndUpdate(user._id, {
       $set: {

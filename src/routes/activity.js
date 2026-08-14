@@ -152,7 +152,7 @@ router.get('/', authenticate, [
     if (block)        matchFilter.block_name   = block;
     if (sector)       matchFilter.sector       = sector;
     if (support_type) matchFilter.support_type = support_type;
-    if (user_id) matchFilter.user_id = user_id;
+    if (user_id && ['admin', 'hr', 'super_admin'].includes(req.user.role)) matchFilter.user_id = user_id;
 
     let total;
     let rows;

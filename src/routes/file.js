@@ -1,9 +1,10 @@
 const express = require('express');
 const router  = express.Router();
 const fetch   = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const { authenticate } = require('../middleware/auth');
 
 // GET /api/file/proxy?url=<cloudinary_url>&name=<filename>&disposition=inline|attachment
-router.get('/proxy', async (req, res) => {
+router.get('/proxy', authenticate, async (req, res) => {
   const { url, name, disposition } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
 
@@ -38,12 +39,12 @@ router.get('/proxy', async (req, res) => {
 
     res.setHeader('Content-Type', safeType);
     res.setHeader('Content-Disposition', `${disp}; filename="${filename}"`);
-    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('Cache-Control', 'private, no-store');
 
     const buf = await upstream.arrayBuffer();
     res.send(Buffer.from(buf));
   } catch (err) {
-    res.status(502).json({ error: 'proxy error', details: err.message });
+    res.status(502).json({ error: 'proxy error' });
   }
 });
 

@@ -126,32 +126,6 @@ router.get('/block-list', authenticate, (req, res) => {
   res.json({ success: true, data: DISTRICT_BLOCKS });
 });
 
-// ── GET /api/msme/debug (NO AUTH — temp diagnostic) ───────────────────────
-router.get('/debug', async (req, res) => {
-  try {
-    const mongoose = require('mongoose');
-    const conn     = mongoose.connection;
-    const dbHost   = conn.host || 'unknown';
-    const dbName   = conn.name || 'unknown';
-
-    const total   = await MsmeMaster.countDocuments();
-    const active  = await MsmeMaster.countDocuments({ is_active: true });
-    const hyd     = await MsmeMaster.countDocuments({ district: 'Hyderabad', is_active: true });
-    const samples = await MsmeMaster.find({ district: 'Hyderabad', is_active: true })
-      .select('msme_name block_name district').lean();
-    res.json({
-      success: true,
-      db_host: dbHost,
-      db_name: dbName,
-      db_total: total,
-      db_active: active,
-      hyderabad_count: hyd,
-      hyderabad_msmes: samples,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
 
 // ── GET /api/msme/by-block?block=Ambassa ──────────────────────────────────
 // Lightweight endpoint used by ActivityCapture dropdown.
@@ -231,7 +205,10 @@ router.get('/', authenticate, async (req, res) => {
     }
 
     if (sector) filter.sector = sector;
-    if (search) filter.msme_name = { $regex: search.trim(), $options: 'i' };
+    if (search && typeof search === 'string') {
+      const safeSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.msme_name = { $regex: safeSearch, $options: 'i' };
+    }
 
     const msmes = await MsmeMaster.find(filter)
       .select('msme_name udyam_number block_name district sector address owner_name contact')

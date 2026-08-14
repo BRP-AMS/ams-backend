@@ -215,9 +215,12 @@ router.get('/export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      // Specific employee selected in dropdown (any privileged role)
-      const specific = await User.findById(toObjId(empId))
-        .select(EMP_SELECT).lean();
+      // Specific employee selected in dropdown
+      const specificQuery = role === 'manager'
+        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
+        : { _id: toObjId(empId) };
+      const specific = await User.findOne(specificQuery)
+        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
 
@@ -834,7 +837,10 @@ router.get('/leave-export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      const specific = await User.findById(toObjId(empId)).select('_id name emp_id').lean();
+      const specificQuery2 = role === 'manager'
+        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
+        : { _id: toObjId(empId) };
+      const specific = await User.findOne(specificQuery2).select('_id name emp_id').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({ success: false, message: 'Selected employee not found' });
 

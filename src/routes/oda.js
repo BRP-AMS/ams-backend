@@ -71,11 +71,22 @@ router.get('/active-today', authenticate, authorize('employee'), async (req, res
   }
 });
 
-// ── GET /api/oda — List requests (employee: own; admin: all) ──────────────
+// ── GET /api/oda — List requests (employee: own; manager/hr: team; admin: all) ──
+const ODA_STATUS_ALLOWLIST = ['pending', 'approved', 'rejected'];
 router.get('/', authenticate, async (req, res) => {
   try {
-    const filter = req.user.role === 'employee' ? { emp_id: req.user.id } : {};
-    if (req.query.status) filter.status = req.query.status;
+    let filter = {};
+    if (req.user.role === 'employee') {
+      filter.emp_id = req.user.id;
+    } else if (req.user.role === 'manager' || req.user.role === 'hr') {
+      const teamMembers = await User.find({ manager_id: req.user.id, is_active: 1 }).select('_id').lean();
+      filter.emp_id = { $in: teamMembers.map(m => m._id) };
+    }
+    if (req.query.status) {
+      if (!ODA_STATUS_ALLOWLIST.includes(req.query.status))
+        return res.status(400).json({ success: false, message: 'Invalid status filter' });
+      filter.status = req.query.status;
+    }
 
     const requests = await ODARequest.find(filter).sort({ created_at: -1 }).limit(200).lean();
 

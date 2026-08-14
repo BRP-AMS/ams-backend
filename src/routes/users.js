@@ -258,9 +258,13 @@ router.get('/export-reset-links', authenticate, authorize('super_admin', 'admin'
 // Includes scan_papers array — used by ReportsPage to show employee scans
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    // Employees can only fetch their own profile
+    // Employees can only fetch their own profile; managers only their team members
     if (req.user.role === 'employee' && req.params.id !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (req.user.role === 'manager' && req.params.id !== req.user.id) {
+      const teamCheck = await User.findOne({ _id: req.params.id, manager_id: req.user.id }).select('_id').lean();
+      if (!teamCheck) return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const user = await User.findById(req.params.id)
       .select('-password_hash -email_verify_token -pwd_reset_token -phone_otp -login_attempts -login_locked_until')
@@ -278,7 +282,7 @@ router.post('/', authenticate, authorize('admin', 'super_admin'), [
   body('name').notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required').normalizeEmail({ gmail_remove_dots: false, gmail_remove_subaddress: false, all_lowercase: true }),
   body('empId').notEmpty().withMessage('Employee ID is required'),
-  body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin']).withMessage('Invalid role'),
+  body('role').isIn(['employee', 'manager', 'admin', 'hr', 'super_admin', 'department_portal']).withMessage('Invalid role'),
   body('department').notEmpty().withMessage('Department is required'),
 ], validate, async (req, res) => {
   try {
@@ -407,7 +411,7 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
         const rawToken  = crypto.randomBytes(32).toString('hex');
         const hashTok   = crypto.createHash('sha256').update(rawToken).digest('hex');
         const tempPass  = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
-        await User.findByIdAndUpdate(target._id, { $set: { password_hash: bcrypt.hashSync(tempPass, 10), pwd_reset_token: hashTok, pwd_reset_expires: new Date(Date.now() + expiryMs) } });
+        await User.findByIdAndUpdate(target._id, { $set: { password_hash: bcrypt.hashSync(tempPass, 12), pwd_reset_token: hashTok, pwd_reset_expires: new Date(Date.now() + expiryMs) } });
         const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
         await sendMail(target.email, 'BRP Attendance System - Password Reset by Admin',
           `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
@@ -870,7 +874,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
     });
     if (!rows.length) return res.status(400).json({ success: false, message: 'Empty spreadsheet' });
 
-    const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin'];
+    const VALID_ROLES = ['employee', 'manager', 'admin', 'hr', 'super_admin', 'department_portal'];
     const results = { created: 0, updated: 0, skipped: 0, errors: [] };
 
     for (let i = 0; i < rows.length; i++) {
@@ -911,7 +915,8 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
       
       let managerId = null;
       if (managerRef) {
-        const mgr = await User.findOne({ $or: [{ emp_id: managerRef }, { name: { $regex: new RegExp(`^${managerRef}$`, 'i') } }], is_active: 1 }).lean();
+        const safeRef = managerRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const mgr = await User.findOne({ $or: [{ emp_id: managerRef }, { name: { $regex: new RegExp(`^${safeRef}$`, 'i') } }], is_active: 1 }).lean();
         if (mgr) { 
           managerId = mgr._id; 
         } else { 
@@ -934,7 +939,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
           designation: designation,       // ← FIX: Support update
           joining_date: joiningDate
         };
-        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 10);
+        if (password && password.length >= 6) update.password_hash = bcrypt.hashSync(password, 12);
         await User.findByIdAndUpdate(existing._id, { $set: update });
         results.updated++;
       } else {
@@ -947,7 +952,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
         } else {
           // No password supplied — generate temp + send setup email
           const tempPass = `Tmp@${crypto.randomBytes(8).toString('hex')}`;
-          passwordHash   = bcrypt.hashSync(tempPass, 10);
+          passwordHash   = bcrypt.hashSync(tempPass, 12);
           setupTokenRaw  = crypto.randomBytes(32).toString('hex');
         }
 

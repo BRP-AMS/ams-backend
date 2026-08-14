@@ -37,13 +37,23 @@ const upload = multer({
 });
 
 // ── Multer — reapply supporting documents (images + PDFs + Office docs) ──
+const REAPPLY_EXT_MIME = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.gif': 'image/gif',  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xls': 'application/vnd.ms-excel',
+};
 const reapplyUpload = multer({
   storage: multer.memoryStorage(),
   limits:  { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    const ok  = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.doc', '.docx', '.xlsx', '.xls'];
-    if (!ok.includes(ext)) return cb(new Error('File type not allowed'));
+    if (!REAPPLY_EXT_MIME[ext]) return cb(new Error('File type not allowed'));
+    const expectedMime = REAPPLY_EXT_MIME[ext];
+    if (file.mimetype !== expectedMime) return cb(new Error('File extension does not match file type'));
     cb(null, true);
   },
 });
@@ -326,10 +336,9 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
     const managerId   = currentUser?.manager_id || null;
 
-    const timeRe = /^\d{2}:\d{2}$/;
-    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    const checkinTime = (capturedAt && timeRe.test(capturedAt))     ? capturedAt   : istTimeStr();
-    const checkinDate = (capturedDate && dateRe.test(capturedDate)) ? capturedDate : today;
+    // Always use server-generated time; ignore client-supplied values to prevent backdating
+    const checkinTime = istTimeStr();
+    const checkinDate = today;
 
     // Upload selfie immediately
     const selfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype);
@@ -385,7 +394,10 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/:id/cancel-checkin', authenticate, authorize('employee', 'super_admin'), async (req, res) => {
   try {
-    const record = await AttendanceRecord.findOne({ _id: req.params.id }).lean();
+    const ownerFilter = req.user.role === 'super_admin'
+      ? { _id: req.params.id }
+      : { _id: req.params.id, emp_id: req.user.id };
+    const record = await AttendanceRecord.findOne(ownerFilter).lean();
     if (!record)             return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Draft') return res.status(400).json({ success: false, message: 'Only Draft records can be deleted' });
     if (record.checkout_time)      return res.status(400).json({ success: false, message: 'Already checked out — cannot delete' });
@@ -1035,12 +1047,18 @@ router.post('/upload-signed-report', authenticate, uploadSignedReport.single('si
     const { month } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ success: false, message: 'Valid month (YYYY-MM) is required' });
     let targetEmpId = req.user.id;
-    if (['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role) && req.body.empId) targetEmpId = req.body.empId;
-    // if (req.user.role === 'employee') {
-    //   const existingUser = await User.findById(targetEmpId).select('signed_reports').lean();
-    //   if ((existingUser?.signed_reports || []).some(r => r.month === month))
-    //     return res.status(409).json({ success: false, message: `A signed report has already been uploaded for ${month}. Contact your admin to replace it.` });
-    // }
+    if (['admin', 'super_admin'].includes(req.user.role) && req.body.empId) {
+      targetEmpId = req.body.empId;
+    } else if (['manager', 'hr'].includes(req.user.role) && req.body.empId) {
+      const empCheck = await User.findOne({ _id: req.body.empId, manager_id: req.user.id }).select('_id').lean();
+      if (!empCheck) return res.status(403).json({ success: false, message: 'Access denied: employee not in your team' });
+      targetEmpId = req.body.empId;
+    }
+    if (req.user.role === 'employee') {
+      const existingUser = await User.findById(targetEmpId).select('signed_reports').lean();
+      if ((existingUser?.signed_reports || []).some(r => r.month === month))
+        return res.status(409).json({ success: false, message: `A signed report has already been uploaded for ${month}. Contact your admin to replace it.` });
+    }
     const monthLabel = new Date(`${month}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
     const targetUser  = await User.findById(targetEmpId).select('emp_id name').lean();
    const folderPath = employeeFolderPath(targetUser?.emp_id, targetEmpId);
@@ -1090,6 +1108,10 @@ router.get('/signed-reports/:empId', authenticate, async (req, res) => {
     const isOwnRequest = req.user.id === req.params.empId;
     if (!isOwnRequest && !['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role))
       return res.status(403).json({ success: false, message: 'Access denied' });
+    if (!isOwnRequest && req.user.role === 'manager') {
+      const teamCheck = await User.findOne({ _id: req.params.empId, manager_id: req.user.id }).select('_id').lean();
+      if (!teamCheck) return res.status(403).json({ success: false, message: 'Access denied: employee not in your team' });
+    }
     const emp = await User.findById(req.params.empId).select('signed_reports name emp_id').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
     const reports = (emp.signed_reports || [])

@@ -99,10 +99,18 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use((req, res, next) => {
   if (req.body) req.body = mongoSanitize.sanitize(req.body, { replaceWith: '_' });
   if (req.query && typeof req.query === 'object') {
-    for (const key of Object.keys(req.query)) {
-      if (typeof req.query[key] === 'string') {
-        req.query[key] = req.query[key].replace(/[$]/g, '');
+    const sanitizeValue = (v) => {
+      if (typeof v === 'string') return v.replace(/[$]/g, '');
+      if (typeof v === 'object' && v !== null) {
+        // Reject object-type params entirely — they carry NoSQL operator payloads
+        return undefined;
       }
+      return v;
+    };
+    for (const key of Object.keys(req.query)) {
+      const sanitized = sanitizeValue(req.query[key]);
+      if (sanitized === undefined) delete req.query[key];
+      else req.query[key] = sanitized;
     }
   }
   next();
@@ -453,6 +461,7 @@ app.use('/api/blocks',            require('./src/routes/blocks'));
 app.use('/api/departments',       require('./src/routes/departments'));
 app.use('/api/monthly-report',    require('./src/routes/monthlyReport'));
 app.use('/api/oda',               require('./src/routes/oda'));
+app.use('/api/dept-dashboard',    require('./src/routes/dept-dashboard'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
 app.use('/api/file',              require('./src/routes/file'));
 
@@ -467,40 +476,6 @@ app.get('/api/health', (req, res) => {
 });
 
 
-// ── Temporary email debug endpoint ────────────────────────────────────────
-app.post('/api/admin/test-email', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ success: false, message: 'email required' });
-  const results = {};
-
-  try {
-    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
-    if (FIREBASE_API_KEY) {
-      const fbRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
-      });
-      const fbData = await fbRes.json();
-      results.firebase = { status: fbRes.status, ok: fbRes.ok, data: fbData };
-    } else {
-      results.firebase = { status: 'skipped', reason: 'no FIREBASE_API_KEY' };
-    }
-  } catch (err) {
-    results.firebase = { error: err.message };
-  }
-
-  try {
-    const { sendMail, mode } = require('./src/utils/mailer');
-    results.mailer_mode = mode;
-    await sendMail(email, '[BRP AMS] Email Test', '<h2>BRP-AMS Email Test</h2><p>This confirms email delivery is working. Time: ' + new Date().toISOString() + '</p>');
-    results.smtp = { status: 'sent' };
-  } catch (err) {
-    results.smtp = { error: err.message };
-  }
-
-  res.json({ success: true, results });
-});
 
 // ── Error Handler ─────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

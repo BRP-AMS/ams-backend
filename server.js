@@ -430,6 +430,52 @@ cron.schedule('*/15 * * * *', async () => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 4 — 1st of every month at 00:01 IST: accrue 1 leave per employee
+//
+// For each active employee with auto_leave_enabled = true and a joining_date:
+//   - calculates how many full months have elapsed since last_accrual_date
+//     (or joining_date if never accrued)
+//   - adds that many to leave_balance and updates last_accrual_date
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('1 0 1 * *', async () => {
+  console.log('[LeaveAccrual Cron] Running monthly leave accrual...');
+  try {
+    const { User } = require('./src/models/database');
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
+
+    const employees = await User.find({
+      role: 'employee',
+      is_active: { $ne: 0 },
+      auto_leave_enabled: true,
+      joining_date: { $ne: null },
+    }).select('_id name joining_date last_accrual_date leave_balance').lean();
+
+    const fullMonthsDiff = (fromISO, toISO) => {
+      const [fy, fm] = fromISO.split('-').map(Number);
+      const [ty, tm] = toISO.split('-').map(Number);
+      return Math.max(0, (ty - fy) * 12 + (tm - fm));
+    };
+
+    let accrued = 0;
+    for (const emp of employees) {
+      const baseline = emp.last_accrual_date || emp.joining_date;
+      const months   = fullMonthsDiff(baseline, todayIST);
+      if (months <= 0) continue;
+
+      await User.findByIdAndUpdate(emp._id, {
+        $inc: { leave_balance: months },
+        $set: { last_accrual_date: todayIST },
+      });
+      accrued++;
+      console.log(`[LeaveAccrual Cron] ${emp.name}: +${months} leave(s) → balance now ${(emp.leave_balance || 0) + months}`);
+    }
+    console.log(`[LeaveAccrual Cron] Done — ${accrued} employee(s) accrued.`);
+  } catch (err) {
+    console.error('[LeaveAccrual Cron] Error:', err.message);
+  }
+}, { timezone: 'Asia/Kolkata' });
+
 // ── Revoked-token pruning ─────────────────────────────────────────────────
 const pruneRevokedTokens = async () => {
   try {

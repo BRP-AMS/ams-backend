@@ -62,6 +62,7 @@ photo_update_count:      { type: Number, default: 0    },  // how many updates u
   // ── Leave management ─────────────────────────────────────────────────
   leave_balance:       { type: Number,  default: 0 },
   auto_leave_enabled:  { type: Boolean, default: true },
+  last_accrual_date:   { type: String,  default: null }, // YYYY-MM-DD of last accrual run
   is_permitted:        { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
@@ -122,6 +123,7 @@ const attendanceRecordSchema = new mongoose.Schema({
   face_verification_status: { type: String, enum: ['pending', 'retake_pending', 'verified', 'failed', 'manager_review', 'manager_approved', 'manager_rejected', null], default: null },
   face_confidence:          { type: Number, default: null },
   is_missed_checkout:       { type: Boolean, default: false },
+  is_lop:                   { type: Boolean, default: false }, // Loss of Pay — balance was insufficient
 signed_reports: [{
     path:        String,
     name:        String,

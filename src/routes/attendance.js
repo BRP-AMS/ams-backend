@@ -23,9 +23,25 @@ const LEAVE_HOLIDAYS_MMDD = new Set([
   '01-01','03-03','03-25','03-31','06-20','07-16','08-12','08-28',
   '09-11','09-18','11-11','11-24','12-03','12-24',
 ]);
+// Dynamic holiday cache from DB (refreshed hourly, falls back to static list)
+let _attHolCache = null;
+let _attHolCacheAt = 0;
+const refreshAttHolCache = async () => {
+  try {
+    const { Holiday } = require('../models/database');
+    const rows = await Holiday.find({}, { date: 1, _id: 0 }).lean();
+    _attHolCache = new Set(rows.map(h => h.date));
+    _attHolCacheAt = Date.now();
+  } catch { /* keep using static */ }
+};
+refreshAttHolCache();
+
 const isLeaveNonWorking = iso => {
   const d = new Date(iso + 'T00:00:00+05:30');
   if (d.getDay() === 0 || d.getDay() === 6) return true;
+  if (_attHolCache && Date.now() - _attHolCacheAt < 3600000)
+    return _attHolCache.has(iso);
+  refreshAttHolCache().catch(() => {});
   return LEAVE_HOLIDAYS_MMDD.has(iso.substring(5));
 };
 const countWorkingDays = (startISO, endISO) => {
@@ -754,7 +770,8 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     await AttendanceRecord.create({
       _id: id, emp_id: req.user.id, date, end_date: isMultiDay ? finalEndDate : null,
       duty_type: 'Leave', status: 'Pending', manager_id: managerId,
-      leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Pending', submitted_at: new Date(),
+      leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Pending',
+      is_lop: isLOP, submitted_at: new Date(),
     });
 
     // Deduct balance if sufficient
@@ -810,6 +827,12 @@ router.delete('/:id/cancel-leave', authenticate, authorize('employee'), async (r
 
     await AttendanceRecord.findByIdAndDelete(record._id);
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CANCEL_LEAVE', entity_type: 'attendance', entity_id: record._id, new_value: record.leave_type });
+
+    // Restore leave balance if it was deducted at application time
+    if (!record.is_lop) {
+      const days = countWorkingDays(record.date, record.end_date || record.date);
+      await User.findByIdAndUpdate(req.user.id, { $inc: { leave_balance: days } });
+    }
 
     const emp = await User.findById(req.user.id).select('name').lean();
     const cancelBody = `<p><strong>${emp?.name}</strong> has cancelled their <strong>${record.leave_type}</strong> leave request for <strong>${record.date}</strong>.</p>`;
@@ -919,6 +942,12 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     if (record.leave_type) update.leave_status = 'Rejected';
     if (record.face_verification_status === 'manager_review') update.face_verification_status = 'manager_rejected';
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
+
+    // Restore leave balance if balance was deducted at application time
+    if (record.leave_type && !record.is_lop) {
+      const days = countWorkingDays(record.date, record.end_date || record.date);
+      await User.findByIdAndUpdate(record.emp_id, { $inc: { leave_balance: days } });
+    }
 
     const isFaceReject = record.face_verification_status === 'manager_review';
     const notifTitle = isFaceReject ? 'Check-In Rejected ✗' : record.is_missed_checkout ? 'Missed Check-Out Rejected ✗' : record.leave_type ? 'Leave Rejected ✗' : 'Attendance Rejected ✗';

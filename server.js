@@ -490,6 +490,22 @@ connectionPromise.then(async () => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
   require('./src/utils/mailer');
+
+  // Auto-seed 2026 Tripura holidays if the collection is empty
+  try {
+    const { Holiday } = require('./src/models/database');
+    const { SEED_2026 } = require('./src/routes/holidays');
+    const count = await Holiday.countDocuments();
+    if (count === 0 && SEED_2026 && SEED_2026.length) {
+      const ops = SEED_2026.map(h => ({
+        updateOne: { filter: { date: h.date }, update: { $setOnInsert: h }, upsert: true },
+      }));
+      await Holiday.bulkWrite(ops);
+      console.log(`🗓  Seeded ${SEED_2026.length} holidays for 2026`);
+    }
+  } catch (e) {
+    console.warn('Holiday auto-seed failed:', e.message);
+  }
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────

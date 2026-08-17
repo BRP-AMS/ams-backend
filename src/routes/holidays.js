@@ -111,3 +111,4 @@ router.post('/seed', authenticate, authorize('admin', 'super_admin'), async (req
 });
 
 module.exports = router;
+module.exports.SEED_2026 = SEED_2026;

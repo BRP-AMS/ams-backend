@@ -1310,4 +1310,102 @@ router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super
   }
 });
 
+// ── GET /api/users/leave-balance-template — download Excel template ──
+router.get('/leave-balance-template', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const query = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
+    const allEmps = await User.find(query).select('name emp_id leave_balance').lean();
+    const employees = req.user.role === 'manager' ? allEmps : allEmps.filter(e => true);
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Leave Balances');
+    ws.columns = [
+      { header: 'Employee Code (emp_id)', key: 'emp_id', width: 24 },
+      { header: 'Name (read-only)', key: 'name', width: 28 },
+      { header: 'New Balance (days)', key: 'leave_balance', width: 22 },
+      { header: 'Reason', key: 'reason', width: 32 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9D8FD' } };
+
+    for (const emp of allEmps) {
+      ws.addRow({
+        emp_id: emp.emp_id || '',
+        name: emp.name || '',
+        leave_balance: emp.leave_balance ?? 0,
+        reason: '',
+      });
+    }
+
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="leave_balance_template.xlsx"');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── POST /api/users/bulk-leave-balance-excel — import Excel to set balances ──
+router.post('/bulk-leave-balance-excel', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), uploadMem.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+    const ws = wb.worksheets[0];
+
+    // Build emp_id → _id map scoped to this manager's team (or all employees)
+    const scopeQuery = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
+    const allEmps = await User.find(scopeQuery).select('_id emp_id leave_balance name role').lean();
+    const empMap = {};
+    for (const e of allEmps) {
+      if (e.emp_id) empMap[e.emp_id.trim().toLowerCase()] = e;
+    }
+
+    const updates = [];
+    const errors  = [];
+    let rowNum = 1;
+    ws.eachRow((row, rn) => {
+      if (rn === 1) return; // skip header
+      rowNum = rn;
+      const empId   = String(row.getCell(1).value || '').trim();
+      const newBal  = row.getCell(3).value;
+      const reason  = String(row.getCell(4).value || '').trim() || 'Excel import';
+
+      if (!empId) return;
+      const emp = empMap[empId.toLowerCase()];
+      if (!emp) { errors.push(`Row ${rn}: emp_id "${empId}" not found in team`); return; }
+      if (newBal === null || newBal === '' || isNaN(Number(newBal))) {
+        errors.push(`Row ${rn}: invalid balance value "${newBal}"`); return;
+      }
+      const balance = Math.max(0, Number(newBal));
+      updates.push({ emp, balance, reason });
+    });
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid rows found', errors });
+    }
+
+    const bulkOps = updates.map(({ emp, balance }) => ({
+      updateOne: { filter: { _id: emp._id }, update: { $set: { leave_balance: balance } } },
+    }));
+    await User.bulkWrite(bulkOps);
+
+    const auditDetails = updates.map(u => `${u.emp.name}(${u.emp.emp_id}):${u.balance}`).join(', ');
+    await AuditLog.create({
+      user_id: req.user.id, action: 'bulk_leave_balance_excel',
+      details: `Excel import set balances for ${updates.length} employees. ${auditDetails}`,
+    }).catch(() => {});
+
+    res.json({ success: true, data: { updated: updates.length, errors } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

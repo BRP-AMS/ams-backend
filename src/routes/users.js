@@ -120,8 +120,8 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
   try {
     const today      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const matchStage = req.user.role === 'manager'
-      ? { manager_id: req.user.id }
-      : { role: 'employee' };
+      ? { manager_id: req.user.id, is_active: 1 }
+      : { role: 'employee',        is_active: 1 };
 
     const summary = await User.aggregate([
       { $match: matchStage },

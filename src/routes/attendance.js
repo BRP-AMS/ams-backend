@@ -264,7 +264,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const today = istDateStr();
     let empFilter = {};
     if (req.user.role === 'manager') {
-      const team = await User.find({ manager_id: req.user.id }).select('_id').lean();
+      const team = await User.find({ manager_id: req.user.id, is_active: 1 }).select('_id').lean();
       empFilter = { emp_id: { $in: team.map(m => String(m._id)) } };
     }
 

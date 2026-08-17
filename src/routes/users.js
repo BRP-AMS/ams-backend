@@ -153,7 +153,7 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
       { $sort: { name: 1 } },
     ]);
 
-    res.json({ success: true, data: summary });
+    res.json({ success: true, data: summary.map(m => ({ ...m, department: fullyDecode(m.department || '') })) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });

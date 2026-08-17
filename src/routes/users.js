@@ -1226,13 +1226,19 @@ function formatUser(u) {
 // ── GET /api/users/leave-balances — manager/admin/hr view team leave balances ──
 router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
-    const query = { role: 'employee', is_active: { $ne: 0 } };
-    if (req.user.role === 'manager') query.manager_id = req.user.id;
+    // Mirror exact same query pattern as GET /users and /team/attendance-summary
+    const query = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
     const employees = await User.find(query)
-      .select('_id name emp_id leave_balance last_accrual_date joining_date auto_leave_enabled block_name')
-      .sort({ emp_id: 1 })
+      .select('_id name emp_id leave_balance last_accrual_date joining_date auto_leave_enabled block_name role')
+      .sort({ name: 1 })
       .lean();
-    res.json({ success: true, data: employees });
+    // For admin/hr views, filter to employees only (managers may have mixed roles in their list)
+    const filtered = req.user.role === 'manager'
+      ? employees
+      : employees.filter(e => e.role === 'employee');
+    res.json({ success: true, data: filtered });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1242,8 +1248,9 @@ router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 
 router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const { delta, reason, set } = req.body; // delta = +/-N, or set = exact value
-    const query = { _id: req.params.id };
-    if (req.user.role === 'manager') query.manager_id = req.user.id;
+    const query = req.user.role === 'manager'
+      ? { _id: req.params.id, manager_id: req.user.id }
+      : { _id: req.params.id };
     const emp = await User.findOne(query);
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found or not your team member' });
 
@@ -1274,9 +1281,11 @@ router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', '
 router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const { delta, set, reason } = req.body;
-    const query = { role: 'employee', is_active: { $ne: 0 } };
-    if (req.user.role === 'manager') query.manager_id = req.user.id;
-    const employees = await User.find(query).select('_id leave_balance name emp_id').lean();
+    const query = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
+    const allEmps = await User.find(query).select('_id leave_balance name emp_id role').lean();
+    const employees = req.user.role === 'manager' ? allEmps : allEmps.filter(e => e.role === 'employee');
 
     const updates = [];
     for (const emp of employees) {

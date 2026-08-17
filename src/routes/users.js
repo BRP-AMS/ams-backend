@@ -262,6 +262,58 @@ router.get('/export-reset-links', authenticate, authorize('super_admin', 'admin'
 
 // ── GET /api/users/:id ────────────────────────────────────────────────────
 // Includes scan_papers array — used by ReportsPage to show employee scans
+// ── GET /api/users/leave-balances — must be BEFORE /:id ─────────────────
+router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const query = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
+    const employees = await User.find(query)
+      .select('_id name emp_id leave_balance last_accrual_date joining_date auto_leave_enabled block_name role')
+      .sort({ name: 1 })
+      .lean();
+    const filtered = req.user.role === 'manager'
+      ? employees
+      : employees.filter(e => e.role === 'employee');
+    res.json({ success: true, data: filtered });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── GET /api/users/leave-balance-template — must be BEFORE /:id ──────────
+router.get('/leave-balance-template', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const query = req.user.role === 'manager'
+      ? { manager_id: req.user.id }
+      : { role: 'employee' };
+    const allEmps = await User.find(query).select('name emp_id leave_balance').lean();
+    const employees = req.user.role === 'manager' ? allEmps : allEmps.filter(e => e.role === 'employee');
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Leave Balances');
+    ws.columns = [
+      { header: 'Employee Code (emp_id)', key: 'emp_id', width: 24 },
+      { header: 'Name (read-only)', key: 'name', width: 28 },
+      { header: 'New Balance (days)', key: 'leave_balance', width: 22 },
+      { header: 'Reason', key: 'reason', width: 32 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9D8FD' } };
+
+    for (const emp of employees) {
+      ws.addRow({ emp_id: emp.emp_id || '', name: emp.name || '', leave_balance: emp.leave_balance ?? 0, reason: '' });
+    }
+
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="leave_balance_template.xlsx"');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.get('/:id', authenticate, async (req, res) => {
   try {
     // Employees can only fetch their own profile; managers only their team members
@@ -1226,26 +1278,7 @@ function formatUser(u) {
   };
 }
 
-// ── GET /api/users/leave-balances — manager/admin/hr view team leave balances ──
-router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
-  try {
-    // Mirror exact same query pattern as GET /users and /team/attendance-summary
-    const query = req.user.role === 'manager'
-      ? { manager_id: req.user.id }
-      : { role: 'employee' };
-    const employees = await User.find(query)
-      .select('_id name emp_id leave_balance last_accrual_date joining_date auto_leave_enabled block_name role')
-      .sort({ name: 1 })
-      .lean();
-    // For admin/hr views, filter to employees only (managers may have mixed roles in their list)
-    const filtered = req.user.role === 'manager'
-      ? employees
-      : employees.filter(e => e.role === 'employee');
-    res.json({ success: true, data: filtered });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+// leave-balances and leave-balance-template GET routes moved above /:id to avoid route shadowing
 
 // ── PATCH /api/users/:id/leave-balance — adjust leave balance (manager/admin/hr) ──
 router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
@@ -1313,43 +1346,7 @@ router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super
   }
 });
 
-// ── GET /api/users/leave-balance-template — download Excel template ──
-router.get('/leave-balance-template', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
-  try {
-    const query = req.user.role === 'manager'
-      ? { manager_id: req.user.id }
-      : { role: 'employee' };
-    const allEmps = await User.find(query).select('name emp_id leave_balance').lean();
-    const employees = req.user.role === 'manager' ? allEmps : allEmps.filter(e => true);
-
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Leave Balances');
-    ws.columns = [
-      { header: 'Employee Code (emp_id)', key: 'emp_id', width: 24 },
-      { header: 'Name (read-only)', key: 'name', width: 28 },
-      { header: 'New Balance (days)', key: 'leave_balance', width: 22 },
-      { header: 'Reason', key: 'reason', width: 32 },
-    ];
-    ws.getRow(1).font = { bold: true };
-    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE9D8FD' } };
-
-    for (const emp of allEmps) {
-      ws.addRow({
-        emp_id: emp.emp_id || '',
-        name: emp.name || '',
-        leave_balance: emp.leave_balance ?? 0,
-        reason: '',
-      });
-    }
-
-    const buf = await wb.xlsx.writeBuffer();
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="leave_balance_template.xlsx"');
-    res.send(buf);
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+// leave-balance-template GET route moved above /:id to avoid route shadowing
 
 // ── POST /api/users/bulk-leave-balance-excel — import Excel to set balances ──
 router.post('/bulk-leave-balance-excel', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), uploadMem.single('file'), async (req, res) => {

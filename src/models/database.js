@@ -59,6 +59,10 @@ photo_update_count:      { type: Number, default: 0    },  // how many updates u
   office_name:                   { type: String, default: null },
   reporting_officer_name:        { type: String, default: null },
   reporting_officer_designation: { type: String, default: null },
+  // ── Leave management ─────────────────────────────────────────────────
+  leave_balance:       { type: Number,  default: 0 },
+  auto_leave_enabled:  { type: Boolean, default: true },
+  is_permitted:        { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });
@@ -102,7 +106,8 @@ const attendanceRecordSchema = new mongoose.Schema({
   worked_hours:         { type: Number, default: null },
   is_auto_checkout:     { type: Boolean, default: false },
   checkout_remarks:     { type: String, default: null },
-  leave_type:           { type: String, enum: ['Casual Leave', 'Half Day', 'Emergency Leave', null], default: null },
+  leave_type:           { type: String, enum: ['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave', null], default: null },
+  attendance_type:      { type: String, enum: ['Regular', 'Irregular', 'Partial', 'Permitted', null], default: null },
   leave_reason:         { type: String, default: null },
   leave_status:         { type: String, enum: ['Pending', 'Approved', 'Rejected', null], default: null },
   reapply_reason:       { type: String, default: null },

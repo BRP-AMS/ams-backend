@@ -2,6 +2,9 @@ const express = require('express');
 const router  = express.Router();
 const fetch   = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const { GeoCache } = require('../models/database');
+const { authenticate } = require('../middleware/auth');
+
+router.use(authenticate);
 
 const TIMEOUT_MS = 8000;
 

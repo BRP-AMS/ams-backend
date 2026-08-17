@@ -225,6 +225,10 @@ router.get('/:id', authenticate, async (req, res) => {
     const row = rows[0];
     if (req.user.role === 'employee' && row.user_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Forbidden' });
+    if (req.user.role === 'manager') {
+      const member = await User.findOne({ _id: row.user_id, manager_id: req.user.id }).lean();
+      if (!member) return res.status(403).json({ success: false, message: 'Forbidden' });
+    }
     const docs = await ActivityDocument.find({ activity_id: row._id }).lean();
     res.json({ success: true, data: { ...row, documents: docs } });
   } catch (err) {

@@ -75,6 +75,8 @@ const yesterdayIST = () => {
   return d.toLocaleDateString('en-CA', { timeZone: IST });
 };
 
+const fmtDDMMYYYY = iso => iso ? iso.split('-').reverse().join('-') : '';
+
 const expandDates = (start, end) => {
   const out = [];
   let cur = new Date(start+'T00:00:00+05:30');
@@ -137,7 +139,7 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
-    if (ls === 'Pending') return '';
+    if (ls === 'Pending') return 'LA';
     if (ls === 'Approved') {
       const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
       const hasCheckin = rec.checkin_time || rec.checkinTime;
@@ -146,7 +148,7 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
     }
     if (ls === 'Rejected') {
       const hasCheckin = rec.checkin_time || rec.checkinTime;
-      if (!hasCheckin) return 'L';
+      if (!hasCheckin) return 'A';
       // Has a real check-in after rejection → fall through
     }
   }
@@ -191,10 +193,7 @@ router.get('/export',
     if (!startDate||!endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    // Cap endDate to yesterday — today is never shown (incomplete day)
-    if (endDate >= todayIST()) endDate = yesterdayIST();
-    if (startDate > endDate)
-      return res.status(400).json({success:false,message:'No completed dates in range. Report covers up to yesterday.'});
+    // Allow full selected range — future dates render as WO/H or blank columns
 
     const dates      = expandDates(startDate, endDate);
     const multiMonth = new Date(startDate+'T00:00:00+05:30').getMonth() !==
@@ -304,6 +303,13 @@ router.get('/export',
           if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           if (isHoliday(iso))                 return 'H';  // public holiday
           const rec = recIdx[String(emp._id)]?.[iso];
+          // Future dates: only show LA if leave applied, else blank
+          if (iso > todayIST()) {
+            if (!rec) return '';
+            const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
+            if (isLeave && (rec.leave_status || rec.status || 'Pending') === 'Pending') return 'LA';
+            return '';
+          }
           return toCode(rec, ab, ad);
         }),
       };
@@ -329,12 +335,18 @@ router.get('/export',
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 
    const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
+      const FILL_AMB  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const codeFill = (code, rf) => {
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
-        if (code==='H')             return FILL_HOL;
+        if (code==='H'||code==='LA') return FILL_AMB;
         return rf;
-      };   
+      };
+      const codeFont = (code) => {
+        if (code==='L'||code==='A') return {bold:true,size:8,color:{argb:'FFFFFFFF'},name:'Calibri'};
+        if (code==='LA')            return {bold:true,size:7,color:{argb:'FFD97706'},name:'Calibri'};
+        return {bold:true,size:8,name:'Calibri'};
+      };
 
       const TH  = ()=>({style:'thin',  color:{argb:'FFCCCCCC'}});
       const MED = ()=>({style:'medium',color:{argb:'FF999999'}});
@@ -353,7 +365,7 @@ router.get('/export',
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
-        Object.assign(ws.getCell(1,2),{value:'Attendance details of BRP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
+        Object.assign(ws.getCell(1,2),{value:'Attendance details of RAMP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
         ws.getRow(1).height=24;
 
         mc(ws,2,2,2,LAST);
@@ -364,7 +376,7 @@ router.get('/export',
         mc(ws,3,2,3,half-1);
         Object.assign(ws.getCell(3,2),{value:'Location Name: Tripura',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         mc(ws,3,half,3,LAST);
-        Object.assign(ws.getCell(3,half),{value:'Project Name: Block Resource Person',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
+        Object.assign(ws.getCell(3,half),{value:'',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
@@ -389,7 +401,7 @@ router.get('/export',
           cells.forEach((code,i)=>{
             const c=ws.getCell(rowN,5+i); c.value=code; c.border=CBDR;
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
-            c.font={bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
+            c.font={bold:!!code,size:code==='LA'?7:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':code==='LA'?'FFD97706':'FF000000'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
           });
         });
@@ -400,8 +412,9 @@ router.get('/export',
         [{code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
          {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
-         {code:'L',label:'Leave / LOP',isRed:true},
-         {code:'A',label:'Absent',isRed:true},
+         {code:'LA',label:'Leave Applied / Pending',isRed:false,isAmber:true},
+         {code:'L',label:'Leave / LOP (Approved)',isRed:true},
+         {code:'A',label:'Absent / Leave Rejected',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ].forEach(({code,label,isRed,isAmber},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
@@ -471,7 +484,7 @@ router.get('/export',
   sumRow('No of Casual Leaves', casualRecs.length);
   sumRow('Total Effective Leaves', effectiveLeaves);
   sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
-  sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
+  sumRow('No of Leave Applied / Pending (LA)', `=COUNTIF(${fDC}${er}:${lDC}${er},"LA")`);
 }else {
           // ── Table header row ────────────────────────────────────────────────
           r++; ws.getRow(r).height = 17;
@@ -601,12 +614,12 @@ router.get('/export',
 
      const drawHdr=y=>{
   doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
+  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of RAMP',ML,y+5,{width:tW,align:'center'});
   doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
   doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
   doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
   doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-     .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+     .text('Location: Tripura',ML+4,y+37);
 
   const y2=y+46;
   const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
@@ -648,10 +661,13 @@ router.get('/export',
         cells.forEach((code,i)=>{
           const x=xD+i*dW;
           const isRed=code==='L'||code==='A';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+          const isAmb=code==='H'||code==='LA';
+          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':isAmb?'#FFF3CD':bg;
           doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
           if(code){
-            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+            const fg=isRed?'#FFFFFF':isAmb?'#D97706':'#000000';
+            const fs=code==='LA'?5:6;
+            doc.fillColor(fg).fontSize(fs).font('Helvetica-Bold')
                .text(code,x+1,y+3,{width:dW-2,align:'center'});
           }
           if(code==='P'||code==='OD') pres++;
@@ -666,13 +682,16 @@ router.get('/export',
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
-       {code:'L',label:'Leave / LOP',red:true},
-       {code:'A',label:'Absent',red:true},
+       {code:'LA',label:'Leave Applied / Pending',red:false,amber:true},
+       {code:'L',label:'Leave / LOP (Approved)',red:true},
+       {code:'A',label:'Absent / Leave Rejected',red:true},
        {code:'WO',label:'Week Off',red:false},
-      ].forEach(({code,label,red})=>{
-        const bw=14,lw=76;
-        doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
-        doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+      ].forEach(({code,label,red,amber})=>{
+        const bw=14,lw=86;
+        const bg=red?'#FF4444':amber?'#FFF3CD':'#FFFFFF';
+        const fg=red?'#FFFFFF':amber?'#D97706':'#000000';
+        doc.rect(lx,y,bw,10).fill(bg).stroke('#999');
+        doc.fillColor(fg).fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
         lx+=bw+lw+4;
       });
@@ -728,7 +747,7 @@ router.get('/export',
   pdfRow('No of Casual Leaves',                    casualRecs.length);
   pdfRow('Total Effective Leaves',                 effectiveLeaves);
   pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
-  pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);
+  pdfRow('No of Leave Applied / Pending (LA)',      cells.filter(c => c==='LA').length);
 } else {
         sy++;
         const TW = SW;
@@ -882,8 +901,8 @@ const rows = filtered.map(r => {
   return {
     empCode:       empMap[String(r.emp_id)]?.emp_id || '',
     empName:       empMap[String(r.emp_id)]?.name   || '',
-    startDate:     startD,
-    endDate:       endD !== startD ? endD : '',
+    startDate:     fmtDDMMYYYY(startD),
+    endDate:       endD !== startD ? fmtDDMMYYYY(endD) : '',
     days:          String(dayCount),
     leaveType:     r.leave_type     || '',
     status:        r.leave_status   || r.status || '',
@@ -908,6 +927,11 @@ const rows = filtered.map(r => {
     const approved = rows.filter(r => r.status === 'Approved').length;
     const rejected = rows.filter(r => r.status === 'Rejected').length;
     const pending  = rows.filter(r => r.status === 'Pending').length;
+
+    const singleEmp = employees.length === 1 ? employees[0] : null;
+    const empPrefix = singleEmp
+      ? `${(singleEmp.name || '').trim().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}_${singleEmp.emp_id || ''}_`
+      : '';
 
     // ══════════════════════════════════════════════════════════════════════════
     //  EXCEL
@@ -1023,14 +1047,14 @@ const rows = filtered.map(r => {
       ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 4 }];
       ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: NC } };
       ws.pageSetup = {
-        paperSize: 9, orientation: 'landscape',
+        paperSize: 9, orientation: 'portrait',
         fitToPage: true, fitToWidth: 1, fitToHeight: 0,
         printTitlesRow: '$1:$4',
         margins: { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 },
       };
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="Leave_Report_${startDate}_to_${endDate}.xlsx"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${startDate}_to_${endDate}.xlsx"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
@@ -1041,20 +1065,20 @@ const rows = filtered.map(r => {
     // ══════════════════════════════════════════════════════════════════════════
     if (format === 'pdf') {
       const doc = new PDFDoc({
-        size: 'A3', layout: 'landscape',
+        size: 'A4', layout: 'landscape',
         margins: { top: 28, bottom: 28, left: 28, right: 28 },
         autoFirstPage: true,
       });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="Leave_Report_${startDate}_to_${endDate}.pdf"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${startDate}_to_${endDate}.pdf"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
 
       const ML      = 28;
       const usableW = doc.page.width - ML * 2;
-     const colWidths = [48, 105, 58, 58, 28, 75, 62, 130, 120, 48, 105];
-const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
-const colHdrs   = ['Emp Code','Employee Name','From Date','To Date','Days','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
+      const colWidths = [55, 150, 65, 65, 30, 85, 65, 130, 120, 50, 90];
+      const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
+      const colHdrs   = ['Emp Code','Employee Name','From Date','To Date','Days','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
       const totalW    = colWidths.reduce((a, b) => a + b, 0);
       const cw        = colWidths.map(w => (w / totalW) * usableW);
       const RH = 14, HRH = 16;
@@ -1091,7 +1115,7 @@ const colHdrs   = ['Emp Code','Employee Name','From Date','To Date','Days','Leav
       } else {
         rows.forEach((row, idx) => {
           if (y + RH > doc.page.height - 40) {
-            doc.addPage({ size: 'A3', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+            doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
             y = drawPageHeader(28);
           }
           const bg =

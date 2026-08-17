@@ -13,6 +13,10 @@ const { uploadFile }  = require('../utils/storage');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
+const escapeHtml = s => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+
 const validate = (req, res, next) => {
   const errs = validationResult(req);
   if (!errs.isEmpty()) return res.status(422).json({ success: false, message: errs.array()[0].msg, errors: errs.array() });
@@ -137,10 +141,12 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
       },
       {
         $addFields: {
-          today_status:  { $arrayElemAt: ['$todayRecord.status',       0] },
-          today_duty:    { $arrayElemAt: ['$todayRecord.duty_type',    0] },
-          checkin_time:  { $arrayElemAt: ['$todayRecord.checkin_time', 0] },
-          checkout_time: { $arrayElemAt: ['$todayRecord.checkout_time',0] },
+          today_status:       { $arrayElemAt: ['$todayRecord.status',       0] },
+          today_duty:         { $arrayElemAt: ['$todayRecord.duty_type',    0] },
+          today_leave_status: { $arrayElemAt: ['$todayRecord.leave_status', 0] },
+          today_leave_type:   { $arrayElemAt: ['$todayRecord.leave_type',   0] },
+          checkin_time:       { $arrayElemAt: ['$todayRecord.checkin_time', 0] },
+          checkout_time:      { $arrayElemAt: ['$todayRecord.checkout_time',0] },
         },
       },
       { $project: { password_hash: 0, todayRecord: 0 } },
@@ -726,7 +732,7 @@ router.post('/request-assignment', authenticate, authorize('employee'), [
     };
     const label     = labelMap[type] || `${type} Change`;
     const title     = `Request: ${label}`;
-    const message   = `${emp.name} (${emp.emp_id}) has requested: ${label}.${note ? ` Note: ${note}` : ''}`;
+    const message   = `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) has requested: ${escapeHtml(label)}.${note ? ` Note: ${escapeHtml(note)}` : ''}`;
     const actionMap = { photo: 'photo-update', manager: 'manager-assignment', hr: 'hr-assignment', district: 'district-assignment', block: 'block-assignment', role_type: 'designation-change', location: 'location-change' };
     const action    = actionMap[type] || '';
     const link      = `/admin/users?editUser=${req.user.id}${action ? `&action=${action}` : ''}`;
@@ -764,7 +770,7 @@ router.post('/request-location-change', authenticate, authorize('employee'), [
     const admins = await User.find({ role: 'admin', is_active: 1 }).select('_id email').lean();
     const current = [emp.assigned_block, emp.assigned_district].filter(Boolean).join(' / ') || 'Not assigned';
     const title   = 'Request: Location / Block Change';
-    const message = note ? `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}). Note: ${note}` : `${emp.name} (${emp.emp_id}) requests a location change (current: ${current}).`;
+    const message = note ? `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a location change (current: ${escapeHtml(current)}). Note: ${escapeHtml(note)}` : `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) requests a location change (current: ${escapeHtml(current)}).`;
     
     if (admins.length) {
       await Notification.insertMany(admins.map(a => ({
@@ -909,6 +915,11 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
       }
       if (!VALID_ROLES.includes(role)) {
         results.errors.push({ row: rowNum, reason: `Invalid role "${role}" — must be one of: employee, manager, admin, hr` });
+        results.skipped++;
+        continue;
+      }
+      if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(role)) {
+        results.errors.push({ row: rowNum, reason: 'Admins cannot create or assign admin/super_admin roles' });
         results.skipped++;
         continue;
       }

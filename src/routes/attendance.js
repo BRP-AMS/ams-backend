@@ -14,6 +14,37 @@ const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
+// ── Holiday / working-day helpers ────────────────────────────────────────
+const LEAVE_HOLIDAYS_MMDD = new Set([
+  '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
+  '05-01','05-26','05-27','06-26','07-22','08-04','08-15','08-19','08-26',
+  '09-04','10-02','10-17','10-19','10-20','10-21','10-22','10-23','10-26',
+  '11-09','12-25',
+  '01-01','03-03','03-25','03-31','06-20','07-16','08-12','08-28',
+  '09-11','09-18','11-11','11-24','12-03','12-24',
+]);
+const isLeaveNonWorking = iso => {
+  const d = new Date(iso + 'T00:00:00+05:30');
+  if (d.getDay() === 0 || d.getDay() === 6) return true;
+  return LEAVE_HOLIDAYS_MMDD.has(iso.substring(5));
+};
+const countWorkingDays = (startISO, endISO) => {
+  let count = 0;
+  const cur = new Date(startISO + 'T00:00:00+05:30');
+  const fin = new Date(endISO   + 'T00:00:00+05:30');
+  while (cur <= fin) {
+    const iso = cur.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    if (!isLeaveNonWorking(iso)) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count || 1;
+};
+const addDays = (isoDate, n) => {
+  const d = new Date(isoDate + 'T00:00:00+05:30');
+  d.setDate(d.getDate() + n);
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+};
+
 // ── Slug helper for folder names (e.g. "Krishna Kumar" → "krishna-kumar") ──
 const slugify = (str = '') =>
   String(str)
@@ -209,21 +240,24 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
       empFilter = { emp_id: { $in: team.map(m => String(m._id)) } };
     }
 
-    // Fetch check-in records and approved leaves in parallel
-    const [records, leaves] = await Promise.all([
+    // Fetch check-in records, approved leaves, and pending leaves in parallel
+    const leaveFilter = {
+      $or: [
+        { date: today, end_date: null },
+        { date: { $lte: today }, end_date: { $gte: today } },
+      ],
+    };
+    const [records, approvedLeaves, pendingLeaves] = await Promise.all([
       AttendanceRecord.find(
         { date: today, checkin_time: { $ne: null }, ...empFilter },
         'emp_id checkin_time checkout_time status'
       ).lean(),
       AttendanceRecord.find(
-        {
-          duty_type: 'Leave', leave_status: 'Approved',
-          $or: [
-            { date: today, end_date: null },
-            { date: { $lte: today }, end_date: { $gte: today } },
-          ],
-          ...empFilter,
-        },
+        { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
+        'emp_id leave_type'
+      ).lean(),
+      AttendanceRecord.find(
+        { duty_type: 'Leave', leave_status: 'Pending', ...leaveFilter, ...empFilter },
         'emp_id leave_type'
       ).lean(),
     ]);
@@ -238,11 +272,18 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
         status:       r.status,
       };
     });
-    // Add leave entries (don't overwrite if somehow also checked in)
-    leaves.forEach(r => {
+    // Add approved leave entries (don't overwrite if somehow also checked in)
+    approvedLeaves.forEach(r => {
       const uid = String(r.emp_id);
       if (!statusMap[uid]) {
         statusMap[uid] = { onLeave: true, leaveType: r.leave_type || 'Leave' };
+      }
+    });
+    // Add pending leave flag (don't overwrite check-in or approved leave)
+    pendingLeaves.forEach(r => {
+      const uid = String(r.emp_id);
+      if (!statusMap[uid]) {
+        statusMap[uid] = { pendingLeave: true, leaveType: r.leave_type || 'Leave' };
       }
     });
 
@@ -526,6 +567,23 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       ? await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype)
       : null;
 
+    // ── Attendance type classification ────────────────────────────────────
+    const empUser = await User.findById(req.user.id).select('is_permitted').lean();
+    const isPermitted = empUser?.is_permitted === true;
+    const toMins = t => { const [h, m] = (t || '00:00').split(':').map(Number); return h * 60 + m; };
+    const ciMins = toMins(record.checkin_time);
+    const coMins = toMins(checkoutTime);
+    let attendance_type;
+    if (isPermitted) {
+      attendance_type = ciMins >= 600 ? 'Irregular' : (coMins >= 900 && coMins <= 960 ? 'Regular' : 'Partial');
+    } else if (ciMins < 600 && coMins >= 1020) {
+      attendance_type = 'Regular';
+    } else if (ciMins >= 600 && coMins < 1020) {
+      attendance_type = 'Irregular';
+    } else {
+      attendance_type = 'Partial';
+    }
+
     const updateFields = {
       checkout_time:             checkoutTime,
       checkout_lat:              parseFloat(latitude)  || record.latitude,
@@ -536,6 +594,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       worked_hours:              workedHours,
       leave_type:                leaveType,
       leave_status:              leaveType ? (isAutoApproved ? 'Approved' : 'Pending') : null,
+      attendance_type,
     };
 
      if (isAutoApproved) {
@@ -649,7 +708,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
 router.post('/apply-leave', authenticate, authorize('employee'), [
   body('date').isDate().withMessage('Valid start date required'),
   body('endDate').optional().isDate(),
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -660,27 +719,48 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
 
     const todayISO = istDateStr();
-    const minDate  = new Date(todayISO); minDate.setDate(minDate.getDate() - 30);
-    const maxDate  = new Date(todayISO); maxDate.setDate(maxDate.getDate() + 60);
-    const startD   = new Date(date), endD = new Date(finalEndDate);
-    if (startD < minDate) return res.status(400).json({ success: false, message: 'Cannot apply leave more than 30 days in the past' });
-    if (endD   > maxDate) return res.status(400).json({ success: false, message: 'Leave can only be planned up to 60 days in advance' });
 
-    const currentUser = await User.findById(req.user.id).select('manager_id name').lean();
+    // ── Per-type date window validation ────────────────────────────────
+    const allowedWindows = {
+      'Urgent Leave': { minOffset: 0,   maxOffset: 3,  minMsg: 'Urgent Leave can only be applied starting today', maxMsg: 'Urgent Leave can only be applied up to 3 days ahead' },
+      'Casual Leave': { minOffset: -30, maxOffset: 7,  minMsg: 'Casual Leave cannot be applied more than 30 days in the past', maxMsg: 'Casual Leave can only be applied up to 7 days in advance' },
+      'Planned Leave':{ minOffset: 7,   maxOffset: 90, minMsg: 'Planned Leave must start at least 7 days from today', maxMsg: 'Planned Leave can only be planned up to 90 days in advance' },
+      'Half Day':     { minOffset: -30, maxOffset: 7,  minMsg: 'Leave cannot be applied more than 30 days in the past', maxMsg: 'Leave can only be applied up to 7 days in advance' },
+      'Emergency Leave':{ minOffset: -30, maxOffset: 7, minMsg: 'Leave cannot be applied more than 30 days in the past', maxMsg: 'Leave can only be applied up to 7 days in advance' },
+    };
+    const win = allowedWindows[leaveType];
+    const minAllowed = addDays(todayISO, win.minOffset);
+    const maxAllowed = addDays(todayISO, win.maxOffset);
+    if (date < minAllowed) return res.status(400).json({ success: false, message: win.minMsg });
+    if (finalEndDate > maxAllowed) return res.status(400).json({ success: false, message: win.maxMsg });
+
+    const currentUser = await User.findById(req.user.id).select('manager_id name leave_balance auto_leave_enabled').lean();
     const managerId   = currentUser?.manager_id;
 
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
     if (existing) return res.status(409).json({ success: false, message: `A record already exists for ${date}.` });
 
     const isMultiDay = finalEndDate !== date;
-    const dayCount   = Math.round((endD - startD) / 86400000) + 1;
+    const dayCount   = countWorkingDays(date, finalEndDate);
     const id = uuidv4();
+
+    // ── Leave balance & LOP logic ───────────────────────────────────────
+    const balance = currentUser?.leave_balance ?? 0;
+    const autoEnabled = currentUser?.auto_leave_enabled !== false;
+    const isLOP = autoEnabled && balance < dayCount;
+    const effectiveLeaveType = isLOP ? leaveType : leaveType; // keep type, mark LOP separately
+    const leaveNote = isLOP ? ' (LOP — insufficient balance)' : '';
 
     await AttendanceRecord.create({
       _id: id, emp_id: req.user.id, date, end_date: isMultiDay ? finalEndDate : null,
       duty_type: 'Leave', status: 'Pending', manager_id: managerId,
-      leave_type: leaveType, leave_reason: reason, leave_status: 'Pending', submitted_at: new Date(),
+      leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Pending', submitted_at: new Date(),
     });
+
+    // Deduct balance if sufficient
+    if (autoEnabled && !isLOP && balance > 0) {
+      await User.findByIdAndUpdate(req.user.id, { $inc: { leave_balance: -dayCount } });
+    }
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
 
     const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
@@ -731,9 +811,18 @@ router.delete('/:id/cancel-leave', authenticate, authorize('employee'), async (r
     await AttendanceRecord.findByIdAndDelete(record._id);
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CANCEL_LEAVE', entity_type: 'attendance', entity_id: record._id, new_value: record.leave_type });
 
+    const emp = await User.findById(req.user.id).select('name').lean();
+    const cancelBody = `<p><strong>${emp?.name}</strong> has cancelled their <strong>${record.leave_type}</strong> leave request for <strong>${record.date}</strong>.</p>`;
+
     if (record.manager_id) {
-      const emp = await User.findById(req.user.id).select('name').lean();
       await notify(record.manager_id, 'Leave Cancelled', `${emp?.name} cancelled their ${record.leave_type} for ${record.date}`, 'info', null, '/manager/queue');
+      const manager = await User.findById(record.manager_id).select('email name').lean();
+      if (manager?.email) sendMail(manager.email, `[AMS] Leave Cancelled – ${emp?.name}`, `<p>Hi ${manager.name},</p>${cancelBody}`);
+    }
+    const admins = await User.find({ role: { $in: ['admin', 'hr'] }, is_active: { $ne: false } }).select('_id email name').lean();
+    for (const a of admins) {
+      await notify(a._id, 'Leave Cancelled', `${emp?.name} cancelled their ${record.leave_type} for ${record.date}`, 'info', null, '/admin/records');
+      if (a.email) sendMail(a.email, `[AMS] Leave Cancelled – ${emp?.name}`, `<p>Hi ${a.name},</p>${cancelBody}`);
     }
 
     res.json({ success: true, message: 'Leave request cancelled successfully' });
@@ -888,7 +977,7 @@ router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), asy
 // PUT /api/attendance/:id/leave-request
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/leave-request', authenticate, authorize('employee'), [
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -914,6 +1003,49 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'LEAVE_REQUEST', entity_type: 'attendance', entity_id: record._id, new_value: leaveType });
     const updated = await AttendanceRecord.findById(record._id).lean();
     res.json({ success: true, message: 'Leave request submitted', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/edit-leave  — employee edits a pending leave after submission
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/edit-leave', authenticate, authorize('employee'), [
+  body('leaveType').optional().isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('reason').optional().notEmpty(),
+  body('endDate').optional().isDate(),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { leaveType, reason, endDate } = req.body;
+    const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id, duty_type: 'Leave' }).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Leave record not found' });
+    if (record.leave_status !== 'Pending') return res.status(400).json({ success: false, message: 'Only pending leaves can be edited' });
+
+    const updates = { leave_edited_at: new Date() };
+    if (leaveType) updates.leave_type = leaveType;
+    if (reason)    updates.leave_reason = reason;
+    if (endDate)   updates.end_date = endDate;
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: updates });
+
+    const emp = await User.findById(req.user.id).select('name manager_id').lean();
+    const effectiveType = leaveType || record.leave_type;
+    const newReason     = reason    || record.leave_reason;
+
+    const body2 = `<p><strong>${emp.name}</strong> edited their <strong>${effectiveType}</strong> leave for <strong>${record.date}</strong>.</p><p><strong>Updated Reason:</strong> ${newReason}</p>`;
+
+    if (record.manager_id) {
+      await notify(record.manager_id, 'Leave Edited', `${emp.name} edited their ${effectiveType} for ${record.date}`, 'warning', record._id, '/manager/queue');
+      const manager = await User.findById(record.manager_id).select('email name').lean();
+      if (manager?.email) sendMail(manager.email, `[AMS] Leave Edited – ${emp.name}`, `<p>Hi ${manager.name},</p>${body2}`);
+    }
+    const admins = await User.find({ role: 'admin', is_active: { $ne: false } }).select('email name').lean();
+    admins.forEach(a => { if (a.email) sendMail(a.email, `[AMS] Leave Edited – ${emp.name}`, `<p>Hi ${a.name},</p>${body2}`); });
+
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'EDIT_LEAVE', entity_type: 'attendance', entity_id: record._id, new_value: JSON.stringify(updates) });
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    res.json({ success: true, message: 'Leave updated', data: formatRecord(updated) });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
@@ -1175,6 +1307,7 @@ function formatRecord(r) {
     faceVerificationStatus:   r.face_verification_status || null,
     faceConfidence:           r.face_confidence ?? null,
     empProfilePhoto:          r.emp_face_photo || r.emp_profile_photo || null,
+    attendanceType:           r.attendance_type || null,
   };
 }
 

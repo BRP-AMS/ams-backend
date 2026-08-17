@@ -30,6 +30,7 @@ app.set('trust proxy', 1);
 const ALLOWED_ORIGINS = [
   'https://monitermark.brptripura.com',
   'https://mm-service.brptripura.com',
+  'https://monitormark.brptripura.com',
   process.env.FRONTEND_URL,
   process.env.BACKEND_URL,
   'http://localhost:3000',

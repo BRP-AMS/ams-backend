@@ -10,7 +10,7 @@ services:
       - key: PORT
         value: 10000
       - key: FRONTEND_URL
-        value: https://monitermark.brptripura.com
+        value: https://monitormark.brptripura.com
       - key: BACKEND_URL
         value: https://mm-service.brptripura.com
       # Set these in Render Dashboard (sensitive — do not commit values):

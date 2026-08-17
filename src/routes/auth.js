@@ -413,7 +413,7 @@ router.post('/forgot-password', forgotLimiter, [
       $set: { pwd_reset_token: hashedTok, pwd_reset_expires: expires }
     });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawToken}`;
     await sendMail(user.email, 'BRP Attendance System - Reset Your Password',
       emailLayout('Password Reset Request', `

@@ -206,7 +206,7 @@ router.get('/bulk-upload/template', authenticate, authorize('super_admin', 'admi
 router.get('/export-reset-links', authenticate, authorize('super_admin', 'admin'), async (req, res) => {
   try {
     const crypto   = require('crypto');
-    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
     const users    = await User.find({ is_active: 1, role: { $nin: ['super_admin', 'admin'] } })
                                .select('_id name email emp_id role assigned_block assigned_district')
                                .sort({ name: 1 })
@@ -342,7 +342,7 @@ router.post('/', authenticate, authorize('admin', 'super_admin'), [
     
     // Send welcome email with app's own reset link (same SMTP that powers forgot-password)
     const { sendMail } = require('../utils/mailer');
-    const FRONTEND  = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const FRONTEND  = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
     const resetUrl  = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
     sendMail(
@@ -403,7 +403,7 @@ router.post('/reset-all-passwords', authenticate, authorize('super_admin', 'admi
     const expiryLabel = expiry24h ? '24 hours' : '30 minutes';
 
     const crypto  = require('crypto');
-    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
 
     const users = await User.find({ is_active: 1, role: { $nin: ['super_admin', 'admin'] } }).select('_id name email emp_id role').lean();
 
@@ -490,7 +490,7 @@ router.put('/:id/reset-password', authenticate, authorize('admin', 'super_admin'
 
     await User.findByIdAndUpdate(req.params.id, { $set: { password_hash: bcrypt.hashSync(tempPassword, 12), pwd_reset_token: hashedResetTok, pwd_reset_expires: new Date(Date.now() + expiryMs) } });
 
-    const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+    const FRONTEND = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
     const resetUrl = `${FRONTEND}/reset-password?token=${rawResetToken}`;
 
     await sendMail(target.email, 'BRP Attendance System - Password Reset by Admin',
@@ -994,7 +994,7 @@ router.post('/bulk-upload', authenticate, authorize('super_admin', 'admin'), upl
         });
 
         if (setupTokenRaw) {
-          const FRONTEND = process.env.FRONTEND_URL || 'https://monitermark.brptripura.com';
+          const FRONTEND = process.env.FRONTEND_URL || 'https://monitormark.brptripura.com';
           const resetUrl = `${FRONTEND}/reset-password?token=${setupTokenRaw}`;
           sendMail(
             email,

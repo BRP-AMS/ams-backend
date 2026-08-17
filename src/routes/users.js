@@ -1197,7 +1197,7 @@ function formatUser(u) {
     officeName:                   u.office_name                   || null,
     reportingOfficerName:        u.reporting_officer_name        || null,
     reportingOfficerDesignation: u.reporting_officer_designation || null,
-    department:       u.department,
+    department:       fullyDecode(u.department || ''),
     managerId:        u.manager_id,
     hrId:             u.hr_id     || null,
     hrName:           u.hr_name    || null,   // ← ADD

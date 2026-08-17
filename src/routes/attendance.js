@@ -22,6 +22,10 @@ const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
+// ── HTML entity decoder (handles multiple encodings like &amp;amp;) ────────
+const _decodeHtml  = s => String(s ?? '').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'");
+const _fullyDecode = s => { let p; do { p = s; s = _decodeHtml(s); } while (s !== p); return s; };
+
 // ── Holiday / working-day helpers ────────────────────────────────────────
 const LEAVE_HOLIDAYS_MMDD = new Set([
   '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
@@ -1308,7 +1312,7 @@ function formatRecord(r) {
     empId:                    r.emp_id,
     empName:                  r.emp_name,
     empCode:                  r.emp_code,
-    department:               r.department,
+    department:               _fullyDecode(r.department || ''),
     date:                     r.date,
     endDate:                  r.end_date   || null,
     dutyType:                 r.duty_type,

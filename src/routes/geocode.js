@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
   const fromNominatim = async () => {
     const r = await withTimeout(fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`,
-      { headers: { 'User-Agent': 'BRP-AMS/1.0 (brp-ams@raminfo.com)', 'Accept-Language': 'en' } }
+      { headers: { 'User-Agent': 'BRP-AMS/1.0 (brp-ams@brptripura.com)', 'Accept-Language': 'en' } }
     ));
     const j = await r.json();
     if (!j.display_name) throw new Error('no data');
@@ -129,7 +129,7 @@ router.get('/search', async (req, res) => {
   try {
     const r = await withTimeout(fetch(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q.trim())}&format=json&addressdetails=1&limit=6&countrycodes=in`,
-      { headers: { 'User-Agent': 'BRP-AMS/1.0 (brp-ams@raminfo.com)', 'Accept-Language': 'en' } }
+      { headers: { 'User-Agent': 'BRP-AMS/1.0 (brp-ams@brptripura.com)', 'Accept-Language': 'en' } }
     ));
     const results = await r.json();
     res.json(results.map(item => ({

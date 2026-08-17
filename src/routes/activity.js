@@ -507,7 +507,7 @@ if (startDate && endDate) {
           emp_code: { $arrayElemAt: ['$user.emp_id', 0] },
       }},
       { $project: { user: 0 } },
-      { $sort: { activity_date: -1 } },
+      { $sort: { activity_date: 1 } },
       { $limit: 500 },
     ]);
 
@@ -518,22 +518,36 @@ if (startDate && endDate) {
       ? 'activity_report_all.pdf'
       : `activity_report_${start}_${end}.pdf`;
 
+    // ── Group rows into weekly bands ─────────────────────────────────
+    const BAND_DEFS = [
+      { label: 'Week 1',  test: d => d >= 1  && d <= 7  },
+      { label: 'Week 2',  test: d => d >= 8  && d <= 14 },
+      { label: 'Week 3',  test: d => d >= 15 && d <= 21 },
+      { label: 'Week 4',  test: d => d >= 22 && d <= 28 },
+      { label: 'Week 5',  test: d => d >= 29             },
+    ];
+    const bandedRows = BAND_DEFS.map(b => ({
+      label: b.label,
+      rows:  rows.filter(r => {
+        const day = parseInt((r.activity_date || '').slice(8, 10), 10);
+        return b.test(day);
+      }),
+    })).filter(b => b.rows.length > 0);
+
     const doc = new PDFDocument({ margin: 0, size: 'A3', layout: 'landscape' });
     res.setHeader('Content-Disposition', `attachment; filename=${pdfFilename}`);
     res.setHeader('Content-Type', 'application/pdf');
     doc.pipe(res);
 
-  const PAGE_W = 1190.55, PAGE_H = 841.89, MARGIN = 28;
+    const PAGE_W = 1190.55, PAGE_H = 841.89, MARGIN = 28;
     const BLUE   = '#1a6aa5', BLUE_H = '#155a8a', BLUE_ALT = '#e8f2fb';
+    const BAND_BG = '#dbeafe', BAND_FG = '#1e3a8a';
     const WHITE  = '#ffffff', BORDER = '#c8dff0', TEXT_DARK = '#0f1e3d', TEXT_MED = '#4a5568';
 
-    // ── Columns: match detail view order ──────────────────────────────
-    // Date | Emp ID | Officer | MSME Name | Udyam No | Activity Type | Sub Activity | Block | Resolution | End Results | Remarks
-    const cols  = [70, 55, 85, 120, 110, 100, 100, 85, 130, 130, 130];  // total ≈ 780 fits in PAGE_W - 2*MARGIN
-   const heads = ['Date', 'Emp ID', 'Officer', 'MSME Name', 'Udyam No', 'Activity Type', 'Sub Activity', 'Block / ULB', 'Resolution / Solution', 'End Results', 'Remarks'];
+    const cols  = [70, 55, 85, 120, 110, 100, 100, 85, 130, 130, 130];
+    const heads = ['Date', 'Emp ID', 'Officer', 'MSME Name', 'Udyam No', 'Activity Type', 'Sub Activity', 'Block / ULB', 'Resolution / Solution', 'End Results', 'Remarks'];
 
-    // ── Helper: draw header row ──
-    const ROW_H = 22, HEAD_H = 28;
+    const ROW_H = 22, HEAD_H = 28, BAND_H = 16;
     const tableW = cols.reduce((s, c) => s + c, 0);
 
     const drawHeader = (yPos) => {
@@ -547,100 +561,126 @@ if (startDate && endDate) {
     };
 
     const drawBorders = (yPos, rowH) => {
-      // bottom border
       doc.moveTo(MARGIN, yPos + rowH).lineTo(MARGIN + tableW, yPos + rowH)
         .strokeColor(BORDER).lineWidth(0.3).stroke();
-      // vertical borders
       let vx = MARGIN;
       cols.forEach((w) => {
-        doc.moveTo(vx, yPos).lineTo(vx, yPos + rowH)
-          .strokeColor(BORDER).lineWidth(0.25).stroke();
+        doc.moveTo(vx, yPos).lineTo(vx, yPos + rowH).strokeColor(BORDER).lineWidth(0.25).stroke();
         vx += w;
       });
       doc.moveTo(vx, yPos).lineTo(vx, yPos + rowH).strokeColor(BORDER).lineWidth(0.25).stroke();
     };
 
-    // ── Page 1 header banner ──
-    const drawPageBanner = (isFirst) => {
-      doc.rect(0, 0, PAGE_W, isFirst ? 68 : 0).fill(BLUE);
-      if (isFirst) {
-        doc.fillColor(WHITE).fontSize(18).font('Helvetica-Bold')
-          .text('BRP — MSME Activity Report', MARGIN, 12, { width: PAGE_W - MARGIN * 2, align: 'center' });
-        const sub = `Period: ${filter === 'all' ? 'All Time' : filter.charAt(0).toUpperCase() + filter.slice(1)}  ·  Generated: ${generatedDate}  ·  Total Records: ${rows.length}`;
-        doc.fontSize(9).font('Helvetica')
-          .text(sub, MARGIN, 40, { width: PAGE_W - MARGIN * 2, align: 'center' });
-      }
+    const drawBandSeparator = (yPos, label, count) => {
+      doc.rect(MARGIN, yPos, tableW, BAND_H).fill(BAND_BG);
+      doc.fillColor(BAND_FG).fontSize(7.5).font('Helvetica-Bold')
+        .text(`${label}  (${count} record${count !== 1 ? 's' : ''})`, MARGIN + 6, yPos + 4, { width: tableW - 12, lineBreak: false });
+      doc.moveTo(MARGIN, yPos + BAND_H).lineTo(MARGIN + tableW, yPos + BAND_H)
+        .strokeColor('#93c5fd').lineWidth(0.5).stroke();
     };
 
-    drawPageBanner(true);
-    let y = 78;
+    // ── Page 1 banner ──
+    doc.rect(0, 0, PAGE_W, 56).fill(BLUE);
+    doc.fillColor(WHITE).fontSize(16).font('Helvetica-Bold')
+      .text('BRP — MSME Activity Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
+    const sub = `Period: ${start === 'All' ? 'All Time' : `${start} to ${end}`}  ·  Generated: ${generatedDate}  ·  Total Records: ${rows.length}`;
+    doc.fontSize(8.5).font('Helvetica')
+      .text(sub, MARGIN, 34, { width: PAGE_W - MARGIN * 2, align: 'center' });
+
+    let y = 64;
     drawHeader(y);
     y += HEAD_H;
 
+    const tableStartY = y;
+
     doc.font('Helvetica').fontSize(7);
+    let altIdx = 0;
 
-    rows.forEach((r, idx) => {
-      // Measure row height (may need 2 lines for long text)
-      const longFields = [
-        r.msme_name        || '',
-        r.resolved_solution|| '',
-        r.end_results      || '',
-        r.remarks          || '',
-      ];
-      const needsExtraLine = longFields.some(f => f.length > 28);
-      const thisRowH = needsExtraLine ? ROW_H + 10 : ROW_H;
-
-      if (y + thisRowH > PAGE_H - 20) {
-        doc.addPage({ size: 'A4', layout: 'landscape', margin: 0 });
+    bandedRows.forEach(({ label, rows: bRows }) => {
+      // Band separator — ensure it fits, else new page
+      if (y + BAND_H + ROW_H > PAGE_H - 60) {
+        doc.addPage({ size: 'A3', layout: 'landscape', margin: 0 });
         y = 20;
         drawHeader(y);
         y += HEAD_H;
         doc.font('Helvetica').fontSize(7);
+        altIdx = 0;
       }
+      drawBandSeparator(y, label, bRows.length);
+      y += BAND_H;
 
-      // Row background
-      doc.rect(MARGIN, y, tableW, thisRowH).fill(idx % 2 === 0 ? WHITE : BLUE_ALT);
+      bRows.forEach(r => {
+        const longFields = [r.msme_name || '', r.resolved_solution || '', r.end_results || '', r.remarks || ''];
+        const needsExtraLine = longFields.some(f => f.length > 28);
+        const thisRowH = needsExtraLine ? ROW_H + 10 : ROW_H;
 
-      // Cell text
-      const vals = [
-        r.activity_date         || '',
-        r.emp_code              || '',
-        r.officer               || '',
-        r.msme_name             || '',
-        r.udyam_number          || '',
-        r.activity_type || r.sector        || '',
-        r.sub_activity  || r.support_type  || '',
-        r.block_name            || '',
-        r.resolved_solution     || '',
-        r.end_results           || '',
-        r.remarks               || '—',
-      ];
+        if (y + thisRowH > PAGE_H - 60) {
+          doc.addPage({ size: 'A3', layout: 'landscape', margin: 0 });
+          y = 20;
+          drawHeader(y);
+          y += HEAD_H;
+          doc.font('Helvetica').fontSize(7);
+          altIdx = 0;
+        }
 
-      let cx = MARGIN;
-      doc.fillColor(TEXT_DARK);
-      vals.forEach((v, i) => {
-        doc.text(String(v), cx + 3, y + 6, {
-          width:    cols[i] - 5,
-          height:   thisRowH - 6,
-          ellipsis: true,
-          lineBreak: thisRowH > ROW_H, // allow wrap only when extra height
+        doc.rect(MARGIN, y, tableW, thisRowH).fill(altIdx % 2 === 0 ? WHITE : BLUE_ALT);
+
+        const vals = [
+          r.activity_date || '', r.emp_code || '', r.officer || '',
+          r.msme_name || '', r.udyam_number || '',
+          r.activity_type || r.sector || '', r.sub_activity || r.support_type || '',
+          r.block_name || '', r.resolved_solution || '', r.end_results || '', r.remarks || '—',
+        ];
+
+        let cx = MARGIN;
+        doc.fillColor(TEXT_DARK);
+        vals.forEach((v, i) => {
+          doc.text(String(v), cx + 3, y + 6, {
+            width: cols[i] - 5, height: thisRowH - 6,
+            ellipsis: true, lineBreak: thisRowH > ROW_H,
+          });
+          cx += cols[i];
         });
-        cx += cols[i];
-      });
 
-      drawBorders(y, thisRowH);
-      y += thisRowH;
+        drawBorders(y, thisRowH);
+        y += thisRowH;
+        altIdx++;
+      });
     });
 
-    // Outer border around entire table
-    doc.rect(MARGIN, 78 + HEAD_H - HEAD_H, tableW, y - 78)
+    // Outer border
+    doc.rect(MARGIN, tableStartY - HEAD_H, tableW, y - (tableStartY - HEAD_H))
       .strokeColor(BLUE).lineWidth(0.8).stroke();
 
-    // Footer
-    doc.fillColor(TEXT_MED).fontSize(8).font('Helvetica')
+    // ── Acknowledgment section ────────────────────────────────────────
+    const ACK_H = 72;
+    if (y + ACK_H > PAGE_H - 20) {
+      doc.addPage({ size: 'A3', layout: 'landscape', margin: 0 });
+      y = 20;
+    } else {
+      y += 16;
+    }
+
+    doc.rect(MARGIN, y, tableW, ACK_H).fill('#f8fafc').strokeColor('#cbd5e1').lineWidth(0.5).stroke();
+    doc.fillColor(TEXT_DARK).fontSize(8).font('Helvetica-Bold')
+      .text('Acknowledgment', MARGIN + 10, y + 8);
+    const sigY = y + 26;
+    const sigCols = [tableW * 0.35, tableW * 0.30, tableW * 0.35];
+    const sigLabels = ['Prepared by (Employee)', 'Verified by (Manager)', 'Approved by (HR / Admin)'];
+    let sx = MARGIN + 10;
+    sigLabels.forEach((lbl, i) => {
+      doc.fillColor(TEXT_MED).fontSize(7).font('Helvetica').text(lbl, sx, sigY);
+      doc.moveTo(sx, sigY + 22).lineTo(sx + sigCols[i] - 20, sigY + 22)
+        .strokeColor('#94a3b8').lineWidth(0.5).stroke();
+      doc.fillColor('#94a3b8').fontSize(6.5).text('Signature & Date', sx, sigY + 26);
+      sx += sigCols[i];
+    });
+
+    // Page footer
+    doc.fillColor(TEXT_MED).fontSize(7.5).font('Helvetica')
       .text(
         `BRP Activity Management System  ·  ${generatedDate}  ·  Confidential`,
-        MARGIN, PAGE_H - 18, { width: PAGE_W - MARGIN * 2, align: 'center' },
+        MARGIN, PAGE_H - 16, { width: PAGE_W - MARGIN * 2, align: 'center' },
       );
 
     doc.end();

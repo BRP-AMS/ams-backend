@@ -9,6 +9,14 @@ const { authenticate, authorize }                         = require('../middlewa
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
 const { employeeFolderPath } = require('../config/cloudinary');
+// ── File-naming helper ───────────────────────────────────────────────────
+const makeDocName = (user, docType, ext = '') => {
+  const name  = (user.name || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+  const empId = (user.emp_id || user.id || 'NOID').replace(/[^a-zA-Z0-9_-]/g, '');
+  const ts    = Date.now();
+  return `${name}_${empId}_${docType}_${ts}${ext ? '.' + ext.replace(/^\./, '') : ''}`;
+};
+
 // ── IST helpers ───────────────────────────────────────────────────────────
 const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' });
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
@@ -398,7 +406,8 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     const checkinDate = today;
 
     // Upload selfie immediately
-    const selfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype);
+    const _selfieExt = path.extname(req.file.originalname).replace('.', '') || 'jpg';
+    const selfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'checkin_selfie', _selfieExt));
 
     let id = uuidv4();
     const checkinFields = {
@@ -491,7 +500,8 @@ router.put('/:id/retake-face', authenticate, authorize('employee'), upload.singl
     if (!req.file)
       return res.status(400).json({ success: false, message: 'Selfie is required.' });
 
-    const newSelfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype);
+    const _rtExt = path.extname(req.file.originalname).replace('.', '') || 'jpg';
+    const newSelfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'retake_selfie', _rtExt));
 
     await AttendanceRecord.findByIdAndUpdate(req.params.id, {
       $set: { face_verification_status: 'verified', face_confidence: 100, selfie_path: newSelfiePath },
@@ -580,7 +590,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     const checkoutFaceConfidence = 0;
 
     const checkoutSelfiePath = req.file
-      ? await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype)
+      ? await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'checkout_selfie', path.extname(req.file.originalname).replace('.', '') || 'jpg'))
       : null;
 
     // ── Attendance type classification ────────────────────────────────────
@@ -1089,7 +1099,10 @@ router.put('/:id/reapply', authenticate, authorize('employee'), reapplyUpload.ar
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.status !== 'Rejected') return res.status(400).json({ success: false, message: 'Only rejected records can be re-applied' });
 
-    const docPaths = await Promise.all((req.files || []).map(f => uploadFile(f.buffer, `ams/users/${req.user.emp_id || req.user.id}/reapply-docs`, f.originalname, f.mimetype)));
+    const docPaths = await Promise.all((req.files || []).map((f, idx) => {
+      const ext = path.extname(f.originalname).replace('.', '') || 'bin';
+      return uploadFile(f.buffer, `ams/users/${req.user.emp_id || req.user.id}/reapply-docs`, f.originalname, f.mimetype, makeDocName(req.user, `reapply_doc_${idx + 1}`, ext));
+    }));
     await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: { status: 'Pending', manager_remark: null, reapply_reason: reason.trim(), reapply_docs: docPaths, reapplied_at: new Date(), submitted_at: new Date() },
     });
@@ -1169,7 +1182,8 @@ router.post('/upload-scan', authenticate, authorize('employee'), uploadScan.sing
     const existing    = Array.isArray(arr) ? arr.filter(s => (s.day || s.date) === day) : (arr[day]?.files || []);
     if (existing.length >= 3) return res.status(400).json({ success: false, message: 'Max 2 files already uploaded for today.' });
     const fileIndex = existing.length;
-    const scanPath  = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/scans`, req.file.originalname, req.file.mimetype);
+    const _scanExt = path.extname(req.file.originalname).replace('.', '') || 'pdf';
+    const scanPath  = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/scans`, req.file.originalname, req.file.mimetype, makeDocName(req.user, `scan_${day}`, _scanExt));
     await User.findByIdAndUpdate(req.user.id, {
       $push: { scan_papers: { path: scanPath, day, day_label: dayLabel, file_name: req.file.originalname, file_index: fileIndex, uploaded_at: new Date() } },
     }, { strict: false });
@@ -1222,8 +1236,10 @@ router.post('/upload-signed-report', authenticate, uploadSignedReport.single('si
     }
     const monthLabel = new Date(`${month}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
     const targetUser  = await User.findById(targetEmpId).select('emp_id name').lean();
-   const folderPath = employeeFolderPath(targetUser?.emp_id, targetEmpId);
-const signedPath = await uploadFile(req.file.buffer, `${folderPath}/signed-reports`, req.file.originalname, req.file.mimetype);
+    const folderPath  = employeeFolderPath(targetUser?.emp_id, targetEmpId);
+    const _srExt      = path.extname(req.file.originalname).replace('.', '') || 'pdf';
+    const _srName     = `${(targetUser?.name || 'unknown').replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_-]/g,'')}_${targetUser?.emp_id || targetEmpId}_signed_report_${month}`;
+    const signedPath  = await uploadFile(req.file.buffer, `${folderPath}/signed-reports`, req.file.originalname, req.file.mimetype, `${_srName}.${_srExt}`);
     // const entry = { path: signedPath, name: req.file.originalname, month, month_label: monthLabel, uploaded_at: new Date(), uploaded_by: req.user.id };
     // const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 3);
     // await User.findByIdAndUpdate(targetEmpId, { $pull: { signed_reports: { uploaded_at: { $lt: cutoff } } } }, { strict: false });

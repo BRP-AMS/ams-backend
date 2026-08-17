@@ -81,14 +81,16 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
     const isImage = req.file.mimetype.startsWith('image/');
     const isPdf   = req.file.mimetype === 'application/pdf';
 
-    const currentUser = await User.findById(req.user.id).select('emp_id').lean();
+    const currentUser = await User.findById(req.user.id).select('emp_id name').lean();
     const folderPath  = employeeFolderPath(currentUser?.emp_id, req.user.id);
+    const _empName    = (currentUser?.name || req.user.name || 'unknown').replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_-]/g,'');
+    const _empId      = (currentUser?.emp_id || req.user.id).replace(/[^a-zA-Z0-9_-]/g,'');
 
     const result = await uploadToCloudinary(req.file.buffer, {
       folder:          `${folderPath}/monthly_reports`,
       resource_type:   (isImage || isPdf) ? 'image' : 'raw',
-      public_id:       `activity_report_${month_key}`,
-      use_filename:    true,
+      public_id:       `${_empName}_${_empId}_monthly_report_${month_key}`,
+      use_filename:    false,
       unique_filename: false,
     });
 

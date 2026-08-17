@@ -93,8 +93,14 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
     });
 
     if (req.files?.length) {
+      const empName = (req.user.name || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
+      const empId   = (req.user.emp_id || req.user.id || 'NOID').replace(/[^a-zA-Z0-9_-]/g, '');
       const uploaded = await Promise.all(
-        req.files.map(f => uploadFile(f.buffer, `ams/users/${req.user.emp_id || req.user.id}/activity-docs`, f.originalname, f.mimetype))
+        req.files.map((f, idx) => {
+          const ext      = path.extname(f.originalname).replace('.', '') || 'bin';
+          const docName  = `${empName}_${empId}_activity_doc_${idx + 1}_${Date.now()}.${ext}`;
+          return uploadFile(f.buffer, `ams/users/${req.user.emp_id || req.user.id}/activity-docs`, f.originalname, f.mimetype, docName);
+        })
       );
       await ActivityDocument.insertMany(uploaded.map((url, i) => ({
         _id:         uuidv4(),

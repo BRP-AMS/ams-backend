@@ -22,21 +22,22 @@ const getResourceType = (mimetype) => {
 
 /**
  * Upload a buffer to Cloudinary.
- * @param {Buffer} buffer    - File buffer from multer memoryStorage
- * @param {string} folder    - Cloudinary folder e.g. 'ams/users/EMP001/selfies'
- * @param {string} filename  - Original filename (unused by Cloudinary, kept for signature compat)
- * @param {string} mimetype  - MIME type used to pick correct resource_type
+ * @param {Buffer} buffer     - File buffer from multer memoryStorage
+ * @param {string} folder     - Cloudinary folder e.g. 'ams/users/EMP001/selfies'
+ * @param {string} filename   - Original filename (used as fallback public_id base)
+ * @param {string} mimetype   - MIME type used to pick correct resource_type
+ * @param {string} [customName] - Optional Cloudinary public_id (without folder); used to give
+ *                               meaningful names e.g. "AjayKumar_EMP001_checkin_selfie_1234567890"
  * @returns {Promise<string>} Secure HTTPS URL
  */
-const uploadFile = (buffer, folder, filename, mimetype) => {
+const uploadFile = (buffer, folder, filename, mimetype, customName) => {
   return new Promise((resolve, reject) => {
-    cloudinary.uploader.upload_stream(
-      { folder, resource_type: getResourceType(mimetype) },
-      (err, result) => {
-        if (err) reject(err);
-        else resolve(result.secure_url);
-      }
-    ).end(buffer);
+    const opts = { folder, resource_type: getResourceType(mimetype) };
+    if (customName) opts.public_id = customName;
+    cloudinary.uploader.upload_stream(opts, (err, result) => {
+      if (err) reject(err);
+      else resolve(result.secure_url);
+    }).end(buffer);
   });
 };
 

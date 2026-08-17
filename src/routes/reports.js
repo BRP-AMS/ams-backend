@@ -1076,7 +1076,8 @@ const rows = filtered.map(r => {
       };
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${startDate}_to_${endDate}.xlsx"`);
+      const fmtFnXl = iso => iso ? iso.split('-').reverse().join('-') : '';
+      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${fmtFnXl(startDate)}_to_${fmtFnXl(endDate)}.xlsx"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
@@ -1086,21 +1087,24 @@ const rows = filtered.map(r => {
     //  PDF
     // ══════════════════════════════════════════════════════════════════════════
     if (format === 'pdf') {
+      // Filename in DD-MM-YYYY format
+      const fmtFn = iso => iso ? iso.split('-').reverse().join('-') : '';
       const doc = new PDFDoc({
-        size: 'A4', layout: 'landscape',
+        size: 'A4', layout: 'portrait',
         margins: { top: 28, bottom: 28, left: 28, right: 28 },
         autoFirstPage: true,
       });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${startDate}_to_${endDate}.pdf"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${fmtFn(startDate)}_to_${fmtFn(endDate)}.pdf"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
 
       const ML      = 28;
       const usableW = doc.page.width - ML * 2;
-      const colWidths = [55, 150, 65, 65, 30, 85, 65, 130, 120, 50, 90];
-      const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark','hrOverride','hrRemark'];
-      const colHdrs   = ['Emp Code','Employee Name','From Date','To Date','Days','Leave Type','Status','Reason','Manager Remark','HR Override','HR Remark'];
+      // Portrait A4: 9 columns (drop hrOverride + hrRemark — too wide)
+      const colWidths = [40, 100, 55, 55, 25, 75, 55, 100, 90];
+      const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark'];
+      const colHdrs   = ['Emp Code','Employee Name','From','To','Days','Leave Type','Status','Reason','Manager Remark'];
       const totalW    = colWidths.reduce((a, b) => a + b, 0);
       const cw        = colWidths.map(w => (w / totalW) * usableW);
       const RH = 14, HRH = 16;
@@ -1136,8 +1140,8 @@ const rows = filtered.map(r => {
            .text('No leave records found for the selected period and filters.', ML, y + 3, { width: usableW, align: 'center' });
       } else {
         rows.forEach((row, idx) => {
-          if (y + RH > doc.page.height - 40) {
-            doc.addPage({ size: 'A4', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+          if (y + RH > doc.page.height - 80) {
+            doc.addPage({ size: 'A4', layout: 'portrait', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
             y = drawPageHeader(28);
           }
           const bg =
@@ -1150,7 +1154,7 @@ const rows = filtered.map(r => {
           let cx = ML;
           colKeys.forEach((key, i) => {
             const val = String(row[key] || '');
-            const isCenter = ['empCode','status','hrOverride','days','startDate','endDate'].includes(key);
+            const isCenter = ['empCode','status','days','startDate','endDate'].includes(key);
             const textColor =
               key === 'status'
                 ? (row.status === 'Approved' ? '#047857' : row.status === 'Rejected' ? '#B91C1C' : '#B45309')
@@ -1164,6 +1168,28 @@ const rows = filtered.map(r => {
           y += RH;
         });
       }
+
+      // ── Signing section ──────────────────────────────────────────────
+      const SIGN_H = 68;
+      if (y + SIGN_H > doc.page.height - 20) {
+        doc.addPage({ size: 'A4', layout: 'portrait', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+        y = 28;
+      } else {
+        y += 18;
+      }
+
+      doc.rect(ML, y, usableW, SIGN_H).fill('#F8FAFC').strokeColor('#CBD5E1').lineWidth(0.5).stroke();
+      doc.fillColor('#0F1E3D').fontSize(8).font('Helvetica-Bold').text('Acknowledgment', ML + 8, y + 8);
+      const sCols = [usableW * 0.45, usableW * 0.55];
+      const sLabels = ['Employee Signature & Date', 'Manager Signature & Date'];
+      let sx = ML + 8;
+      const sY = y + 28;
+      sLabels.forEach((lbl, i) => {
+        doc.fillColor('#4A5568').fontSize(7).font('Helvetica').text(lbl, sx, sY);
+        doc.moveTo(sx, sY + 20).lineTo(sx + sCols[i] - 16, sY + 20)
+          .strokeColor('#94A3B8').lineWidth(0.5).stroke();
+        sx += sCols[i];
+      });
 
       doc.end();
       return;

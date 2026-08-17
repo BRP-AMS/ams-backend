@@ -463,6 +463,7 @@ app.use('/api/monthly-report',    require('./src/routes/monthlyReport'));
 app.use('/api/oda',               require('./src/routes/oda'));
 app.use('/api/dept-dashboard',    require('./src/routes/dept-dashboard'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
+app.use('/api/holidays',          require('./src/routes/holidays'));
 app.use('/api/file',              require('./src/routes/file'));
 
 // Health check — version bump triggers Render redeploy detection

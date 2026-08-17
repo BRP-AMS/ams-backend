@@ -88,6 +88,7 @@ const expandDates = (start, end) => {
   return out;
 };
 
+// Static fallback list (MM-DD) kept for when DB is unavailable
 const HOLIDAYS_MMDD = new Set([
   '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
   '05-01','05-26','05-27','06-26','07-22','08-04','08-15','08-19','08-26',
@@ -99,9 +100,30 @@ const RESTRICTED_MMDD = new Set([
   '09-11','09-18','11-11','11-24','12-03','12-24',
 ]);
 
+// Dynamic holiday cache — refreshed from DB every hour
+let _holCache   = null;
+let _holCacheAt = 0;
+const HOLIDAY_TTL = 60 * 60 * 1000;
+
+const refreshHolCache = async () => {
+  try {
+    const { Holiday } = require('../models/database');
+    const rows = await Holiday.find({}, { date: 1, _id: 0 }).lean();
+    _holCache   = new Set(rows.map(h => h.date));
+    _holCacheAt = Date.now();
+  } catch { /* keep using static fallback */ }
+};
+// Load on startup (non-blocking)
+refreshHolCache();
+
 const isHoliday = iso => {
-  const mmdd = iso.substring(5);
-  return HOLIDAYS_MMDD.has(mmdd) || RESTRICTED_MMDD.has(mmdd);
+  if (_holCache && Date.now() - _holCacheAt < HOLIDAY_TTL) {
+    return _holCache.has(iso) || RESTRICTED_MMDD.has(iso.substring(5));
+  }
+  // Trigger background refresh
+  refreshHolCache().catch(() => {});
+  // Sync fallback while cache loads
+  return HOLIDAYS_MMDD.has(iso.substring(5)) || RESTRICTED_MMDD.has(iso.substring(5));
 };
 
 const getNthSaturday = iso => {

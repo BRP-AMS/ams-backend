@@ -373,6 +373,16 @@ const geoCacheSchema = new mongoose.Schema({
 
 const GeoCache = mongoose.model('GeoCache', geoCacheSchema);
 
+// ── Holiday Master ────────────────────────────────────────────────────────
+const holidaySchema = new mongoose.Schema({
+  date:     { type: String, required: true, unique: true }, // 'YYYY-MM-DD'
+  name:     { type: String, required: true },
+  type:     { type: String, enum: ['public', 'state', 'restricted'], default: 'public' },
+  added_by: { type: String, ref: 'User', default: null },
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
+holidaySchema.index({ date: 1 });
+const Holiday = mongoose.model('Holiday', holidaySchema);
+
 // ── ODA (On-Duty Away) Requests ────────────────────────────────────────────
 const odaRequestSchema = new mongoose.Schema({
   _id:           { type: String },
@@ -425,5 +435,6 @@ module.exports = {
   GeoCache,
   CustomDepartment,
   ODARequest,
-  MonthlyReport
+  MonthlyReport,
+  Holiday,
 };

@@ -1223,4 +1223,82 @@ function formatUser(u) {
   };
 }
 
+// ── GET /api/users/leave-balances — manager/admin/hr view team leave balances ──
+router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const query = { role: 'employee', is_active: { $ne: 0 } };
+    if (req.user.role === 'manager') query.manager_id = req.user.id;
+    const employees = await User.find(query)
+      .select('_id name emp_id leave_balance last_accrual_date joining_date auto_leave_enabled block_name')
+      .sort({ emp_id: 1 })
+      .lean();
+    res.json({ success: true, data: employees });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── PATCH /api/users/:id/leave-balance — adjust leave balance (manager/admin/hr) ──
+router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const { delta, reason, set } = req.body; // delta = +/-N, or set = exact value
+    const query = { _id: req.params.id };
+    if (req.user.role === 'manager') query.manager_id = req.user.id;
+    const emp = await User.findOne(query);
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found or not your team member' });
+
+    let newBalance;
+    if (set !== undefined && set !== null && set !== '') {
+      newBalance = Math.max(0, Number(set));
+      await User.findByIdAndUpdate(req.params.id, { $set: { leave_balance: newBalance } });
+    } else if (delta !== undefined) {
+      newBalance = Math.max(0, (emp.leave_balance || 0) + Number(delta));
+      await User.findByIdAndUpdate(req.params.id, { $set: { leave_balance: newBalance } });
+    } else {
+      return res.status(400).json({ success: false, message: 'Provide delta or set' });
+    }
+
+    // Audit log
+    await AuditLog.create({
+      user_id: req.user.id, action: 'leave_balance_adjust',
+      details: `${emp.name} (${emp.emp_id}): balance ${emp.leave_balance} → ${newBalance}. Reason: ${reason || 'manual'}`,
+    }).catch(() => {});
+
+    res.json({ success: true, data: { leave_balance: newBalance } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── POST /api/users/bulk-leave-balance — bulk adjust all team members ──
+router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
+  try {
+    const { delta, set, reason } = req.body;
+    const query = { role: 'employee', is_active: { $ne: 0 } };
+    if (req.user.role === 'manager') query.manager_id = req.user.id;
+    const employees = await User.find(query).select('_id leave_balance name emp_id').lean();
+
+    const updates = [];
+    for (const emp of employees) {
+      let newBalance;
+      if (set !== undefined && set !== null && set !== '') {
+        newBalance = Math.max(0, Number(set));
+      } else if (delta !== undefined) {
+        newBalance = Math.max(0, (emp.leave_balance || 0) + Number(delta));
+      } else continue;
+      updates.push({ updateOne: { filter: { _id: emp._id }, update: { $set: { leave_balance: newBalance } } } });
+    }
+    if (updates.length) await User.bulkWrite(updates);
+
+    await AuditLog.create({
+      user_id: req.user.id, action: 'bulk_leave_balance_adjust',
+      details: `Bulk ${delta !== undefined ? `delta ${delta}` : `set ${set}`} for ${employees.length} employees. Reason: ${reason || 'bulk'}`,
+    }).catch(() => {});
+
+    res.json({ success: true, data: { updated: updates.length } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

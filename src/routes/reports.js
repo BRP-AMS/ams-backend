@@ -587,11 +587,13 @@ router.get('/export',
           printTitlesRow:'$1:$4',
           margins:{left:0.2,right:0.2,top:0.4,bottom:0.4,header:0.2,footer:0.2},
         };
-        ws.protect('BRP-READONLY',{
-          selectLockedCells:true,selectUnlockedCells:true,
-          formatCells:false,insertRows:false,insertColumns:false,
-          deleteRows:false,deleteColumns:false,sort:false,
-        });
+        if (!['admin','hr','super_admin'].includes(role)) {
+          ws.protect('BRP-READONLY',{
+            selectLockedCells:true,selectUnlockedCells:true,
+            formatCells:false,insertRows:false,insertColumns:false,
+            deleteRows:false,deleteColumns:false,sort:false,
+          });
+        }
       };
 
       if(role==='employee'){

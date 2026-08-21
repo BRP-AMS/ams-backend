@@ -29,6 +29,7 @@ app.set('trust proxy', 1);
 // error responses) before any other middleware can interfere.
 const ALLOWED_ORIGINS = [
   'https://monitermark.brptripura.com',
+  'https://monitormark.brptripura.com', 
   'https://mm-service.brptripura.com',
   process.env.FRONTEND_URL,
   process.env.BACKEND_URL,

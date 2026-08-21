@@ -9,6 +9,7 @@ const { authenticate, authorize }                         = require('../middlewa
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
 const { employeeFolderPath } = require('../config/cloudinary');
+const { verifyFace } = require('../utils/faceVerify');
 // ── File-naming helper ───────────────────────────────────────────────────
 const makeDocName = (user, docType, ext = '') => {
   const name  = (user.name || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -190,18 +191,41 @@ router.get('/', authenticate, async (req, res) => {
       if (empId) match.emp_id = empId;
     }
 
-    if (onlyLeaves === 'true') match.leave_type = { $ne: null };
+    const todayIST = istDateStr();
+    const andConds = [];
+
+    // onlyLeaves=true → leave applications OR missed-checkout records
+    // (flagged by the midnight cron, or a Draft the cron hasn't reached
+    // yet), so the Leaves page's "Missed Check-out" column has data.
+    if (onlyLeaves === 'true') {
+      andConds.push({
+        $or: [
+          { leave_type: { $ne: null } },
+          { is_missed_checkout: true },
+          { status: 'Draft', checkin_time: { $ne: null }, checkout_time: null, date: { $lt: todayIST } },
+        ],
+      });
+    }
 
     if (status) {
       const isManagerOrAdmin = ['manager', 'admin', 'hr', 'super_admin'].includes(req.user.role);
       if (status === 'Pending' && isManagerOrAdmin) {
-        const todayIST = istDateStr();
-        match.$or = [
-          { status: 'Pending' },
-          { status: 'Draft', date: { $lt: todayIST }, checkin_time: { $ne: null }, checkout_time: null },
-        ];
+        andConds.push({
+          $or: [
+            { status: 'Pending' },
+            { status: 'Draft', date: { $lt: todayIST }, checkin_time: { $ne: null }, checkout_time: null },
+          ],
+        });
+      } else if (status === 'Missed Check-out') {
+        // Dedicated filter tab for the Leaves page
+        andConds.push({
+          $or: [
+            { is_missed_checkout: true },
+            { status: 'Draft', checkin_time: { $ne: null }, checkout_time: null, date: { $lt: todayIST } },
+          ],
+        });
       } else if (onlyLeaves === 'true') {
-        match.leave_status = status;
+        andConds.push({ $or: [{ leave_status: status }, { is_missed_checkout: true, status } ] });
       } else {
         match.status = status;
       }
@@ -210,12 +234,13 @@ router.get('/', authenticate, async (req, res) => {
     if (startDate) match.date = { ...match.date, $gte: startDate };
     if (endDate)   match.date = { ...match.date, $lte: endDate };
 
+    if (andConds.length) match.$and = andConds;
+
     const total   = await AttendanceRecord.countDocuments(match);
     const records = await AttendanceRecord.aggregate(
       recordListPipeline(match, { date: -1, created_at: -1 }, offset, limit)
     );
 
-    const todayIST = istDateStr();
     const formatted = records.map(r => {
       const rec = formatRecord(r);
       if (r.status === 'Draft' && r.date < todayIST && r.checkin_time && !r.checkout_time) {
@@ -239,6 +264,39 @@ router.get('/', authenticate, async (req, res) => {
 router.get('/today', authenticate, async (req, res) => {
   try {
     const today = istDateStr();
+
+    // Check for an unresolved missed check-out from a previous day BEFORE
+    // returning today's record — the employee is blocked from acting on
+    // today until their manager approves/rejects the old one.
+    const sevenDaysAgo = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const sevenDaysAgoStr = sevenDaysAgo.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+    const prevRecord = await AttendanceRecord.findOne({
+      emp_id:        req.user.id,
+      date:          { $gte: sevenDaysAgoStr, $lt: today },
+      checkin_time:  { $ne: null },
+      checkout_time: null,
+      status:        { $in: ['Pending', 'Draft'] },
+    }).sort({ date: -1 }).lean();
+
+    if (prevRecord) {
+      const isUnresolvedMissed =
+        prevRecord.is_missed_checkout === true ||
+        (prevRecord.status === 'Draft' && prevRecord.date < today);
+      if (isUnresolvedMissed) {
+        return res.json({
+          success: true,
+          data: null,
+          blockedByMissedCheckout: {
+            recordId:    prevRecord._id,
+            date:        prevRecord.date,
+            checkinTime: prevRecord.checkin_time,
+          },
+        });
+      }
+    }
+
     const rows = await AttendanceRecord.aggregate([
       { $match: { emp_id: req.user.id, date: today } },
       { $lookup: { from: 'users', localField: 'emp_id', foreignField: '_id', as: 'emp' } },
@@ -261,14 +319,18 @@ router.get('/today', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'super_admin', 'manager'), async (req, res) => {
   try {
-    const today = istDateStr();
+    // Accept an optional ?date=YYYY-MM-DD for historical reports;
+    // default to today (IST) when not supplied or invalid.
+    const requestedDate = req.query.date;
+    const isValidDate   = requestedDate && /^\d{4}-\d{2}-\d{2}$/.test(requestedDate);
+    const today = isValidDate ? requestedDate : istDateStr();
+
     let empFilter = {};
     if (req.user.role === 'manager') {
       const team = await User.find({ manager_id: req.user.id }).select('_id').lean();
       empFilter = { emp_id: { $in: team.map(m => String(m._id)) } };
     }
 
-    // Fetch check-in records, approved leaves, and pending leaves in parallel
     const leaveFilter = {
       $or: [
         { date: today, end_date: null },
@@ -300,19 +362,13 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
         status:       r.status,
       };
     });
-    // Add approved leave entries (don't overwrite if somehow also checked in)
     approvedLeaves.forEach(r => {
       const uid = String(r.emp_id);
-      if (!statusMap[uid]) {
-        statusMap[uid] = { onLeave: true, leaveType: r.leave_type || 'Leave' };
-      }
+      if (!statusMap[uid]) statusMap[uid] = { onLeave: true, leaveType: r.leave_type || 'Leave' };
     });
-    // Add pending leave flag (don't overwrite check-in or approved leave)
     pendingLeaves.forEach(r => {
       const uid = String(r.emp_id);
-      if (!statusMap[uid]) {
-        statusMap[uid] = { pendingLeave: true, leaveType: r.leave_type || 'Leave' };
-      }
+      if (!statusMap[uid]) statusMap[uid] = { pendingLeave: true, leaveType: r.leave_type || 'Leave' };
     });
 
     res.json({ success: true, data: statusMap });
@@ -335,7 +391,8 @@ router.get('/:id', authenticate, async (req, res) => {
         emp_code:          { $arrayElemAt: ['$emp.emp_id',             0] },
         department:        { $arrayElemAt: ['$emp.department',         0] },
         emp_phone:         { $arrayElemAt: ['$emp.phone',              0] },
-        emp_face_photo:    { $arrayElemAt: ['$emp.facePhotoUrl',       0] },
+       // both aggregation pipelines (recordListPipeline + GET /:id)
+emp_face_photo: { $arrayElemAt: ['$emp.profile_photo_path', 0] },
         emp_profile_photo: { $arrayElemAt: ['$emp.profile_photo_path', 0] },
         manager_name:      { $arrayElemAt: ['$manager.name',           0] },
         manager_email:     { $arrayElemAt: ['$manager.email',          0] },
@@ -377,6 +434,26 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       status:       { $in: ['Approved', 'Pending', 'Draft'] },
     }).sort({ date: -1 }).lean();
 
+    // ── Block check-in if the previous day's missed check-out is still
+    // unresolved (Pending manager review, or a Draft that the midnight
+    // cron hasn't flagged yet). Once the manager approves or rejects it,
+    // status moves to 'Approved' / 'Rejected' and this no longer matches.
+    if (prevRecord && !prevRecord.checkout_time) {
+      const isUnresolvedMissed =
+        prevRecord.is_missed_checkout === true ||
+        (prevRecord.status === 'Draft' && prevRecord.date < today);
+      if (isUnresolvedMissed) {
+        return res.status(403).json({
+          success: false,
+          message: `You did not check out on ${prevRecord.date}. You cannot check in until your manager approves or rejects that missed check-out.`,
+          blockedByMissedCheckout: {
+            recordId:     prevRecord._id,
+            date:         prevRecord.date,
+            checkinTime:  prevRecord.checkin_time,
+          },
+        });
+      }
+    }
 
     const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
     let existingRejectedLeaveId = null;
@@ -394,9 +471,17 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
-
-    const currentUserInfo = await User.findById(req.user.id).select('name').lean();
-
+    // attendance.js — checkin
+const currentUserInfo = await User.findById(req.user.id).select('name profile_photo_path').lean();
+const faceResult = await verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype);
+if (!faceResult.match) {
+  return res.status(400).json({
+    success:        false,
+    faceVerifyError: true,
+    faceConfidence: faceResult.confidence,
+    message:        faceResult.reason,
+  });
+}
     const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 
     if (dutyType === 'On Duty' && !sector)
@@ -427,8 +512,8 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
       hr_override: false, hr_remark: null, override_remark: null,
       overridden_by: null, hr_actioned_at: null,
       is_missed_checkout: false, checkout_remarks: null,
-      face_verification_status: 'verified',
-      face_confidence:          100,
+     face_verification_status: 'verified',
+  face_confidence:          faceResult.confidence,
     };
 
     if (existingRejectedLeaveId) {
@@ -507,9 +592,20 @@ router.put('/:id/retake-face', authenticate, authorize('employee'), upload.singl
     const _rtExt = path.extname(req.file.originalname).replace('.', '') || 'jpg';
     const newSelfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'retake_selfie', _rtExt));
 
-    await AttendanceRecord.findByIdAndUpdate(req.params.id, {
-      $set: { face_verification_status: 'verified', face_confidence: 100, selfie_path: newSelfiePath },
-    });
+   // attendance.js — retake-face
+const retakeUser = await User.findById(req.user.id).select('profile_photo_path').lean();
+const retakeResult = await verifyFace(req.file.buffer, retakeUser?.profile_photo_path, req.file.mimetype);
+if (!retakeResult.match) {
+  return res.status(400).json({
+    success:        false,
+    faceVerifyError: true,
+    faceConfidence: retakeResult.confidence,
+    message:        retakeResult.reason,
+  });
+}
+await AttendanceRecord.findByIdAndUpdate(req.params.id, {
+  $set: { face_verification_status: 'verified', face_confidence: retakeResult.confidence, selfie_path: newSelfiePath },
+});
 
     const updated = await AttendanceRecord.findById(req.params.id).lean();
 
@@ -529,6 +625,60 @@ router.put('/:id/retake-face', authenticate, authorize('employee'), upload.singl
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/late-checkout-reason
+// Fired when the employee answers "No" to the 6:30pm "check out now?"
+// prompt. Saves the reason immediately (visible to employee/manager/
+// super_admin/hr right away, not just at actual checkout) and extends
+// their checkout window by 15–20 minutes.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/late-checkout-reason', authenticate, authorize('employee'), [
+  body('reason').trim().notEmpty().withMessage('A reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
+    if (!record)              return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
+
+    const { reason } = req.body;
+    const now = new Date();
+    // Extend by 20 minutes (within the requested 15–20 min window)
+    const extendedUntil = new Date(now.getTime() + 20 * 60 * 1000);
+
+    const updated = await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        late_checkout_reason:         reason,
+        late_checkout_requested_at:   now,
+        late_checkout_extended_until: extendedUntil,
+      },
+    }, { new: true }).lean();
+
+    if (record.manager_id) {
+      const emp = await User.findById(req.user.id).select('name').lean();
+      await notify(
+        record.manager_id,
+        '🕕 Late Check-Out Reason',
+        `${emp?.name || 'An employee'} will check out late today: "${reason}"`,
+        'info', record._id, '/manager/queue'
+      );
+    }
+    // Also surface to admin-level roles (super_admin, hr) per the visibility rule
+    const overseers = await User.find({ role: { $in: ['super_admin', 'hr'] }, is_active: { $ne: 0 } }).select('_id').lean();
+    for (const o of overseers) {
+      await notify(o._id, '🕕 Late Check-Out Reason', `${req.user.name || 'An employee'} will check out late today: "${reason}"`, 'info', record._id, '/admin/attendance');
+    }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'LATE_CHECKOUT_REASON',
+      entity_type: 'attendance', entity_id: record._id, new_value: reason,
+    });
+
+    res.json({ success: true, message: 'Reason saved. Checkout window extended by 20 minutes.', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/checkout
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('checkoutSelfie'), async (req, res) => {
@@ -539,7 +689,21 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     if (record.checkout_time)  return res.status(409).json({ success: false, message: 'Already checked out' });
     // Allow checkout from Draft (normal) OR Pending-without-checkout (face verify escalated to manager but employee still needs to checkout)
     if (!['Draft', 'Pending'].includes(record.status)) return res.status(400).json({ success: false, message: 'Cannot checkout — record already processed' });
-
+// ── Face verification on checkout selfie ────────────────────────────────
+if (!req.file) {
+  return res.status(400).json({ success: false, message: 'Checkout selfie is required.' });
+}
+// attendance.js — checkout
+ const checkoutUser = await User.findById(req.user.id).select('profile_photo_path').lean();
+    const coFaceResult = await verifyFace(req.file.buffer, checkoutUser?.profile_photo_path, req.file.mimetype);
+if (!coFaceResult.match) {
+  return res.status(400).json({
+    success:        false,
+    faceVerifyError: true,
+    faceConfidence: coFaceResult.confidence,
+    message:        coFaceResult.reason,
+  });
+}
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
     const capturedAtBody  = req.body?.capturedAt;
@@ -562,16 +726,96 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       });
     }
 
+    // Require a human-readable text address on checkout, not just raw
+    // GPS coordinates — the frontend should reverse-geocode via /api/geocode
+    // and send the resolved string as `locationAddress`.
+    if (!req.body.locationAddress || !String(req.body.locationAddress).trim()) {
+      return res.status(400).json({ success: false, message: 'Check-out address is required. Please allow location access so we can resolve your address.' });
+    }
+
+    // ── Missed check-out catch-up ──────────────────────────────────────────
+    // If this record was already flagged as a missed check-out (cron ran at
+    // midnight, or the manager approved it as Pending), the employee can
+    // still come back and record the actual check-out. Skip the normal
+    // half-day/emergency-leave classification (it's not "today" anymore) —
+    // just record the checkout and, per policy, auto-approve if the total
+    // time on duty was 7+ hours, otherwise leave it Pending for the manager
+    // (who must attach a remark per the mandatory-remark rule below).
+    if (record.is_missed_checkout) {
+      const MISSED_AUTO_APPROVE_HOURS = 7;
+      const isAutoApproved = hoursElapsed >= MISSED_AUTO_APPROVE_HOURS;
+      const { latitude, longitude, locationAddress, capturedAt } = req.body;
+
+      let checkoutTime = istTimeStr();
+      let workedHours  = Math.round(hoursElapsed * 100) / 100;
+      if (capturedAt && timeRe.test(capturedAt)) {
+        const capturedDT = new Date(`${record.date}T${capturedAt}:00+05:30`);
+        if (capturedDT <= now) {
+          checkoutTime = capturedAt;
+          workedHours  = Math.round(((capturedDT - checkinDateTime) / 3600000) * 100) / 100;
+        }
+      }
+
+      const checkoutSelfiePath = req.file
+        ? await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'checkout_selfie', path.extname(req.file.originalname).replace('.', '') || 'jpg'))
+        : null;
+
+      const missedUpdate = {
+        checkout_time:             checkoutTime,
+        checkout_lat:              parseFloat(latitude)  || record.latitude,
+        checkout_lng:              parseFloat(longitude) || record.longitude,
+        checkout_location_address: locationAddress || record.location_address,
+        checkout_selfie_path:      checkoutSelfiePath,
+        worked_hours:              workedHours,
+        submitted_at:              now,
+      };
+
+      if (isAutoApproved) {
+        missedUpdate.status          = 'Approved';
+        missedUpdate.actioned_by     = null; // system-approved
+        missedUpdate.actioned_at     = now;
+        missedUpdate.checkout_remarks = `Auto-approved: checked out after ${workedHours.toFixed(1)} hours (missed check-out, check-in: ${record.checkin_time}, checkout: ${checkoutTime})`;
+      } else {
+        missedUpdate.checkout_remarks = `Employee checked out after ${workedHours.toFixed(1)} hours. Requires manager approval.`;
+      }
+
+      const updatedMissed = await AttendanceRecord.findOneAndUpdate(
+        { _id: record._id, checkout_time: null },
+        { $set: missedUpdate },
+        { new: true }
+      ).lean();
+
+      if (!updatedMissed) {
+        return res.status(409).json({ success: false, message: 'Already checked out.' });
+      }
+
+      if (isAutoApproved) {
+        await notify(record.emp_id, '✅ Missed Check-Out Auto-Approved', `You checked out after ${workedHours.toFixed(1)} hours. Your record for ${record.date} was auto-approved. You may check in again.`, 'success', record._id, '/employee/history');
+      } else if (record.manager_id) {
+        const emp = await User.findById(req.user.id).select('name').lean();
+        await notify(record.manager_id, '🔔 Missed Check-Out — Action Required', `${emp?.name || 'An employee'} has now checked out for ${record.date} (worked ${workedHours.toFixed(1)}h). Please review and approve or reject.`, 'warning', record._id, '/manager/queue');
+      }
+
+      return res.json({
+        success: true,
+        message: isAutoApproved
+          ? `Auto-approved! You worked ${workedHours.toFixed(1)} hours.`
+          : 'Checked out. Submitted for manager approval.',
+        autoApproved: isAutoApproved,
+        data: formatRecord(updatedMissed),
+      });
+    }
+
     // ── Determine leave type and auto-approval ────────────────────────────
     // >= 7 hours → auto-approved, no manager review
     // >= 6 hours → full day, needs manager review
     // >= 4 hours → half day leave attached, manager review
     // <  4 hours → emergency leave, manager review
-    const AUTO_APPROVE_HOURS = 6;
+    const AUTO_APPROVE_HOURS = 7;
     const isAutoApproved = hoursElapsed >= AUTO_APPROVE_HOURS;
 
     let leaveType = null;
-    if (hoursElapsed >= 6) {
+    if (hoursElapsed >= 7) {
       leaveType = null;               // Full day — no leave (whether auto-approved or pending)
     } else if (hoursElapsed >= 4) {
       leaveType = 'Half Day';
@@ -579,7 +823,7 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       leaveType = 'Emergency Leave';
     }
 
-    const { latitude, longitude, locationAddress, capturedAt } = req.body;
+    const { latitude, longitude, locationAddress, capturedAt, lateReason } = req.body;
 
     let checkoutTime = istTimeStr();
     let workedHours  = Math.round(hoursElapsed * 100) / 100;
@@ -627,15 +871,25 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
       attendance_type,
     };
 
+    // Employee declined the 6:30pm "check out now?" prompt and gave a
+    // reason instead — record it so it's visible in History/Team to the
+    // employee, manager, super_admin and hr.
+    if (lateReason && String(lateReason).trim()) {
+      updateFields.late_checkout_reason       = String(lateReason).trim();
+      updateFields.late_checkout_requested_at = now;
+    }
+
+    const lateSuffix = updateFields.late_checkout_reason ? ` — Late check-out with reason: ${updateFields.late_checkout_reason}` : '';
+
      if (isAutoApproved) {
           // Direct approval — no manager action needed
           updateFields.status       = 'Approved';
           updateFields.actioned_by  = null; // system-approved
           updateFields.actioned_at  = now;
-          updateFields.manager_remark = `Auto-approved: worked ${workedHours.toFixed(1)} hours`;
+          updateFields.manager_remark = `Auto-approved: worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
     } else {
       updateFields.status = 'Pending';
-      updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours`;
+      updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
         }
     
     //         }
@@ -670,11 +924,9 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     // });
     
         // ATOMIC guarded write — only succeeds if checkout_time is STILL null
-// right now. If the 9-hour auto-checkout cron beat this request to it,
-// updated will be null and nothing gets overwritten either way.
-// ATOMIC guarded write — only succeeds if checkout_time is STILL null
-        // right now. If the 9-hour auto-checkout cron beat this request to
-        // it, `updated` will be null and nothing gets overwritten either way.
+        // right now. There is no system auto-checkout anymore, so this guard
+        // just protects against a double-submit race (e.g. a double-tap of
+        // the Check Out button firing two requests).
         const updated = await AttendanceRecord.findOneAndUpdate(
           { _id: record._id, checkout_time: null },
           { $set: updateFields },
@@ -858,7 +1110,7 @@ router.delete('/:id/cancel-leave', authenticate, authorize('employee'), async (r
     }
     const admins = await User.find({ role: { $in: ['admin', 'hr'] }, is_active: { $ne: false } }).select('_id email name').lean();
     for (const a of admins) {
-      await notify(a._id, 'Leave Cancelled', `${emp?.name} cancelled their ${record.leave_type} for ${record.date}`, 'info', null, '/admin/records');
+      await notify(a._id, 'Leave Cancelled', `${emp?.name} cancelled their ${record.leave_type} for ${record.date}`, 'info', null, '/admin/attendance');
       if (a.email) sendMail(a.email, `[AMS] Leave Cancelled – ${emp?.name}`, `<p>Hi ${a.name},</p>${cancelBody}`);
     }
 
@@ -876,11 +1128,12 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
+    const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+
     if (req.user.role === 'manager') {
       const emp = await User.findOne({ _id: record.emp_id, manager_id: req.user.id }).lean();
       if (!emp) return res.status(403).json({ success: false, message: 'Not your team member' });
 
-      const isMissedDraft  = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
       const isFaceReview   = record.face_verification_status === 'manager_review';
       if (!['Pending', 'Rejected'].includes(record.status) && !isMissedDraft && !isFaceReview)
         return res.status(400).json({ success: false, message: 'Cannot approve in current state' });
@@ -890,6 +1143,12 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
           $set: { is_missed_checkout: true, status: 'Pending', checkout_remarks: 'Employee did not check out. Requires manager approval.' },
         });
       }
+    }
+
+    // Missed check-out approvals ALWAYS require a manager remark — this
+    // applies to manager AND admin overrides, per the mandatory-remark rule.
+    if ((record.is_missed_checkout || isMissedDraft) && !String(remark || '').trim()) {
+      return res.status(400).json({ success: false, message: 'A remark is required to approve a missed check-out.' });
     }
 
     const isAdmin = req.user.role === 'admin';
@@ -946,7 +1205,17 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 
     const today = istDateStr();
     const isFaceReviewRecord = record.face_verification_status === 'manager_review';
-    if (!isFaceReviewRecord && record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today) {
+    const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+
+    // A manager acts on a given record exactly ONCE. Block re-rejecting
+    // something already Approved/Rejected (mirrors the guard on /approve),
+    // so a stray double-tap or a stale page can't fire the same decision
+    // twice and re-notify the employee repeatedly.
+    if (req.user.role === 'manager' && !['Pending'].includes(record.status) && !isMissedDraft && !isFaceReviewRecord) {
+      return res.status(400).json({ success: false, message: 'This record has already been actioned.' });
+    }
+
+    if (!isFaceReviewRecord && isMissedDraft) {
       await AttendanceRecord.findByIdAndUpdate(record._id, {
         $set: { is_missed_checkout: true, status: 'Pending', checkout_remarks: 'Employee did not check out. Requires manager approval.' },
       });
@@ -1341,6 +1610,9 @@ function formatRecord(r) {
     workedHours:              r.worked_hours,
     isMissedCheckout:         r.is_missed_checkout || false,
     checkoutRemarks:          r.checkout_remarks,
+    isAutoCheckout:           r.is_auto_checkout || false,
+    lateCheckoutReason:       r.late_checkout_reason || null,
+    lateCheckoutRequestedAt:  r.late_checkout_requested_at || null,
     leaveType:                r.leave_type,
     leaveReason:              r.leave_reason,
     leaveStatus:              r.leave_status,

@@ -43,7 +43,7 @@ const uploadBufferToCloudinary = (buffer, options) =>
 // Builds Cloudinary upload params for a given file (mirrors the old
 // makeStorage() params function, but called manually after multer
 // buffers the file in memory).
-const buildUploadOptions = (folder, file) => {
+const buildUploadOptions = (folder, file, { skipAutoTransform = false } = {}) => {
   const ext      = file.originalname.split('.').pop().toLowerCase();
   const baseName = file.originalname.replace(/\.[^/.]+$/, '').replace(/\s+/g, '_');
   const isImage  = file.mimetype.startsWith('image/');
@@ -54,7 +54,7 @@ const buildUploadOptions = (folder, file) => {
     public_id: isImage
       ? `${Date.now()}_${baseName}`
       : `${Date.now()}_${baseName}.${ext}`,
-    ...(isImage && {
+    ...(isImage && !skipAutoTransform && {
       transformation: [{ quality: 'auto', fetch_format: 'auto' }],
     }),
   };

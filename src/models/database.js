@@ -124,6 +124,13 @@ const attendanceRecordSchema = new mongoose.Schema({
   face_confidence:          { type: Number, default: null },
   is_missed_checkout:       { type: Boolean, default: false },
   is_lop:                   { type: Boolean, default: false }, // Loss of Pay — balance was insufficient
+  // ── Late check-out (6:30pm prompt) ─────────────────────────────────────
+  // Set when the employee answers "No" to the 6:30pm "check out now?"
+  // prompt and gives a reason instead. Extends their checkout window by
+  // 15–20 min and is surfaced to employee / manager / super_admin / hr.
+  late_checkout_reason:         { type: String, default: null },
+  late_checkout_requested_at:   { type: Date,   default: null },
+  late_checkout_extended_until: { type: Date,   default: null },
 signed_reports: [{
     path:        String,
     name:        String,

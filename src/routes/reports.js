@@ -9,16 +9,23 @@
  *       check-in location is outside ALL known blocks/districts → '' (blank)
  *
  * Cell codes:
- *   P   = Present at assigned location       → no colour
- *   OD  = On Duty at other Tripura location  → no colour
- *   L   = Leave (approved) OR rejected leave with no re-check-in → RED
- *   A   = Absent (no check-in, after join)   → RED
- *   WO  = Weekend                            → light blue
- *   ""  = Blank (future / pre-join / outside all known locations / leave pending)
+ *   P       = Present at assigned location        → no colour
+ *   OD      = On Duty at other Tripura location    → no colour
+ *   L       = Leave (approved) OR rejected leave with no re-check-in → RED
+ *   A       = Absent (no check-in, after join)     → RED
+ *   WO      = Weekend                              → light blue
+ *   LOC_ERR = Checked in but GPS/network failed to capture a location →
+ *             rendered as the location-pin-with-alert icon (pin_error.png),
+ *             falls back to a red "!" text marker if the asset is missing
+ *   ""      = Blank (future / pre-join / outside all known locations /
+ *             leave still pending manager action)
  *
- * Leave status logic:
- *   leave_status === 'Pending'  → blank  (not yet decided)
- *   leave_status === 'Approved' → L
+ * Leave status logic (UPDATED — see toCode()):
+ *   leave_status === 'Pending'  → blank, for EVERY leave type. No code is
+ *                                 shown until the manager approves/rejects it.
+ *   leave_status === 'Approved' → L, unconditionally. A Half Day (or any
+ *                                 other type) that was later checked in used
+ *                                 to fall through to P/OD — it no longer does.
  *   leave_status === 'Rejected' + no re-check-in → L  (LOP)
  *   leave_status === 'Rejected' + re-checked in  → P / OD (normal attendance)
  *
@@ -39,6 +46,17 @@ const PDFDoc   = require('pdfkit');
 const mongoose = require('mongoose');
 const { AttendanceRecord, User } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const fs       = require('fs');
+const path     = require('path');
+const PIN_ERROR_PNG_PATH = path.join(__dirname, '../assets/pin_error.png');
+// Load defensively — a missing/renamed asset should degrade to the 'LOC_ERR'
+// text code instead of crashing the whole reports router at require-time.
+let PIN_ERROR_PNG_BUFFER = null;
+try {
+  PIN_ERROR_PNG_BUFFER = fs.readFileSync(PIN_ERROR_PNG_PATH);
+} catch (e) {
+  console.error('[reports.js] pin_error.png not found — LOC_ERR cells will fall back to text.', e.message);
+}
 
 // ── Tripura blocks & districts ────────────────────────────────────────────────
 const TRIPURA_BLOCKS = [
@@ -65,7 +83,50 @@ const matchesLocation = (addr, locationName) => {
   if (!addr || !locationName) return false;
   return addr.toLowerCase().includes(locationName.toLowerCase());
 };
+const https = require('https');
+const _geocodeCache = new Map(); // "lat,lng" (4dp) -> address string
 
+const _roundCoord = n => Math.round(Number(n) * 10000) / 10000; // ~11m precision, good cache hit rate
+
+const reverseGeocode = (lat, lng) => new Promise(resolve => {
+  if (lat == null || lng == null || isNaN(lat) || isNaN(lng)) return resolve('');
+  const rLat = _roundCoord(lat), rLng = _roundCoord(lng);
+  const key = `${rLat},${rLng}`;
+  if (_geocodeCache.has(key)) return resolve(_geocodeCache.get(key));
+
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${rLat}&lon=${rLng}&zoom=17&addressdetails=0`;
+  const req = https.get(url, { headers: { 'User-Agent': 'RAMP-AMS/1.0 (attendance reports)' }, timeout: 4000 }, resp => {
+    let data = '';
+    resp.on('data', c => data += c);
+    resp.on('end', () => {
+      try {
+        const parsed = JSON.parse(data);
+        const addr = parsed?.display_name || '';
+        _geocodeCache.set(key, addr);
+        resolve(addr);
+      } catch { resolve(''); }
+    });
+  });
+  req.on('error', () => resolve(''));
+  req.on('timeout', () => { req.destroy(); resolve(''); });
+});
+const buildLocationText = async (storedAddress, lat, lng) => {
+  const hasCoords = lat != null && lng != null && !isNaN(lat) && !isNaN(lng);
+  const coordStr  = hasCoords ? `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}` : '';
+
+  // If the stored address already looks like real text (not just numbers/coords), use it.
+  const looksLikeRawCoords = storedAddress && /^-?\d+\.\d+,\s*-?\d+\.\d+$/.test(storedAddress.trim());
+  let addressText = (storedAddress && !looksLikeRawCoords) ? storedAddress.trim() : '';
+
+  if (!addressText && hasCoords) {
+    addressText = await reverseGeocode(lat, lng);
+  }
+
+  if (addressText && coordStr) return `${addressText} (${coordStr})`;
+  if (addressText)             return addressText;
+  if (coordStr)                return coordStr;
+  return '';
+};
 // ── IST helpers ───────────────────────────────────────────────────────────────
 const IST      = 'Asia/Kolkata';
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: IST });
@@ -74,8 +135,6 @@ const yesterdayIST = () => {
   const d = new Date(); d.setDate(d.getDate()-1);
   return d.toLocaleDateString('en-CA', { timeZone: IST });
 };
-
-const fmtDDMMYYYY = iso => iso ? iso.split('-').reverse().join('-') : '';
 
 const expandDates = (start, end) => {
   const out = [];
@@ -88,7 +147,6 @@ const expandDates = (start, end) => {
   return out;
 };
 
-// Static fallback list (MM-DD) kept for when DB is unavailable
 const HOLIDAYS_MMDD = new Set([
   '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
   '05-01','05-26','05-27','06-26','07-22','08-04','08-15','08-19','08-26',
@@ -100,30 +158,9 @@ const RESTRICTED_MMDD = new Set([
   '09-11','09-18','11-11','11-24','12-03','12-24',
 ]);
 
-// Dynamic holiday cache — refreshed from DB every hour
-let _holCache   = null;
-let _holCacheAt = 0;
-const HOLIDAY_TTL = 60 * 60 * 1000;
-
-const refreshHolCache = async () => {
-  try {
-    const { Holiday } = require('../models/database');
-    const rows = await Holiday.find({}, { date: 1, _id: 0 }).lean();
-    _holCache   = new Set(rows.map(h => h.date));
-    _holCacheAt = Date.now();
-  } catch { /* keep using static fallback */ }
-};
-// Load on startup (non-blocking)
-refreshHolCache();
-
 const isHoliday = iso => {
-  if (_holCache && Date.now() - _holCacheAt < HOLIDAY_TTL) {
-    return _holCache.has(iso) || RESTRICTED_MMDD.has(iso.substring(5));
-  }
-  // Trigger background refresh
-  refreshHolCache().catch(() => {});
-  // Sync fallback while cache loads
-  return HOLIDAYS_MMDD.has(iso.substring(5)) || RESTRICTED_MMDD.has(iso.substring(5));
+  const mmdd = iso.substring(5);
+  return HOLIDAYS_MMDD.has(mmdd) || RESTRICTED_MMDD.has(mmdd);
 };
 
 const getNthSaturday = iso => {
@@ -154,6 +191,20 @@ const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-
  * toCode — determines cell code for one attendance record
  */
 // ── reports.js  ·  toCode() ───────────────────────────────────────────────
+// UPDATED LOGIC (see also excel/PDF summary + legend below, which mirror this):
+//   • Pending leave  → '' (blank). No code is shown until the manager takes
+//     action — applies to every leave type (Half Day, Emergency, Casual, ...).
+//     Still counted separately in the summary as "Leave Applied / Pending".
+//   • Approved leave → ALWAYS 'L'. This is unconditional now — a Half Day
+//     (or any other type) that was later checked in used to fall through to
+//     P/OD; it no longer does. Any approved leave record renders as 'L'.
+//   • Rejected leave with no re-check-in → 'L' (LOP — counted against the
+//     employee, same visual as a normal approved leave).
+//   • Rejected leave WITH a re-check-in → falls through to normal attendance
+//     (the employee actually came in after the rejection).
+//   • Checked in but GPS/network failed to capture a usable address → 'LOC_ERR'
+//     (rendered as the location-pin-with-alert icon, not a text code — see
+//     `PIN_ERROR_PNG_BUFFER` usage below).
 const toCode = (rec, assignedBlock, assignedDistrict) => {
   if (!rec) return 'A';
 
@@ -161,17 +212,17 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
-    if (ls === 'Pending') return 'LA';
-    if (ls === 'Approved') {
-      const isHalfDay = String(rec.leave_type || '').toLowerCase().includes('half');
-      const hasCheckin = rec.checkin_time || rec.checkinTime;
-      if (!(isHalfDay && hasCheckin)) return 'L';
-      // Half Day + has check-in → fall through to attendance logic below
-    }
+
+    // Pending — no manager decision yet → blank cell (all leave types).
+    if (ls === 'Pending') return '';
+
+    // Approved — always 'L', regardless of leave type or a later check-in.
+    if (ls === 'Approved') return 'L';
+
     if (ls === 'Rejected') {
       const hasCheckin = rec.checkin_time || rec.checkinTime;
-      if (!hasCheckin) return 'A';
-      // Has a real check-in after rejection → fall through
+      if (!hasCheckin) return 'L';   // rejected, no re-checkin = LOP, shown as 'L'
+      // Has a real check-in after rejection → falls through to normal attendance
     }
   }
 
@@ -195,9 +246,13 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
 
   if (matchesAssigned)   return 'P';    // at assigned workplace
   if (isInTripura(addr)) return 'OD';   // elsewhere in Tripura (location fallback)
-  return '';                            // outside all known locations
-};
 
+  // Check-in didn't resolve to the assigned location or anywhere in Tripura —
+  // covers: GPS/network failed at check-in (no address captured), employee
+  // didn't grant location permission, or the resolved address is genuinely
+  // outside all known blocks/districts. All of these get the same icon.
+  return 'LOC_ERR';
+};
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/reports/export
 //  Attendance matrix export (Excel / PDF)
@@ -215,7 +270,10 @@ router.get('/export',
     if (!startDate||!endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    // Allow full selected range — future dates render as WO/H or blank columns
+    // Cap endDate to yesterday — today is never shown (incomplete day)
+    if (endDate >= todayIST()) endDate = yesterdayIST();
+    if (startDate > endDate)
+      return res.status(400).json({success:false,message:'No completed dates in range. Report covers up to yesterday.'});
 
     const dates      = expandDates(startDate, endDate);
     const multiMonth = new Date(startDate+'T00:00:00+05:30').getMonth() !==
@@ -236,12 +294,9 @@ router.get('/export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      // Specific employee selected in dropdown
-      const specificQuery = role === 'manager'
-        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
-        : { _id: toObjId(empId) };
-      const specific = await User.findOne(specificQuery)
-        .select('_id name emp_id created_at assigned_block assigned_district role_type').lean();
+      // Specific employee selected in dropdown (any privileged role)
+      const specific = await User.findById(toObjId(empId))
+        .select(EMP_SELECT).lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
 
@@ -325,13 +380,6 @@ router.get('/export',
           if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           if (isHoliday(iso))                 return 'H';  // public holiday
           const rec = recIdx[String(emp._id)]?.[iso];
-          // Future dates: only show LA if leave applied, else blank
-          if (iso > todayIST()) {
-            if (!rec) return '';
-            const isLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
-            if (isLeave && (rec.leave_status || rec.status || 'Pending') === 'Pending') return 'LA';
-            return '';
-          }
           return toCode(rec, ab, ad);
         }),
       };
@@ -355,22 +403,15 @@ router.get('/export',
       const FILL_WHT  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFFFFF'}};
       const FILL_ALT  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFF7F7F7'}};
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
-
-   const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
-      const FILL_AMB  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
+const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const codeFill = (code, rf) => {
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
-        if (code==='H'||code==='LA') return FILL_AMB;
+        if (code==='H')             return FILL_HOL;
+        if (code==='LOC_ERR')       return rf;   // neutral — icon carries the meaning
         return rf;
       };
-      const codeFont = (code) => {
-        if (code==='L'||code==='A') return {bold:true,size:8,color:{argb:'FFFFFFFF'},name:'Calibri'};
-        if (code==='LA')            return {bold:true,size:7,color:{argb:'FFD97706'},name:'Calibri'};
-        return {bold:true,size:8,name:'Calibri'};
-      };
-
-      const TH  = ()=>({style:'thin',  color:{argb:'FFCCCCCC'}});
+    const TH  = ()=>({style:'thin',  color:{argb:'FFCCCCCC'}});
       const MED = ()=>({style:'medium',color:{argb:'FF999999'}});
       const CBDR = {top:TH(),bottom:TH(),left:TH(),right:TH()};
       const mc  = (ws,r1,c1,r2,c2)=>ws.mergeCells({top:r1,left:c1,bottom:r2,right:c2});
@@ -381,13 +422,15 @@ router.get('/export',
             left:  c===c1?MED():TH(), right: c===c2?MED():TH(),
           };
       };
-
-      const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
+  const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
         const LAST = 4+dates.length;
+        const pinImgId = PIN_ERROR_PNG_BUFFER
+          ? wb.addImage({ buffer: PIN_ERROR_PNG_BUFFER, extension: 'png' })
+          : null;
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
-        Object.assign(ws.getCell(1,2),{value:'Attendance details of RAMP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
+        Object.assign(ws.getCell(1,2),{value:'Attendance details of BRP',font:{bold:true,size:13,name:'Calibri'},alignment:{horizontal:'center',vertical:'center'}});
         ws.getRow(1).height=24;
 
         mc(ws,2,2,2,LAST);
@@ -398,7 +441,7 @@ router.get('/export',
         mc(ws,3,2,3,half-1);
         Object.assign(ws.getCell(3,2),{value:'Location Name: Tripura',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         mc(ws,3,half,3,LAST);
-        Object.assign(ws.getCell(3,half),{value:'',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
+        Object.assign(ws.getCell(3,half),{value:'Project Name: Block Resource Person',font:{bold:true,size:10,name:'Calibri'},alignment:{horizontal:'left',vertical:'center'}});
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
@@ -420,34 +463,72 @@ router.get('/export',
           const c2=ws.getCell(rowN,2); c2.value=emp.emp_id; c2.border=CBDR; c2.fill=rf; c2.alignment={horizontal:'center',vertical:'center',wrapText:false}; c2.font={size:10,name:'Calibri'}; c2.protection={locked:true};
           const c3=ws.getCell(rowN,3); c3.value=emp.name;   c3.border=CBDR; c3.fill=rf; c3.alignment={horizontal:'left',  vertical:'center',wrapText:false}; c3.font={size:10,name:'Calibri'}; c3.protection={locked:true};
           const c4=ws.getCell(rowN,4); c4.value=emp.role_type||emp.designation||''; c4.border=CBDR; c4.fill=rf; c4.alignment={horizontal:'center',vertical:'center',wrapText:false}; c4.font={size:9,name:'Calibri'}; c4.protection={locked:true};
-          cells.forEach((code,i)=>{
-            const c=ws.getCell(rowN,5+i); c.value=code; c.border=CBDR;
+         cells.forEach((code,i)=>{
+            const c=ws.getCell(rowN,5+i); c.border=CBDR;
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
-            c.font={bold:!!code,size:code==='LA'?7:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':code==='LA'?'FFD97706':'FF000000'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
+
+            if (code === 'LOC_ERR' && pinImgId != null) {
+              c.value = '';
+              ws.addImage(pinImgId, {
+                tl: { col: (4+i) + 0.2, row: (rowN-1) + 0.12 },
+                br: { col: (4+i) + 0.8, row: (rowN-1) + 0.88 },
+                editAs: 'oneCell',
+              });
+            } else if (code === 'LOC_ERR') {
+              // Icon asset missing — fall back to a plain text marker.
+              c.value = '⚠';
+              c.font  = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FFDC2626' } };
+            } else {
+              c.value = code;
+              c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
+            }
           });
         });
 
         // ── Legend ────────────────────────────────────────────────────────────
         const legendRow=5+empList.length+1; ws.getRow(legendRow).height=14;
        const FILL_AMB = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
-        [{code:'P',label:'Present (assigned location)',isRed:false},
+        const legendItems = [
+         {code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
          {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
-         {code:'LA',label:'Leave Applied / Pending',isRed:false,isAmber:true},
-         {code:'L',label:'Leave / LOP (Approved)',isRed:true},
-         {code:'A',label:'Absent / Leave Rejected',isRed:true},
+         {code:'L',label:'Leave / LOP',isRed:true},
+         {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
-        ].forEach(({code,label,isRed,isAmber},i)=>{
+         {code:'LOC_ERR',label:'Location not captured (GPS/network failed)',isRed:false,isIcon:true},
+        ];
+        legendItems.forEach(({code,label,isRed,isAmber,isIcon},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
-          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT; cc.border=CBDR;
+          cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
+          if (isIcon && pinImgId != null) {
+            cc.value=''; cc.fill=FILL_WHT;
+            ws.addImage(pinImgId, {
+              tl: { col: (4+i*2) + 0.15, row: (legendRow-1) + 0.05 },
+              br: { col: (4+i*2) + 0.85, row: (legendRow-1) + 0.95 },
+              editAs: 'oneCell',
+            });
+          } else if (isIcon) {
+            cc.value='⚠'; cc.fill=FILL_WHT;
+            cc.font={bold:true,size:8,name:'Calibri',color:{argb:'FFDC2626'}};
+          } else {
+            cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
+            cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
+          }
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
-        
         });
-
+        // NEW: a blank cell with no code (that isn't a weekend/holiday/pre-join
+        // day) is a leave application still awaiting the manager's decision.
+        const legendNoteRow = legendRow + 1;
+        ws.getRow(legendNoteRow).height = 12;
+        mc(ws, legendNoteRow, 5, legendNoteRow, LAST);
+        Object.assign(ws.getCell(legendNoteRow, 5), {
+          value: 'Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.',
+          font: { size: 8, italic: true, color: { argb: 'FF64748B' }, name: 'Calibri' },
+          alignment: { horizontal: 'left', vertical: 'center' },
+        });
         // ── Summary ───────────────────────────────────────────────────────────
         const fDC=colLetter(5), lDC=colLetter(4+dates.length);
         let r=legendRow+2; const SR=r;
@@ -494,11 +575,11 @@ router.get('/export',
     if (ls === 'Pending') return sum;
     const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
     const hasCheckin = r.checkin_time || r.checkinTime;
-    if (ls === 'Approved') return (isHalf && hasCheckin) ? sum : sum + (isHalf ? 0.5 : 1);
+    if (ls === 'Approved') return sum + (isHalf ? 0.5 : 1); // approved leave always counts (matches toCode's unconditional 'L')
     if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
     return sum;
   }, 0);
-
+  const locErrCount = empList[0].cells.filter(c => c === 'LOC_ERR').length;
   sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
   sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
   sumRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
@@ -506,14 +587,15 @@ router.get('/export',
   sumRow('No of Casual Leaves', casualRecs.length);
   sumRow('Total Effective Leaves', effectiveLeaves);
   sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
-  sumRow('No of Leave Applied / Pending (LA)', `=COUNTIF(${fDC}${er}:${lDC}${er},"LA")`);
+  sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
+    sumRow('No of Location Not Captured', locErrCount);
 }else {
           // ── Table header row ────────────────────────────────────────────────
           r++; ws.getRow(r).height = 17;
           ws.getColumn(2).width = 22; ws.getColumn(3).width = 16;
           ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
-
-          [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C']].forEach(([hdr, argb], i) => {
+ws.getColumn(6).width = 15;
+         [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C'], ['Loc. Not Captured','FF6B7280']].forEach(([hdr, argb], i) => {
             const c = ws.getCell(r, 2 + i);
             c.value = hdr; c.fill = FILL_SUBH; c.border = CBDR;
             c.font = { bold: true, size: 10, color: { argb }, name: 'Calibri' };
@@ -545,16 +627,23 @@ router.get('/export',
             cl.alignment = { horizontal: 'center', vertical: 'center' };
             cl.protection = { locked: true };
 
-            const ca = ws.getCell(r, 5);
+           const ca = ws.getCell(r, 5);
             ca.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"A")` };
             ca.fill = rf; ca.border = CBDR;
             ca.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB91C1C' } };
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
+
+            const cnl = ws.getCell(r, 6);
+            cnl.value = empList[idx].cells.filter(c => c === 'LOC_ERR').length; // computed in JS — not a cell-text COUNTIF
+            cnl.fill = rf; cnl.border = CBDR;
+            cnl.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF6B7280' } };
+            cnl.alignment = { horizontal: 'center', vertical: 'center' };
+            cnl.protection = { locked: true };
           });
         }
 
-        outerBorder(ws, SR, 2, r, 5);
+        outerBorder(ws, SR, 2, r, 6);
 
         // ── Signatures ────────────────────────────────────────────────────────
         r+=3; ws.getRow(r).height=20;
@@ -587,11 +676,13 @@ router.get('/export',
           printTitlesRow:'$1:$4',
           margins:{left:0.2,right:0.2,top:0.4,bottom:0.4,header:0.2,footer:0.2},
         };
-        ws.protect('BRP-READONLY',{
-          selectLockedCells:true,selectUnlockedCells:true,
-          formatCells:false,insertRows:false,insertColumns:false,
-          deleteRows:false,deleteColumns:false,sort:false,
-        });
+      if (role === 'employee') {
+  ws.protect('BRP-READONLY',{
+    selectLockedCells:true,selectUnlockedCells:true,
+    formatCells:false,insertRows:false,insertColumns:false,
+    deleteRows:false,deleteColumns:false,sort:false,
+  });
+}
       };
 
       if(role==='employee'){
@@ -636,12 +727,12 @@ router.get('/export',
 
      const drawHdr=y=>{
   doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of RAMP',ML,y+5,{width:tW,align:'center'});
+  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
   doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
   doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
   doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
   doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-     .text('Location: Tripura',ML+4,y+37);
+     .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
 
   const y2=y+46;
   const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
@@ -679,20 +770,24 @@ router.get('/export',
         doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
         doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
         doc.font('Helvetica').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
-        let pres=0;
+        let pres=0,locErr=0;
         cells.forEach((code,i)=>{
           const x=xD+i*dW;
           const isRed=code==='L'||code==='A';
-          const isAmb=code==='H'||code==='LA';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':isAmb?'#FFF3CD':bg;
+          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
           doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
-          if(code){
-            const fg=isRed?'#FFFFFF':isAmb?'#D97706':'#000000';
-            const fs=code==='LA'?5:6;
-            doc.fillColor(fg).fontSize(fs).font('Helvetica-Bold')
+            if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
+            const iconSize = Math.min(dW-3, RH-2);
+            doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
+          } else if (code === 'LOC_ERR') {
+            doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+3,{width:dW-2,align:'center'});
+          } else
+            if(code){
+            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
                .text(code,x+1,y+3,{width:dW-2,align:'center'});
           }
           if(code==='P'||code==='OD') pres++;
+           if(code==='LOC_ERR') locErr++;
         });
         doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+3,{width:CT-4,align:'center'});
@@ -704,19 +799,31 @@ router.get('/export',
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
-       {code:'LA',label:'Leave Applied / Pending',red:false,amber:true},
-       {code:'L',label:'Leave / LOP (Approved)',red:true},
-       {code:'A',label:'Absent / Leave Rejected',red:true},
+       {code:'L',label:'Leave / LOP',red:true},
+       {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
-      ].forEach(({code,label,red,amber})=>{
-        const bw=14,lw=86;
-        const bg=red?'#FF4444':amber?'#FFF3CD':'#FFFFFF';
-        const fg=red?'#FFFFFF':amber?'#D97706':'#000000';
-        doc.rect(lx,y,bw,10).fill(bg).stroke('#999');
-        doc.fillColor(fg).fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+      ].forEach(({code,label,red})=>{
+        const bw=14,lw=76;
+        doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
+        doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
         lx+=bw+lw+4;
       });
+   {
+        const bw=14,lw=150;
+        if (PIN_ERROR_PNG_BUFFER) {
+          doc.image(PIN_ERROR_PNG_PATH, lx, y-1, {width:bw, height:bw*84/64});
+        } else {
+          doc.rect(lx,y,bw,10).fill('#FFFFFF').stroke('#999');
+          doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',lx+1,y+2,{width:bw-2,align:'center'});
+        }
+        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw});
+        lx+=bw+lw+4;
+      }
+      // NEW: same blank-cell explanation as the Excel legend note.
+      y+=12;
+      doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
+         .text('Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.', ML, y, { width: tW });
       y+=18;
 
       // Summary
@@ -757,7 +864,7 @@ router.get('/export',
     if (ls === 'Pending') return sum;
     const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
     const hasCheckin = r.checkin_time || r.checkinTime;
-    if (ls === 'Approved') return (isHalf && hasCheckin) ? sum : sum + (isHalf ? 0.5 : 1);
+    if (ls === 'Approved') return sum + (isHalf ? 0.5 : 1); // approved leave always counts (matches toCode's unconditional 'L')
     if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
     return sum;
   }, 0);
@@ -769,7 +876,8 @@ router.get('/export',
   pdfRow('No of Casual Leaves',                    casualRecs.length);
   pdfRow('Total Effective Leaves',                 effectiveLeaves);
   pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
-  pdfRow('No of Leave Applied / Pending (LA)',      cells.filter(c => c==='LA').length);
+  pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);
+  pdfRow('No of Location Not Captured',    cells.filter(c => c==='LOC_ERR').length);
 } else {
         sy++;
         const TW = SW;
@@ -799,7 +907,7 @@ router.get('/export',
           const pres = cells.filter(c => c==='P'||c==='OD').length;
           const lv   = cells.filter(c => c==='L').length;
           const abs  = cells.filter(c => c==='A').length;
-
+ const nlc  = cells.filter(c => c==='LOC_ERR').length;
           doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,     SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
           doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres), SX+C0,  sy+3,{width:C1,align:'center'});
           doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),   SX+C0+C1,sy+3,{width:C2,align:'center'});
@@ -878,10 +986,7 @@ router.get('/leave-export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      const specificQuery2 = role === 'manager'
-        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
-        : { _id: toObjId(empId) };
-      const specific = await User.findOne(specificQuery2).select('_id name emp_id').lean();
+      const specific = await User.findById(toObjId(empId)).select('_id name emp_id').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({ success: false, message: 'Selected employee not found' });
 
@@ -898,42 +1003,77 @@ router.get('/leave-export',
       return res.status(404).json({ success: false, message: 'No employees found' });
 
     // ── Fetch records ──────────────────────────────────────────────────────────
+       // ── Fetch records ──────────────────────────────────────────────────────────
     const allRecs = await AttendanceRecord.find({
       date:   { $gte: startDate, $lte: endDate },
       emp_id: { $in: employees.map(e => e._id) },
     }).sort({ date: 1 }).lean();
 
-    const leaveRecs = allRecs.filter(r =>
-      r.duty_type === 'Leave' ||
-      (r.leave_type && String(r.leave_type).trim() !== '')
-    );
+    const todayISO = todayIST();
 
-    const filtered = (status && status !== 'All')
-      ? leaveRecs.filter(r => r.leave_status === status)
-      : leaveRecs;
+    const isMissedCheckoutRec = r =>
+      r.is_missed_checkout === true ||
+      (r.status === 'Draft' && r.checkin_time && !r.checkout_time && r.date < todayISO);
+
+    const isLeaveRec = r =>
+      r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim() !== '');
+
+    const isMissedReport = status === 'Missed Check-out';
+
+    const combinedRecs = allRecs.filter(r => isLeaveRec(r) || isMissedCheckoutRec(r));
+
+    let filtered;
+    if (isMissedReport) {
+      filtered = combinedRecs.filter(isMissedCheckoutRec);
+    } else if (status && status !== 'All') {
+      filtered = combinedRecs.filter(r =>
+        isMissedCheckoutRec(r) ? r.status === status : r.leave_status === status
+      );
+    } else {
+      filtered = combinedRecs.filter(isLeaveRec); // leave-only for the default/"All" leave view
+    }
 
     const empMap = {};
     for (const e of employees) empMap[String(e._id)] = e;
-const rows = filtered.map(r => {
-  const startD    = r.date || '';
-  const endD      = r.end_date || startD;
-  const dayCount  = (startD && endD && endD !== startD)
-    ? Math.round((new Date(endD) - new Date(startD)) / 86400000) + 1
-    : 1;
-  return {
-    empCode:       empMap[String(r.emp_id)]?.emp_id || '',
-    empName:       empMap[String(r.emp_id)]?.name   || '',
-    startDate:     fmtDDMMYYYY(startD),
-    endDate:       endD !== startD ? fmtDDMMYYYY(endD) : '',
-    days:          String(dayCount),
-    leaveType:     r.leave_type     || '',
-    status:        r.leave_status   || r.status || '',
-    reason:        r.leave_reason   || '',
-    managerRemark: r.manager_remark || '',
-    hrOverride:    r.hr_override    ? 'Yes' : 'No',
-    hrRemark:      r.hr_remark      || '',
-  };
-});
+
+    const overrideLabel = r => {
+      if (!r.hr_override) return '';
+      const who = r.overridden_by === 'super_admin' ? 'Super Admin' : r.overridden_by === 'hr' ? 'HR' : '';
+      const remark = (r.override_remark || r.hr_remark || '').replace(/^\[(HR|Super Admin) Override\]\s*/i, '').trim();
+      return who ? `${who}${remark ? `: ${remark}` : ''}` : remark;
+    };
+
+    const rows = isMissedReport
+  ? await Promise.all(filtered.map(async r => ({
+      empCode:         empMap[String(r.emp_id)]?.emp_id || '',
+      empName:         empMap[String(r.emp_id)]?.name   || '',
+      date:            r.date || '',
+      checkinTime:     r.checkin_time || '',
+      locationCheckin: await buildLocationText(r.location_address, r.latitude ?? r.checkin_lat, r.longitude ?? r.checkin_lng),
+      managerAction:   r.status || 'Pending',
+      managerRemark:   (r.manager_remark || r.checkout_remarks || '').replace(/^\[(HR|Super Admin) Override\]\s*/i, '').trim(),
+      override:        overrideLabel(r),
+    })))
+      : filtered.map(r => {
+          const startD   = r.date || '';
+          const endD     = r.end_date || startD;
+          const dayCount = (startD && endD && endD !== startD)
+            ? Math.round((new Date(endD) - new Date(startD)) / 86400000) + 1
+            : 1;
+          return {
+            empCode:       empMap[String(r.emp_id)]?.emp_id || '',
+            empName:       empMap[String(r.emp_id)]?.name   || '',
+            startDate:     startD,
+            endDate:       endD !== startD ? endD : '',
+            days:          String(dayCount),
+            leaveType:     r.leave_type     || '',
+            status:        r.leave_status   || r.status || '',
+            reason:        r.leave_reason   || '',
+            managerRemark: r.manager_remark || '',
+            hrOverride:    r.hr_override    ? 'Yes' : 'No',
+            hrRemark:      r.hr_remark      || '',
+          };
+        });
 
     const sd = new Date(startDate + 'T00:00:00+05:30');
     const ed = new Date(endDate   + 'T00:00:00+05:30');
@@ -942,25 +1082,22 @@ const rows = filtered.map(r => {
       ` To ` +
       `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN', { timeZone: IST, month: 'long' })} ${ed.getFullYear()}`;
 
+    const reportLabel = isMissedReport ? 'Missed Check-out Report' : 'Leave Report';
     const reportTitle = employees.length === 1
-      ? `Leave Report – ${employees[0].name} (${employees[0].emp_id || '—'})`
-      : 'Leave Report – BRP (Block Resource Person)';
+      ? `${reportLabel} – ${employees[0].name} (${employees[0].emp_id || '—'})`
+      : `${reportLabel} – BRP (Block Resource Person)`;
 
-    const approved = rows.filter(r => r.status === 'Approved').length;
-    const rejected = rows.filter(r => r.status === 'Rejected').length;
-    const pending  = rows.filter(r => r.status === 'Pending').length;
-
-    const singleEmp = employees.length === 1 ? employees[0] : null;
-    const empPrefix = singleEmp
-      ? `${(singleEmp.name || '').trim().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '')}_${singleEmp.emp_id || ''}_`
-      : '';
+    const statusOf = r => isMissedReport ? r.managerAction : r.status;
+    const approved = rows.filter(r => statusOf(r) === 'Approved').length;
+    const rejected = rows.filter(r => statusOf(r) === 'Rejected').length;
+    const pending  = rows.filter(r => statusOf(r) === 'Pending').length;
 
     // ══════════════════════════════════════════════════════════════════════════
     //  EXCEL
     // ══════════════════════════════════════════════════════════════════════════
     if (format === 'excel') {
       const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
-      const ws = wb.addWorksheet('Leave Report');
+      const ws = wb.addWorksheet(isMissedReport ? 'Missed Checkout Report' : 'Leave Report');
 
       const FILL_HDR     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
       const FILL_SUB     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8EDF4' } };
@@ -975,18 +1112,28 @@ const rows = filtered.map(r => {
         left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
         right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
       };
-      const COLS = [
+
+      const COLS = isMissedReport ? [
+        { key: 'empCode',         header: 'Emp Code',                  width: 12 },
+        { key: 'empName',         header: 'Emp Name',                  width: 22 },
+        { key: 'date',            header: 'Date',                      width: 14 },
+        { key: 'checkinTime',     header: 'Check-in Time',             width: 14, group: true },
+        { key: 'locationCheckin', header: 'Location Check-in',         width: 42, group: true },
+        { key: 'managerAction',   header: 'Manager Action',            width: 16 },
+        { key: 'managerRemark',   header: 'Manager Remark',            width: 28 },
+        { key: 'override',        header: 'Override (Name & Remark)',  width: 34 },
+      ] : [
         { key: 'empCode',       header: 'Emp Code',      width: 12 },
-        { key: 'empName',       header: 'Employee Name',  width: 22 },
-         { key: 'startDate',     header: 'From Date',       width: 14 },
-  { key: 'endDate',       header: 'To Date',         width: 14 },
-   { key: 'days',          header: 'Days',            width:  7 },
-        { key: 'leaveType',     header: 'Leave Type',     width: 18 },
-        { key: 'status',        header: 'Status',         width: 14 },
-        { key: 'reason',        header: 'Reason',         width: 32 },
-        { key: 'managerRemark', header: 'Manager Remark', width: 28 },
-        { key: 'hrOverride',    header: 'HR Override',    width: 13 },
-        { key: 'hrRemark',      header: 'HR Remark',      width: 28 },
+        { key: 'empName',       header: 'Employee Name', width: 22 },
+        { key: 'startDate',     header: 'From Date',     width: 14 },
+        { key: 'endDate',       header: 'To Date',       width: 14 },
+        { key: 'days',          header: 'Days',          width:  7 },
+        { key: 'leaveType',     header: 'Leave Type',    width: 18 },
+        { key: 'status',        header: 'Status',        width: 14 },
+        { key: 'reason',        header: 'Reason',        width: 32 },
+        { key: 'managerRemark', header: 'Manager Remark',width: 28 },
+        { key: 'hrOverride',    header: 'HR Override',   width: 13 },
+        { key: 'hrRemark',      header: 'HR Remark',     width: 28 },
       ];
       const NC = COLS.length;
 
@@ -1017,33 +1164,91 @@ const rows = filtered.map(r => {
       });
       ws.getRow(3).height = 15;
 
-      ws.getRow(4).height = 18;
-      COLS.forEach((col, i) => {
-        ws.getColumn(i + 1).width = col.width;
-        const c = ws.getCell(4, i + 1);
-        c.value = col.header;
-        c.font  = { bold: true, size: 10, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
-        c.fill  = FILL_HDR;
-        c.border = CBDR;
-        c.alignment = { horizontal: 'center', vertical: 'center' };
-      });
+      let headerRow = 4;
+
+      if (isMissedReport) {
+        ws.getRow(4).height = 16;
+        ws.getRow(5).height = 16;
+
+        const groupIdxs = COLS.reduce((arr, c, i) => c.group ? [...arr, i + 1] : arr, []);
+
+        COLS.forEach((col, i) => {
+          const colIdx = i + 1;
+          ws.getColumn(colIdx).width = col.width;
+          if (!col.group) {
+            ws.mergeCells(4, colIdx, 5, colIdx);
+            const c = ws.getCell(4, colIdx);
+            c.value = col.header;
+            c.font  = { bold: true, size: 10, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
+            c.fill  = FILL_HDR;
+            c.border = CBDR;
+            c.alignment = { horizontal: 'center', vertical: 'center' };
+            ws.getCell(5, colIdx).border = CBDR;
+          }
+        });
+
+        if (groupIdxs.length) {
+          const gStart = groupIdxs[0], gEnd = groupIdxs[groupIdxs.length - 1];
+          ws.mergeCells(4, gStart, 4, gEnd);
+          Object.assign(ws.getCell(4, gStart), {
+            value: 'Missed Check-out ',
+            font:  { bold: true, size: 10, color: { argb: 'FFFFFFFF' }, name: 'Calibri' },
+            fill:  FILL_HDR,
+            border: CBDR,
+            alignment: { horizontal: 'center', vertical: 'center' },
+          });
+          groupIdxs.forEach(colIdx => {
+            const col = COLS[colIdx - 1];
+            const c = ws.getCell(5, colIdx);
+            c.value = col.header;
+            c.font  = { bold: true, size: 9, color: { argb: 'FF1F3864' }, name: 'Calibri' };
+            c.fill  = FILL_SUB;
+            c.border = CBDR;
+            c.alignment = { horizontal: 'center', vertical: 'center' };
+          });
+        }
+        headerRow = 5;
+      } else {
+        ws.getRow(4).height = 18;
+        COLS.forEach((col, i) => {
+          ws.getColumn(i + 1).width = col.width;
+          const c = ws.getCell(4, i + 1);
+          c.value = col.header;
+          c.font  = { bold: true, size: 10, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
+          c.fill  = FILL_HDR;
+          c.border = CBDR;
+          c.alignment = { horizontal: 'center', vertical: 'center' };
+        });
+      }
+
+      const dataStart = headerRow + 1;
 
       if (rows.length === 0) {
-        ws.mergeCells(5, 1, 5, NC);
-        Object.assign(ws.getCell(5, 1), {
-          value: 'No leave records found for the selected period and filters.',
-          font:  { italic: true, size: 10, color: { argb: 'FF888888' } },
+        ws.mergeCells(dataStart, 1, dataStart, NC);
+        Object.assign(ws.getCell(dataStart, 1), {
+          value: isMissedReport
+            ? 'No missed check-out records found for the selected period and filters.'
+            : 'No leave records found for the selected period and filters.',
+          font: { italic: true, size: 10, color: { argb: 'FF888888' } },
           alignment: { horizontal: 'center', vertical: 'center' },
         });
-        ws.getRow(5).height = 18;
+        ws.getRow(dataStart).height = 18;
       } else {
         rows.forEach((row, idx) => {
-          const rowN = 5 + idx;
+          const rowN = dataStart + idx;
           ws.getRow(rowN).height = 15;
+          const sv = statusOf(row);
           let rowFill = idx % 2 === 0 ? FILL_EVEN : FILL_ODD;
-          if      (row.status === 'Approved') rowFill = FILL_APPROVE;
-          else if (row.status === 'Rejected') rowFill = FILL_REJECT;
-          else if (row.status === 'Pending')  rowFill = FILL_PENDING;
+          if      (sv === 'Approved') rowFill = FILL_APPROVE;
+          else if (sv === 'Rejected') rowFill = FILL_REJECT;
+          else if (sv === 'Pending')  rowFill = FILL_PENDING;
+
+          const centerKeys = isMissedReport
+            ? ['empCode', 'date', 'checkinTime', 'managerAction']
+            : ['empCode', 'status', 'hrOverride', 'days', 'startDate', 'endDate'];
+          const wrapKeys = isMissedReport
+            ? ['locationCheckin', 'managerRemark', 'override']
+            : ['reason', 'managerRemark', 'hrRemark'];
 
           COLS.forEach((col, i) => {
             const c = ws.getCell(rowN, i + 1);
@@ -1052,32 +1257,38 @@ const rows = filtered.map(r => {
             c.border = CBDR;
             c.font   = { size: 9, name: 'Calibri' };
             c.alignment = {
-              horizontal: ['empCode','status','hrOverride','days','startDate','endDate'].includes(col.key) ? 'center' : 'left',
+              horizontal: centerKeys.includes(col.key) ? 'center' : 'left',
               vertical:   'center',
-              wrapText:   ['reason','managerRemark','hrRemark'].includes(col.key),
+              wrapText:   wrapKeys.includes(col.key),
             };
           });
 
-          const sc = ws.getCell(rowN, 5);
-          const statusColor =
-            row.status === 'Approved' ? 'FF047857' :
-            row.status === 'Rejected' ? 'FFB91C1C' : 'FFB45309';
-          sc.font = { bold: true, size: 9, name: 'Calibri', color: { argb: statusColor } };
+          const statusColIdx = isMissedReport
+            ? COLS.findIndex(c => c.key === 'managerAction') + 1
+            : COLS.findIndex(c => c.key === 'status') + 1;
+          if (statusColIdx > 0) {
+            const sc = ws.getCell(rowN, statusColIdx);
+            const statusColor = sv === 'Approved' ? 'FF047857' : sv === 'Rejected' ? 'FFB91C1C' : 'FFB45309';
+            sc.font = { bold: true, size: 9, name: 'Calibri', color: { argb: statusColor } };
+          }
         });
       }
 
-      ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 4 }];
-      ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: NC } };
+      ws.views = [{ state: 'frozen', xSplit: 2, ySplit: headerRow }];
+      ws.autoFilter = { from: { row: headerRow, column: 1 }, to: { row: headerRow, column: NC } };
       ws.pageSetup = {
-        paperSize: 9, orientation: 'portrait',
+        paperSize: 9, orientation: 'landscape',
         fitToPage: true, fitToWidth: 1, fitToHeight: 0,
-        printTitlesRow: '$1:$4',
+        printTitlesRow: `$1:$${headerRow}`,
         margins: { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 },
       };
 
+      const fname = isMissedReport
+        ? `Missed_Checkout_Report_${startDate}_to_${endDate}.xlsx`
+        : `Leave_Report_${startDate}_to_${endDate}.xlsx`;
+
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      const fmtFnXl = iso => iso ? iso.split('-').reverse().join('-') : '';
-      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${fmtFnXl(startDate)}_to_${fmtFnXl(endDate)}.xlsx"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       await wb.xlsx.write(res);
       return res.end();
@@ -1087,27 +1298,48 @@ const rows = filtered.map(r => {
     //  PDF
     // ══════════════════════════════════════════════════════════════════════════
     if (format === 'pdf') {
-      // Filename in DD-MM-YYYY format
-      const fmtFn = iso => iso ? iso.split('-').reverse().join('-') : '';
       const doc = new PDFDoc({
-        size: 'A4', layout: 'portrait',
+        size: 'A3', layout: 'landscape',
         margins: { top: 28, bottom: 28, left: 28, right: 28 },
         autoFirstPage: true,
       });
+      const fname = isMissedReport
+        ? `Missed_Checkout_Report_${startDate}_to_${endDate}.pdf`
+        : `Leave_Report_${startDate}_to_${endDate}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${empPrefix}Leave_Report_${fmtFn(startDate)}_to_${fmtFn(endDate)}.pdf"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
 
       const ML      = 28;
       const usableW = doc.page.width - ML * 2;
-      // Portrait A4: 9 columns (drop hrOverride + hrRemark — too wide)
-      const colWidths = [40, 100, 55, 55, 25, 75, 55, 100, 90];
-      const colKeys   = ['empCode','empName','startDate','endDate','days','leaveType','status','reason','managerRemark'];
-      const colHdrs   = ['Emp Code','Employee Name','From','To','Days','Leave Type','Status','Reason','Manager Remark'];
-      const totalW    = colWidths.reduce((a, b) => a + b, 0);
-      const cw        = colWidths.map(w => (w / totalW) * usableW);
-      const RH = 14, HRH = 16;
+
+      const colDefs = isMissedReport ? [
+        { key: 'empCode',         header: 'Emp Code',                 w: 48  },
+        { key: 'empName',         header: 'Emp Name',                 w: 100 },
+        { key: 'date',            header: 'Date',                     w: 60  },
+        { key: 'checkinTime',     header: 'Check-in Time',            w: 70,  group: true },
+        { key: 'locationCheckin', header: 'Location Check-in',        w: 440, group: true },
+        { key: 'managerAction',   header: 'Manager Action',           w: 75  },
+        { key: 'managerRemark',   header: 'Manager Remark',           w: 140 },
+        { key: 'override',        header: 'Override (Name & Remark)', w: 160 },
+      ] : [
+        { key: 'empCode',       header: 'Emp Code',       w: 48  },
+        { key: 'empName',       header: 'Employee Name',  w: 105 },
+        { key: 'startDate',     header: 'From Date',      w: 58  },
+        { key: 'endDate',       header: 'To Date',        w: 58  },
+        { key: 'days',          header: 'Days',           w: 28  },
+        { key: 'leaveType',     header: 'Leave Type',     w: 75  },
+        { key: 'status',        header: 'Status',         w: 62  },
+        { key: 'reason',        header: 'Reason',         w: 130 },
+        { key: 'managerRemark', header: 'Manager Remark', w: 120 },
+        { key: 'hrOverride',    header: 'HR Override',    w: 48  },
+        { key: 'hrRemark',      header: 'HR Remark',      w: 105 },
+      ];
+
+      const totalW = colDefs.reduce((a, c) => a + c.w, 0);
+      const cw = colDefs.map(c => (c.w / totalW) * usableW);
+      const RH = 14, HRH = 16, GROUP_RH = 14;
       let y = ML;
 
       const drawPageHeader = (yy) => {
@@ -1122,12 +1354,27 @@ const rows = filtered.map(r => {
              ML + 4, yy + 3, { width: usableW - 8, align: 'center' }
            );
         yy += 13;
+
+        if (isMissedReport) {
+          doc.rect(ML, yy, usableW, GROUP_RH).fill('#1F3864').stroke('#AAAAAA');
+          let gx = ML, groupStartX = null, groupW = 0;
+          colDefs.forEach((c, i) => {
+            if (c.group) { if (groupStartX === null) groupStartX = gx; groupW += cw[i]; }
+            gx += cw[i];
+          });
+          if (groupStartX !== null) {
+            doc.fillColor('#FFFFFF').fontSize(7.5).font('Helvetica-Bold')
+               .text('Missed Check-out (Date Range)', groupStartX, yy + 3, { width: groupW, align: 'center' });
+          }
+          yy += GROUP_RH;
+        }
+
         let cx = ML;
-        cw.forEach((w, i) => {
-          doc.rect(cx, yy, w, HRH).fill('#1F3864').stroke('#AAAAAA');
+        colDefs.forEach((c, i) => {
+          doc.rect(cx, yy, cw[i], HRH).fill('#1F3864').stroke('#AAAAAA');
           doc.fillColor('#FFFFFF').fontSize(6.5).font('Helvetica-Bold')
-             .text(colHdrs[i], cx + 2, yy + 4, { width: w - 4, align: 'center' });
-          cx += w;
+             .text(c.header, cx + 2, yy + 4, { width: cw[i] - 4, align: 'center' });
+          cx += cw[i];
         });
         return yy + HRH;
       };
@@ -1137,59 +1384,47 @@ const rows = filtered.map(r => {
       if (rows.length === 0) {
         doc.rect(ML, y, usableW, RH).fill('#FFFFFF').stroke('#CCCCCC');
         doc.fillColor('#888888').fontSize(8).font('Helvetica-Oblique')
-           .text('No leave records found for the selected period and filters.', ML, y + 3, { width: usableW, align: 'center' });
+           .text(
+             isMissedReport
+               ? 'No missed check-out records found for the selected period and filters.'
+               : 'No leave records found for the selected period and filters.',
+             ML, y + 3, { width: usableW, align: 'center' }
+           );
       } else {
+        const statusKey = isMissedReport ? 'managerAction' : 'status';
+        const centerKeys = isMissedReport
+          ? ['empCode', 'date', 'checkinTime', 'managerAction']
+          : ['empCode', 'status', 'hrOverride', 'days', 'startDate', 'endDate'];
+
         rows.forEach((row, idx) => {
-          if (y + RH > doc.page.height - 80) {
-            doc.addPage({ size: 'A4', layout: 'portrait', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+          if (y + RH > doc.page.height - 40) {
+            doc.addPage({ size: 'A3', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
             y = drawPageHeader(28);
           }
+          const sv = row[statusKey];
           const bg =
-            row.status === 'Approved' ? '#D1FAE5' :
-            row.status === 'Rejected' ? '#FEE2E2' :
-            row.status === 'Pending'  ? '#FFF9C4' :
+            sv === 'Approved' ? '#D1FAE5' :
+            sv === 'Rejected' ? '#FEE2E2' :
+            sv === 'Pending'  ? '#FFF9C4' :
             (idx % 2 === 0 ? '#FFFFFF' : '#F9F9F9');
 
           doc.rect(ML, y, usableW, RH).fill(bg).stroke('#DDDDDD');
           let cx = ML;
-          colKeys.forEach((key, i) => {
-            const val = String(row[key] || '');
-            const isCenter = ['empCode','status','days','startDate','endDate'].includes(key);
-            const textColor =
-              key === 'status'
-                ? (row.status === 'Approved' ? '#047857' : row.status === 'Rejected' ? '#B91C1C' : '#B45309')
-                : '#000000';
+          colDefs.forEach((c, i) => {
+            const val = String(row[c.key] || '');
+            const isCenter = centerKeys.includes(c.key);
+            const textColor = c.key === statusKey
+              ? (sv === 'Approved' ? '#047857' : sv === 'Rejected' ? '#B91C1C' : '#B45309')
+              : '#000000';
             doc.rect(cx, y, cw[i], RH).stroke('#DDDDDD');
             doc.fillColor(textColor).fontSize(6)
-               .font(key === 'status' ? 'Helvetica-Bold' : 'Helvetica')
+               .font(c.key === statusKey ? 'Helvetica-Bold' : 'Helvetica')
                .text(val, cx + 2, y + 3, { width: cw[i] - 4, align: isCenter ? 'center' : 'left', lineBreak: false, ellipsis: true });
             cx += cw[i];
           });
           y += RH;
         });
       }
-
-      // ── Signing section ──────────────────────────────────────────────
-      const SIGN_H = 68;
-      if (y + SIGN_H > doc.page.height - 20) {
-        doc.addPage({ size: 'A4', layout: 'portrait', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
-        y = 28;
-      } else {
-        y += 18;
-      }
-
-      doc.rect(ML, y, usableW, SIGN_H).fill('#F8FAFC').strokeColor('#CBD5E1').lineWidth(0.5).stroke();
-      doc.fillColor('#0F1E3D').fontSize(8).font('Helvetica-Bold').text('Acknowledgment', ML + 8, y + 8);
-      const sCols = [usableW * 0.45, usableW * 0.55];
-      const sLabels = ['Employee Signature & Date', 'Manager Signature & Date'];
-      let sx = ML + 8;
-      const sY = y + 28;
-      sLabels.forEach((lbl, i) => {
-        doc.fillColor('#4A5568').fontSize(7).font('Helvetica').text(lbl, sx, sY);
-        doc.moveTo(sx, sY + 20).lineTo(sx + sCols[i] - 16, sY + 20)
-          .strokeColor('#94A3B8').lineWidth(0.5).stroke();
-        sx += sCols[i];
-      });
 
       doc.end();
       return;
@@ -1482,12 +1717,11 @@ rows.forEach((r,idx)=>{
 
       const colX=[ML, ML+70, ML+150, ML+230, ML+310, ML+410];
       const colW=[70,80,80,80,100,80];
-    ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
-  doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold')
-     .text(h, colX[i]+2, y+4, { width: colW[i]-4, align: 'center' });
-});
-y += 16;
-
+      doc.rect(ML,y,PW,16).fill('#DCE6F1').stroke('#AAAAAA');
+      ['Date','Check-In','Check-Out','Total Time','Duty Type','Leave Type'].forEach((h,i)=>{
+        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text(h,colX[i]+2,y+4,{width:colW[i]-4,align:'center'});
+      });
+      y+=16;
       rows.forEach((r,idx)=>{
         if (y+14>doc.page.height-100){doc.addPage();y=30;}
         doc.rect(ML,y,PW,14).fill(idx%2===0?'#FFFFFF':'#F7F7F7').stroke('#DDDDDD');
@@ -1518,6 +1752,262 @@ y += 16;
   } catch(err){
     console.error('[DailyLogExport]',err);
     res.status(500).json({success:false,message:'Export failed',error:err.message});
+  }
+});
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/reports/late-checkout          (preview — powers the "View" button)
+//  GET /api/reports/late-checkout-export   (excel / pdf download)
+//  "Late check-out" = checkout_time >= 18:30 (6:30 PM IST)
+// ══════════════════════════════════════════════════════════════════════════════
+const LATE_CHECKOUT_CUTOFF = '18:30';
+
+const resolveLateCheckoutEmployees = async (req) => {
+  const role = req.user.role;
+  const { empId, managerId } = req.query;
+  const EMP_SELECT = '_id name emp_id';
+  let employees = [];
+
+  if (role === 'employee') {
+    const me = await User.findById(req.user.id).select(EMP_SELECT).lean();
+    if (me) employees = [me];
+  } else if (empId && String(empId).trim() !== '') {
+    const specific = await User.findById(toObjId(empId)).select(EMP_SELECT).lean();
+    if (specific) employees = [specific];
+  } else if (managerId && String(managerId).trim() !== '') {
+    employees = await User.find({ manager_id: toObjId(managerId), is_active: { $ne: false } })
+      .select(EMP_SELECT).sort({ emp_id: 1 }).lean();
+  } else if (role === 'manager') {
+    employees = await User.find({ manager_id: toObjId(req.user.id), is_active: { $ne: false } })
+      .select(EMP_SELECT).sort({ emp_id: 1 }).lean();
+  } else {
+    employees = await User.find({ role: 'employee', is_active: { $ne: false } })
+      .select(EMP_SELECT).sort({ emp_id: 1 }).lean();
+  }
+  return employees;
+};
+
+const buildLateCheckoutRows = async ({ startDate, endDate, employees }) => {
+  const recs = await AttendanceRecord.find({
+    date:          { $gte: startDate, $lte: endDate },
+    emp_id:        { $in: employees.map(e => e._id) },
+    checkout_time: { $ne: null, $gte: LATE_CHECKOUT_CUTOFF },
+  }).sort({ date: 1 }).lean();
+
+  const empMap = {};
+  for (const e of employees) empMap[String(e._id)] = e;
+
+  return Promise.all(recs.map(async r => {
+    const emp        = empMap[String(r.emp_id)];
+    const checkinLoc  = await buildLocationText(r.location_address, r.latitude, r.longitude);
+    const checkoutLoc = await buildLocationText(r.checkout_location_address, r.checkout_lat, r.checkout_lng);
+    return {
+      empCode:  emp?.emp_id || '',
+      empName:  emp?.name   || '',
+      date:     r.date,
+      checkinLocationTime:  r.checkin_time
+        ? `${checkinLoc || 'Address not captured'} (${r.checkin_time})`
+        : (checkinLoc || ''),
+      checkoutLocationTime: r.checkout_time
+        ? `${checkoutLoc || 'Address not captured'} (${r.checkout_time})`
+        : (checkoutLoc || ''),
+      reason: (r.late_checkout_reason && r.late_checkout_reason.trim()) || 'No reason provided',
+    };
+  }));
+};
+
+router.get('/late-checkout',
+  authenticate,
+  authorize('super_admin','admin','hr','manager','employee'),
+  async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate)
+      return res.status(400).json({ success:false, message:'startDate and endDate are required' });
+
+    const employees = await resolveLateCheckoutEmployees(req);
+    if (!employees.length)
+      return res.status(404).json({ success:false, message:'No employees found' });
+
+    const rows = await buildLateCheckoutRows({ startDate, endDate, employees });
+    res.json({ success:true, data: rows, count: rows.length });
+  } catch (err) {
+    console.error('[LateCheckoutView]', err);
+    res.status(500).json({ success:false, message:'Failed to load late check-out records', error: err.message });
+  }
+});
+
+router.get('/late-checkout-export',
+  authenticate,
+  authorize('super_admin','admin','hr','manager','employee'),
+  async (req, res) => {
+  try {
+    const { format = 'excel', empId } = req.query;
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate)
+      return res.status(400).json({ success:false, message:'startDate and endDate are required' });
+
+    const employees = await resolveLateCheckoutEmployees(req);
+    if (!employees.length)
+      return res.status(404).json({ success:false, message:'No employees found' });
+
+    const rows = await buildLateCheckoutRows({ startDate, endDate, employees });
+
+    const sd = new Date(startDate+'T00:00:00+05:30');
+    const ed = new Date(endDate  +'T00:00:00+05:30');
+    const rangeLabel =
+      `${ordinal(sd.getDate())} ${sd.toLocaleDateString('en-IN',{timeZone:IST,month:'short'})} ${sd.getFullYear()}` +
+      ` To ` +
+      `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${ed.getFullYear()}`;
+
+    const sanitize = s => String(s||'').trim().replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+    const singleEmp = employees.length === 1
+      ? employees[0]
+      : (empId ? employees.find(e => String(e._id) === String(empId)) : null);
+    const fnameBase = singleEmp
+      ? `${sanitize(singleEmp.name)}_${sanitize(singleEmp.emp_id)}_LateCheckout_${startDate}_to_${endDate}`
+      : `BRP_LateCheckout_${startDate}_to_${endDate}`;
+
+    if (format === 'excel') {
+      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
+      const ws = wb.addWorksheet('Late Check-out');
+
+      const NAVY = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1F3864' } };
+      const HDR  = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFDCE6F1' } };
+      const EVEN = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFFFFFFF' } };
+      const ODD  = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFF7F7F7' } };
+      const CBDR = {
+        top:{style:'thin',color:{argb:'FFCCCCCC'}}, bottom:{style:'thin',color:{argb:'FFCCCCCC'}},
+        left:{style:'thin',color:{argb:'FFCCCCCC'}}, right:{style:'thin',color:{argb:'FFCCCCCC'}},
+      };
+
+      const COLS = [
+        { header:'Emp Name',                     width:22 },
+        { header:'Emp ID',                       width:14 },
+        { header:'Check-in Location with Time',  width:46 },
+        { header:'Check-out Location with Time', width:46 },
+        { header:'Reason (Employee Response)',   width:38 },
+      ];
+
+      ws.mergeCells(1,1,1,COLS.length);
+      Object.assign(ws.getCell(1,1), {
+        value: `Late Check-out — ${rangeLabel}`,
+        font:  { bold:true, size:13, color:{argb:'FFFFFFFF'} },
+        fill:  NAVY,
+        alignment: { horizontal:'center', vertical:'center' },
+      });
+      ws.getRow(1).height = 24;
+
+      COLS.forEach((c,i)=>{
+        ws.getColumn(i+1).width = c.width;
+        const cell = ws.getCell(2,i+1);
+        cell.value = c.header; cell.fill = HDR; cell.border = CBDR;
+        cell.font  = { bold:true, size:10, color:{argb:'FF1F3864'} };
+        cell.alignment = { horizontal:'center', vertical:'center', wrapText:true };
+      });
+      ws.getRow(2).height = 20;
+
+      if (!rows.length) {
+        ws.mergeCells(3,1,3,COLS.length);
+        Object.assign(ws.getCell(3,1), {
+          value: 'No late check-out records found for the selected period and filters.',
+          font: { italic:true, size:10, color:{argb:'FF888888'} },
+          alignment: { horizontal:'center', vertical:'center' },
+        });
+      } else {
+        rows.forEach((r,idx)=>{
+          const rn = 3+idx;
+          const rf = idx%2===0 ? EVEN : ODD;
+          [r.empName, r.empCode, r.checkinLocationTime, r.checkoutLocationTime, r.reason].forEach((v,i)=>{
+            const c = ws.getCell(rn,i+1);
+            c.value = v || ''; c.fill = rf; c.border = CBDR;
+            c.font  = { size:9 };
+            c.alignment = { horizontal: i<2?'center':'left', vertical:'center', wrapText: i>=2 };
+          });
+        });
+      }
+
+      ws.views = [{ state:'frozen', ySplit:2 }];
+      ws.pageSetup = {
+        paperSize:9, orientation:'landscape', fitToPage:true, fitToWidth:1, fitToHeight:0,
+        printTitlesRow:'$1:$2',
+        margins:{left:0.3,right:0.3,top:0.4,bottom:0.4,header:0.2,footer:0.2},
+      };
+
+      res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition',`attachment; filename="${fnameBase}.xlsx"`);
+      res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    if (format === 'pdf') {
+      const doc = new PDFDoc({ size:'A3', layout:'landscape', margins:{top:28,bottom:28,left:28,right:28}, autoFirstPage:true });
+      res.setHeader('Content-Type','application/pdf');
+      res.setHeader('Content-Disposition',`attachment; filename="${fnameBase}.pdf"`);
+      res.setHeader('Access-Control-Expose-Headers','Content-Disposition');
+      doc.pipe(res);
+
+      const ML = 28;
+      const usableW = doc.page.width - ML*2;
+      const colDefs = [
+        { key:'empName',              header:'Emp Name',                     w:0.14 },
+        { key:'empCode',               header:'Emp ID',                       w:0.08 },
+        { key:'checkinLocationTime',  header:'Check-in Location with Time',  w:0.34 },
+        { key:'checkoutLocationTime', header:'Check-out Location with Time', w:0.34 },
+        { key:'reason',               header:'Reason (Employee Response)',   w:0.10 },
+      ];
+      const cw = colDefs.map(c => c.w*usableW);
+      const HRH = 18, RH = 20;
+
+      const drawHeader = (yy) => {
+        doc.rect(ML,yy,usableW,20).fill('#1F3864');
+        doc.fillColor('#FFFFFF').fontSize(11).font('Helvetica-Bold')
+           .text(`Late Check-out — ${rangeLabel}`, ML, yy+5, { width:usableW, align:'center' });
+        yy += 20;
+        let cx = ML;
+        colDefs.forEach((c,i)=>{
+          doc.rect(cx,yy,cw[i],HRH).fill('#DCE6F1').stroke('#AAAAAA');
+          doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold')
+             .text(c.header, cx+3, yy+4, { width:cw[i]-6, align:'center' });
+          cx += cw[i];
+        });
+        return yy+HRH;
+      };
+
+      let y = drawHeader(ML);
+
+      if (!rows.length) {
+        doc.rect(ML,y,usableW,RH).fill('#FFFFFF').stroke('#CCCCCC');
+        doc.fillColor('#888888').fontSize(9).font('Helvetica-Oblique')
+           .text('No late check-out records found for the selected period and filters.', ML, y+5, { width:usableW, align:'center' });
+        y += RH;
+      } else {
+        rows.forEach((r,idx)=>{
+          if (y+RH > doc.page.height-40) {
+            doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
+            y = drawHeader(28);
+          }
+          const bg = idx%2===0 ? '#FFFFFF' : '#F7F7F7';
+          doc.rect(ML,y,usableW,RH).fill(bg).stroke('#DDDDDD');
+          let cx = ML;
+          [r.empName, r.empCode, r.checkinLocationTime, r.checkoutLocationTime, r.reason].forEach((v,i)=>{
+            doc.rect(cx,y,cw[i],RH).stroke('#DDDDDD');
+            doc.fillColor('#000000').fontSize(7).font('Helvetica')
+               .text(String(v||''), cx+3, y+4, { width:cw[i]-6, align:i<2?'center':'left' });
+            cx += cw[i];
+          });
+          y += RH;
+        });
+      }
+
+      doc.end();
+      return;
+    }
+
+    res.status(400).json({ success:false, message:'format must be excel or pdf' });
+  } catch (err) {
+    console.error('[LateCheckoutExport]', err);
+    res.status(500).json({ success:false, message:'Late check-out export failed', error: err.message });
   }
 });
 module.exports = router;

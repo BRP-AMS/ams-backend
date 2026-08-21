@@ -29,9 +29,7 @@ app.set('trust proxy', 1);
 // error responses) before any other middleware can interfere.
 const ALLOWED_ORIGINS = [
   'https://monitermark.brptripura.com',
-  'https://monitormark.brptripura.com',
   'https://mm-service.brptripura.com',
-  'https://monitormark.brptripura.com',
   process.env.FRONTEND_URL,
   process.env.BACKEND_URL,
   'http://localhost:3000',
@@ -101,18 +99,10 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use((req, res, next) => {
   if (req.body) req.body = mongoSanitize.sanitize(req.body, { replaceWith: '_' });
   if (req.query && typeof req.query === 'object') {
-    const sanitizeValue = (v) => {
-      if (typeof v === 'string') return v.replace(/[$]/g, '');
-      if (typeof v === 'object' && v !== null) {
-        // Reject object-type params entirely — they carry NoSQL operator payloads
-        return undefined;
-      }
-      return v;
-    };
     for (const key of Object.keys(req.query)) {
-      const sanitized = sanitizeValue(req.query[key]);
-      if (sanitized === undefined) delete req.query[key];
-      else req.query[key] = sanitized;
+      if (typeof req.query[key] === 'string') {
+        req.query[key] = req.query[key].replace(/[$]/g, '');
+      }
     }
   }
   next();
@@ -190,7 +180,7 @@ cron.schedule('5 0 * * *', async () => {
           message:           `${emp?.name || 'An employee'} did not check out on ${record.date} (checked in at ${record.checkin_time}). Please review and approve or reject.`,
           type:              'warning',
           related_record_id: record._id,
-          link:              '/manager/queue',
+          link:              '/manager/leaves',
         });
       }
 
@@ -212,12 +202,16 @@ cron.schedule('5 0 * * *', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CRON 2 — Hourly reminder (18:00–23:00 IST): Remind employees to check out
+// CRON 2 — Fixed-time reminder (18:30, 19:30 … 23:30 IST): Remind employees
+// to check out.
 //
-// Sends a notification reminder only — does NOT flag or block anyone.
-// The midnight cron above handles the actual flagging.
+// Triggers purely on CLOCK TIME, not hours-since-checkin. Every employee who
+// is still checked in (Draft, checkin set, no checkout) at/after 6:30pm gets
+// notified — regardless of what time they checked in. Sends a notification
+// reminder only — does NOT flag or block anyone. The midnight cron above
+// handles the actual flagging.
 // ─────────────────────────────────────────────────────────────────────────────
-cron.schedule('0 18-23 * * *', async () => {
+cron.schedule('30 18-23 * * *', async () => {
   console.log('[MissedCheckout Reminder] Cron triggered');
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -232,12 +226,6 @@ cron.schedule('0 18-23 * * *', async () => {
     console.log(`[MissedCheckout Reminder] ${unchecked.length} employees still not checked out for ${todayIST}`);
 
     for (const record of unchecked) {
-      const checkinDT    = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-      const nowIST       = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-      const hoursElapsed = (nowIST - checkinDT) / 3600000;
-
-      if (hoursElapsed < 6) continue;
-
       // Throttle — don't spam more than once every 2 hours
       const recentNotif = await Notification.findOne({
         user_id:    record.emp_id,
@@ -263,10 +251,10 @@ cron.schedule('0 18-23 * * *', async () => {
           _id:               uuidv4(),
           user_id:           record.manager_id,
           title:             '⚠️ Employee Not Checked Out',
-          message:           `${emp?.name || 'An employee'} checked in at ${record.checkin_time} on ${record.date} but has not checked out yet (${Math.floor(hoursElapsed)}h elapsed).`,
+          message:           `${emp?.name || 'An employee'} checked in at ${record.checkin_time} on ${record.date} and has not checked out yet.`,
           type:              'warning',
           related_record_id: record._id,
-          link:              '/manager/queue',
+          link:              '/manager/leaves',
         });
       }
     }
@@ -280,203 +268,21 @@ cron.schedule('0 18-23 * * *', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CRON 3 — Every 15 min: Auto-checkout employees after 9 hours OR at 23:59 IST
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTE: The old CRON 3 ("system auto check-out after 8 hours") has been
+// removed on purpose. The system must never check an employee out for them.
 //
-// Whichever comes first:
-//   a) check-in time + 9 hours  (normal shift limit)
-//   b) 23:59 IST of the record's date  (EOD cutoff — day change safety net)
+// The employee ALWAYS checks out manually (with selfie + GPS + text address).
+// If they miss it, CRON 1 (midnight) flags the record as a missed check-out
+// and routes it to the manager queue. CRON 2 (6:30pm–11:30pm) nudges anyone
+// still checked in. When the employee eventually taps "Check Out" on a
+// missed-checkout record, the route in attendance.js (PUT /:id/checkout,
+// `record.is_missed_checkout` branch) auto-approves it if 8+ hours had
+// elapsed since check-in, otherwise it stays Pending for one manager
+// approve/reject decision. That logic already lived in attendance.js and
+// is untouched — this cron was the only thing fighting it.
 // ─────────────────────────────────────────────────────────────────────────────
-// cron.schedule('*/15 * * * *', async () => {
-//   try {
-//     const unchecked = await AttendanceRecord.find({
-//       status:        'Draft',
-//       checkin_time:  { $ne: null },
-//       checkout_time: null,
-//     }).lean();
-
-//     if (!unchecked.length) return;
-
-//     const nowUTC = new Date();
-
-//     for (const record of unchecked) {
-//       const checkinDT      = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-//       const nineHourDT     = new Date(checkinDT.getTime() + 9 * 3600 * 1000);
-//       const eodDT          = new Date(`${record.date}T23:59:00+05:30`);
-
-//       // Use whichever limit is earlier — 9-hour mark or EOD (23:59 IST)
-//       const effectiveDT  = nineHourDT <= eodDT ? nineHourDT : eodDT;
-//       const isEodTrigger = effectiveDT === eodDT;
-
-//       if (nowUTC < effectiveDT) continue;
-
-//       // Format checkout time in IST as HH:MM
-//       const checkoutTime = effectiveDT.toLocaleTimeString('en-CA', {
-//         timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
-//       });
-//       const workedMs    = effectiveDT.getTime() - checkinDT.getTime();
-//       const workedHours = Math.round(workedMs / 3600000 * 10) / 10;
-//       const now         = new Date();
-
-//       const remark = isEodTrigger
-//         ? `Auto-checked out at end of day 23:59 (check-in: ${record.checkin_time}, checkout: ${checkoutTime})`
-//         : `Auto-checked out after 9 hours (check-in: ${record.checkin_time}, checkout: ${checkoutTime})`;
-
-//       await AttendanceRecord.findByIdAndUpdate(record._id, {
-//         $set: {
-//           checkout_time:    checkoutTime,
-//           worked_hours:     workedHours,
-//           is_auto_checkout: true,
-//           status:           'Approved',
-//           actioned_at:      now,
-//           manager_remark:   remark,
-//           submitted_at:     now,
-//         },
-//       });
-
-//       await Notification.create({
-//         _id:               uuidv4(),
-//         user_id:           record.emp_id,
-//         title:             isEodTrigger ? '🌙 Auto Check-Out (End of Day)' : '🕗 Auto Check-Out (9 Hours)',
-//         message:           isEodTrigger
-//           ? `You were automatically checked out at 23:59 (end of day). Worked ${workedHours}h.`
-//           : `You were automatically checked out at ${checkoutTime} after 9 hours on duty.`,
-//         type:              'info',
-//         related_record_id: record._id,
-//         link:              '/employee/history',
-//       });
-
-//       console.log(`[AutoCheckout Cron] ${record.emp_id} → ${checkoutTime} (${isEodTrigger ? 'EOD' : '9h'} trigger, ${workedHours}h worked)`);
-//     }
-//   } catch (err) {
-//     console.error('[AutoCheckout Cron] Error:', err.message);
-//   }
-// });
-// ─────────────────────────────────────────────────────────────────────────────
-// CRON 3 — Every 15 min: Auto-checkout employees after 9 hours OR at 23:59 IST
-//
-// Whichever comes first:
-//   a) check-in time + 9 hours  (matches AUTO_APPROVE_HOURS in checkout route)
-//   b) 23:59 IST of the record's date  (EOD cutoff — day change safety net)
-//
-// If the employee checks out manually first, this cron does nothing to
-// that record — the atomic guard below only fires when checkout_time is
-// STILL null at the moment this cron writes.
-// ─────────────────────────────────────────────────────────────────────────────
-cron.schedule('*/15 * * * *', async () => {
-  try {
-    const unchecked = await AttendanceRecord.find({
-      status:        'Draft',
-      checkin_time:  { $ne: null },
-      checkout_time: null,
-    }).lean();
-
-    if (!unchecked.length) return;
-    const nowUTC = new Date();
-
-    for (const record of unchecked) {
-      const checkinDT  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
-      const nineHourDT = new Date(checkinDT.getTime() + 9 * 3600 * 1000);
-      const eodDT      = new Date(`${record.date}T23:59:00+05:30`);
-
-      const effectiveDT  = nineHourDT <= eodDT ? nineHourDT : eodDT;
-      const isEodTrigger = effectiveDT === eodDT;
-
-      if (nowUTC < effectiveDT) continue; // not due yet
-
-      const checkoutTime = effectiveDT.toLocaleTimeString('en-CA', {
-        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
-      });
-      const workedHours = Math.round((effectiveDT - checkinDT) / 3600000 * 10) / 10;
-      const now = new Date();
-      const remark = isEodTrigger
-        ? `Auto-checked out at end of day 23:59 (check-in: ${record.checkin_time}, checkout: ${checkoutTime})`
-        : `Auto-checked out after 9 hours (check-in: ${record.checkin_time}, checkout: ${checkoutTime})`;
-
-      // ATOMIC — only succeeds if checkout_time is STILL null right now.
-      // If the employee's manual checkout landed first, this matches
-      // zero documents and updated === null. Their record is untouched.
-      const updated = await AttendanceRecord.findOneAndUpdate(
-        { _id: record._id, checkout_time: null, status: 'Draft' },
-        { $set: {
-            checkout_time:             checkoutTime,
-            worked_hours:              workedHours,
-            is_auto_checkout:          true,
-            status:                    'Approved',
-            actioned_by:               null,
-            actioned_at:               now,
-            manager_remark:            remark,
-            submitted_at:              now,
-            checkout_location_address: 'System Auto-Checkout (no GPS captured)',
-        }},
-        { new: true }
-      );
-
-      if (!updated) {
-        console.log(`[AutoCheckout Cron] ${record.emp_id} already checked out manually — skipped`);
-        continue;
-      }
-
-      await Notification.create({
-        _id: uuidv4(), user_id: record.emp_id,
-        title: isEodTrigger ? '🌙 Auto Check-Out (End of Day)' : '🕗 Auto Check-Out (9 Hours)',
-        message: isEodTrigger
-          ? `You were automatically checked out at 23:59 (end of day). Worked ${workedHours}h.`
-          : `You were automatically checked out at ${checkoutTime} after 9 hours on duty.`,
-        type: 'info', related_record_id: record._id, link: '/employee/history',
-      });
-
-      console.log(`[AutoCheckout Cron] ${record.emp_id} → ${checkoutTime} (${isEodTrigger ? 'EOD' : '9h'} trigger, ${workedHours}h worked)`);
-    }
-  } catch (err) {
-    console.error('[AutoCheckout Cron] Error:', err.message);
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CRON 4 — 1st of every month at 00:01 IST: accrue 1 leave per employee
-//
-// For each active employee with auto_leave_enabled = true and a joining_date:
-//   - calculates how many full months have elapsed since last_accrual_date
-//     (or joining_date if never accrued)
-//   - adds that many to leave_balance and updates last_accrual_date
-// ─────────────────────────────────────────────────────────────────────────────
-cron.schedule('1 0 1 * *', async () => {
-  console.log('[LeaveAccrual Cron] Running monthly leave accrual...');
-  try {
-    const { User } = require('./src/models/database');
-    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // YYYY-MM-DD
-
-    const employees = await User.find({
-      role: 'employee',
-      is_active: { $ne: 0 },
-      auto_leave_enabled: true,
-      joining_date: { $ne: null },
-    }).select('_id name joining_date last_accrual_date leave_balance').lean();
-
-    const fullMonthsDiff = (fromISO, toISO) => {
-      const [fy, fm] = fromISO.split('-').map(Number);
-      const [ty, tm] = toISO.split('-').map(Number);
-      return Math.max(0, (ty - fy) * 12 + (tm - fm));
-    };
-
-    let accrued = 0;
-    for (const emp of employees) {
-      const baseline = emp.last_accrual_date || emp.joining_date;
-      const months   = fullMonthsDiff(baseline, todayIST);
-      if (months <= 0) continue;
-
-      await User.findByIdAndUpdate(emp._id, {
-        $inc: { leave_balance: months },
-        $set: { last_accrual_date: todayIST },
-      });
-      accrued++;
-      console.log(`[LeaveAccrual Cron] ${emp.name}: +${months} leave(s) → balance now ${(emp.leave_balance || 0) + months}`);
-    }
-    console.log(`[LeaveAccrual Cron] Done — ${accrued} employee(s) accrued.`);
-  } catch (err) {
-    console.error('[LeaveAccrual Cron] Error:', err.message);
-  }
-}, { timezone: 'Asia/Kolkata' });
 
 // ── Revoked-token pruning ─────────────────────────────────────────────────
 const pruneRevokedTokens = async () => {
@@ -492,22 +298,6 @@ connectionPromise.then(async () => {
   pruneRevokedTokens();
   setInterval(pruneRevokedTokens, 60 * 60 * 1000);
   require('./src/utils/mailer');
-
-  // Auto-seed 2026 Tripura holidays if the collection is empty
-  try {
-    const { Holiday } = require('./src/models/database');
-    const { SEED_2026 } = require('./src/routes/holidays');
-    const count = await Holiday.countDocuments();
-    if (count === 0 && SEED_2026 && SEED_2026.length) {
-      const ops = SEED_2026.map(h => ({
-        updateOne: { filter: { date: h.date }, update: { $setOnInsert: h }, upsert: true },
-      }));
-      await Holiday.bulkWrite(ops);
-      console.log(`🗓  Seeded ${SEED_2026.length} holidays for 2026`);
-    }
-  } catch (e) {
-    console.warn('Holiday auto-seed failed:', e.message);
-  }
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -525,10 +315,9 @@ app.use('/api/blocks',            require('./src/routes/blocks'));
 app.use('/api/departments',       require('./src/routes/departments'));
 app.use('/api/monthly-report',    require('./src/routes/monthlyReport'));
 app.use('/api/oda',               require('./src/routes/oda'));
-app.use('/api/dept-dashboard',    require('./src/routes/dept-dashboard'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
-app.use('/api/holidays',          require('./src/routes/holidays'));
 app.use('/api/file',              require('./src/routes/file'));
+app.use('/api/holidays',          require('./src/routes/holidays'));
 
 // Health check — version bump triggers Render redeploy detection
 app.get('/api/health', (req, res) => {
@@ -541,6 +330,40 @@ app.get('/api/health', (req, res) => {
 });
 
 
+// ── Temporary email debug endpoint ────────────────────────────────────────
+app.post('/api/admin/test-email', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: 'email required' });
+  const results = {};
+
+  try {
+    const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+    if (FIREBASE_API_KEY) {
+      const fbRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
+      });
+      const fbData = await fbRes.json();
+      results.firebase = { status: fbRes.status, ok: fbRes.ok, data: fbData };
+    } else {
+      results.firebase = { status: 'skipped', reason: 'no FIREBASE_API_KEY' };
+    }
+  } catch (err) {
+    results.firebase = { error: err.message };
+  }
+
+  try {
+    const { sendMail, mode } = require('./src/utils/mailer');
+    results.mailer_mode = mode;
+    await sendMail(email, '[BRP AMS] Email Test', '<h2>BRP-AMS Email Test</h2><p>This confirms email delivery is working. Time: ' + new Date().toISOString() + '</p>');
+    results.smtp = { status: 'sent' };
+  } catch (err) {
+    results.smtp = { error: err.message };
+  }
+
+  res.json({ success: true, results });
+});
 
 // ── Error Handler ─────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

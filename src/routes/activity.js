@@ -517,9 +517,13 @@ if (startDate && endDate) {
       { $limit: 500 },
     ]);
 
-    const generatedDate = new Date().toLocaleDateString('en-IN', {
-      timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric',
-    });
+    const fmtDDMMYYYY = iso => {
+      if (!iso || iso === 'All') return iso || '—';
+      const [y, m, d] = String(iso).slice(0, 10).split('-');
+      return `${d}-${m}-${y}`;
+    };
+    const _now = new Date(new Date().getTime() + 5.5 * 60 * 60 * 1000);
+    const generatedDate = `${String(_now.getUTCDate()).padStart(2,'0')}-${String(_now.getUTCMonth()+1).padStart(2,'0')}-${_now.getUTCFullYear()}`;
     const pdfFilename = filter === 'all'
       ? 'activity_report_all.pdf'
       : `activity_report_${start}_${end}.pdf`;
@@ -589,7 +593,7 @@ if (startDate && endDate) {
     doc.rect(0, 0, PAGE_W, 56).fill(BLUE);
     doc.fillColor(WHITE).fontSize(16).font('Helvetica-Bold')
       .text('BRP — MSME Activity Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
-    const sub = `Period: ${start === 'All' ? 'All Time' : `${start} to ${end}`}  ·  Generated: ${generatedDate}  ·  Total Records: ${rows.length}`;
+    const sub = `Period: ${start === 'All' ? 'All Time' : `${fmtDDMMYYYY(start)} to ${fmtDDMMYYYY(end)}`}  ·  Generated: ${generatedDate}  ·  Total Records: ${rows.length}`;
     doc.fontSize(8.5).font('Helvetica')
       .text(sub, MARGIN, 34, { width: PAGE_W - MARGIN * 2, align: 'center' });
 
@@ -632,7 +636,7 @@ if (startDate && endDate) {
         doc.rect(MARGIN, y, tableW, thisRowH).fill(altIdx % 2 === 0 ? WHITE : BLUE_ALT);
 
         const vals = [
-          r.activity_date || '', r.emp_code || '', r.officer || '',
+          fmtDDMMYYYY(r.activity_date), r.emp_code || '', r.officer || '',
           r.msme_name || '', r.udyam_number || '',
           r.activity_type || r.sector || '', r.sub_activity || r.support_type || '',
           r.block_name || '', r.resolved_solution || '', r.end_results || '', r.remarks || '—',

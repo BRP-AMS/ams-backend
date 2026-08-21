@@ -281,11 +281,11 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
         'emp_id checkin_time checkout_time status'
       ).lean(),
       AttendanceRecord.find(
-        { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
+        { leave_status: 'Approved', leave_type: { $ne: null }, ...leaveFilter, ...empFilter },
         'emp_id leave_type'
       ).lean(),
       AttendanceRecord.find(
-        { duty_type: 'Leave', leave_status: 'Pending', ...leaveFilter, ...empFilter },
+        { leave_status: 'Pending', leave_type: { $ne: null }, ...leaveFilter, ...empFilter },
         'emp_id leave_type'
       ).lean(),
     ]);

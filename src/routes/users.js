@@ -129,27 +129,46 @@ router.get('/team/attendance-summary', authenticate, authorize('manager', 'admin
         $lookup: {
           from:     'attendancerecords',
           let:      { empId: '$_id' },
-          pipeline: [{ $match: { $expr: { $and: [
-            { $eq: ['$emp_id', '$$empId'] },
-            { $or: [
-              { $eq: ['$date', today] },
-              { $and: [{ $lte: ['$date', today] }, { $gte: ['$end_date', today] }] },
-            ]},
-          ]}}}],
+          pipeline: [
+            { $match: { $expr: { $and: [
+              { $eq: ['$emp_id', '$$empId'] },
+              { $or: [
+                { $eq: ['$date', today] },
+                { $and: [{ $lte: ['$date', today] }, { $gte: ['$end_date', today] }] },
+              ]},
+            ]}}},
+            { $sort: { duty_type: -1 } },
+          ],
           as: 'todayRecord',
         },
       },
       {
         $addFields: {
-          today_status:       { $arrayElemAt: ['$todayRecord.status',       0] },
-          today_duty:         { $arrayElemAt: ['$todayRecord.duty_type',    0] },
-          today_leave_status: { $arrayElemAt: ['$todayRecord.leave_status', 0] },
-          today_leave_type:   { $arrayElemAt: ['$todayRecord.leave_type',   0] },
-          checkin_time:       { $arrayElemAt: ['$todayRecord.checkin_time', 0] },
-          checkout_time:      { $arrayElemAt: ['$todayRecord.checkout_time',0] },
+          _leaveRec: {
+            $arrayElemAt: [
+              { $filter: { input: '$todayRecord', as: 'r', cond: { $ne: ['$$r.leave_type', null] } } },
+              0,
+            ],
+          },
+          _checkinRec: {
+            $arrayElemAt: [
+              { $filter: { input: '$todayRecord', as: 'r', cond: { $ne: ['$$r.checkin_time', null] } } },
+              0,
+            ],
+          },
         },
       },
-      { $project: { password_hash: 0, todayRecord: 0 } },
+      {
+        $addFields: {
+          today_status:       { $ifNull: ['$_leaveRec.status',       { $arrayElemAt: ['$todayRecord.status',       0] }] },
+          today_duty:         { $ifNull: ['$_leaveRec.duty_type',    { $arrayElemAt: ['$todayRecord.duty_type',    0] }] },
+          today_leave_status: '$_leaveRec.leave_status',
+          today_leave_type:   '$_leaveRec.leave_type',
+          checkin_time:       { $ifNull: ['$_checkinRec.checkin_time',  null] },
+          checkout_time:      { $ifNull: ['$_checkinRec.checkout_time', null] },
+        },
+      },
+      { $project: { password_hash: 0, todayRecord: 0, _leaveRec: 0, _checkinRec: 0 } },
       { $sort: { name: 1 } },
     ]);
 

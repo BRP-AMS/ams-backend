@@ -776,10 +776,10 @@ ws.getColumn(6).width = 15;
         if(ci>0){
           if(y+RH>PH-60){addPage();y=drawTitle(28);}
           else{
-            // Visual gap + rule between each 15-day block so they read as
-            // separate mini-tables instead of one continuous, unbroken grid.
+            // Visual gap + a light rule between each 15-day block so they read
+            // as separate mini-tables instead of one continuous, unbroken grid.
             y+=8;
-            doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(1.5).strokeColor('#1F3864').stroke();
+            doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#94A3B8').stroke();
             doc.lineWidth(1);
           }
         }
@@ -788,6 +788,12 @@ ws.getColumn(6).width = 15;
           if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
           const bg=idx%2===0?'#F9F9F9':'#FFF';
           doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
+          // Vertical dividers between Emp code / Name / Designation — the
+          // header row already has these per-column, but the data rows only
+          // draw one wide background stripe with no internal separators.
+          doc.lineWidth(0.5).strokeColor('#DDD');
+          [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
+          doc.lineWidth(1);
           doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
           doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
           doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
@@ -827,6 +833,9 @@ ws.getColumn(6).width = 15;
         if(y+RH>PH-60){addPage();y=28;}
         const bg=idx%2===0?'#F9F9F9':'#FFF';
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
+        doc.lineWidth(0.5).strokeColor('#DDD');
+        [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
+        doc.lineWidth(1);
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
         doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
         doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
@@ -840,7 +849,7 @@ ws.getColumn(6).width = 15;
 
       // Legend — separated from the table with its own rule line + gap
       y+=10; if(y+20>PH-80){addPage();y=40;}
-      doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#AAAAAA').stroke();
+      doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#CBD5E1').stroke();
       y+=4;
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},

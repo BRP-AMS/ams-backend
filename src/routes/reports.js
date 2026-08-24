@@ -712,6 +712,7 @@ ws.getColumn(6).width = 15;
       res.setHeader('Content-Disposition',`attachment; filename="BRP_Attendance_${startDate}_to_${endDate}.pdf"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
+      doc.lineWidth(0.5); // light grid lines throughout — table borders were invisible before, don't overcorrect to heavy
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
       const CC=52,CN=130,CD=64,CT=40;
@@ -780,7 +781,7 @@ ws.getColumn(6).width = 15;
             // as separate mini-tables instead of one continuous, unbroken grid.
             y+=8;
             doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#94A3B8').stroke();
-            doc.lineWidth(1);
+            doc.lineWidth(0.5);
           }
         }
         y=drawColHdr(y,chunkDates,'Subtotal');
@@ -793,7 +794,7 @@ ws.getColumn(6).width = 15;
           // draw one wide background stripe with no internal separators.
           doc.lineWidth(0.5).strokeColor('#DDD');
           [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
-          doc.lineWidth(1);
+          doc.lineWidth(0.5);
           doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
           doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
           doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
@@ -835,7 +836,7 @@ ws.getColumn(6).width = 15;
         doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
         doc.lineWidth(0.5).strokeColor('#DDD');
         [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
-        doc.lineWidth(1);
+        doc.lineWidth(0.5);
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
         doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
         doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});

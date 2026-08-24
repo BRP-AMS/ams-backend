@@ -733,11 +733,11 @@ ws.getColumn(6).width = 15;
       };
 
       const drawTitle=y=>{
-        doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
+        doc.rect(ML,y,tW,20).fillAndStroke('#FFF','#AAA');
         doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
-        doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
+        doc.rect(ML,y+20,tW,14).fillAndStroke('#FFF','#AAA');
         doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
-        doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
+        doc.rect(ML,y+34,tW,12).fillAndStroke('#FFF','#AAA');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
            .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
         return y+46;
@@ -746,13 +746,13 @@ ws.getColumn(6).width = 15;
       const drawColHdr=(y,chunkDates,totalLabel)=>{
         const HRH = 32;   // taller header row to fit day-num + weekday + month
         [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
-          doc.rect(x,y,w,HRH).fill('#FFF').stroke('#AAA');
+          doc.rect(x,y,w,HRH).fillAndStroke('#FFF','#AAA');
           doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
              .text(l,x+2,y+(HRH-9)/2,{width:w-4,align:'center'});
         });
         chunkDates.forEach((iso,i)=>{
           const x=xD+i*dW;
-          doc.rect(x,y,dW,HRH).fill('#FFF').stroke('#AAA');
+          doc.rect(x,y,dW,HRH).fillAndStroke('#FFF','#AAA');
           doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
              .text(String(dayNum(iso)),x+1,y+3,{width:dW-2,align:'center'});
           doc.fillColor('#555').fontSize(5).font('Helvetica')
@@ -761,8 +761,8 @@ ws.getColumn(6).width = 15;
              .text(monAbbr(iso),x+1,y+19,{width:dW-2,align:'center'});
         });
         // Short last chunk (< CHUNK days) — fill the remaining columns so the grid stays a fixed width
-        for(let i=chunkDates.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,HRH).fill('#F5F5F5').stroke('#AAA');
-        doc.rect(xT,y,CT,HRH).fill('#FFF').stroke('#AAA');
+        for(let i=chunkDates.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,HRH).fillAndStroke('#F5F5F5','#AAA');
+        doc.rect(xT,y,CT,HRH).fillAndStroke('#FFF','#AAA');
         doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
            .text(totalLabel,xT+2,y+(HRH-9)/2,{width:CT-4,align:'center'});
         return y+HRH;
@@ -787,7 +787,7 @@ ws.getColumn(6).width = 15;
         matrix.forEach(({emp,cells},idx)=>{
           if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
           const bg=idx%2===0?'#F9F9F9':'#FFF';
-          doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
+          doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
           // Vertical dividers between Emp code / Name / Designation — the
           // header row already has these per-column, but the data rows only
           // draw one wide background stripe with no internal separators.
@@ -803,7 +803,7 @@ ws.getColumn(6).width = 15;
             const x=xD+i*dW;
             const isRed=code==='L'||code==='A';
             const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
-            doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
+            doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
               if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
               const iconSize = Math.min(dW-3, RH-2);
               doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
@@ -816,8 +816,8 @@ ws.getColumn(6).width = 15;
             }
             if(code==='P'||code==='OD') pres++;
           });
-          for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fill('#F5F5F5').stroke('#CCC');
-          doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
+          for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fillAndStroke('#F5F5F5','#CCC');
+          doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
           doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+7,{width:CT-4,align:'center'});
           y+=RH;
         });
@@ -826,13 +826,13 @@ ws.getColumn(6).width = 15;
       // ── Grand Total block — one row per employee, full-period total ─────────
       if(y+RH*2>PH-60){addPage();y=28;}
       y+=6;
-      doc.rect(ML,y,tW,16).fill('#1F3864').stroke('#1F3864');
+      doc.rect(ML,y,tW,16).fillAndStroke('#1F3864','#1F3864');
       doc.fillColor('#FFFFFF').fontSize(8).font('Helvetica-Bold').text('GRAND TOTAL — Full Period',ML,y+4,{width:tW,align:'center'});
       y+=16;
       matrix.forEach(({emp,cells},idx)=>{
         if(y+RH>PH-60){addPage();y=28;}
         const bg=idx%2===0?'#F9F9F9':'#FFF';
-        doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
+        doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
         doc.lineWidth(0.5).strokeColor('#DDD');
         [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
         doc.lineWidth(1);
@@ -840,9 +840,9 @@ ws.getColumn(6).width = 15;
         doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
         doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
         const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
-        doc.rect(xD,y,CHUNK*dW,RH).fill('#EEF2FF').stroke('#CCC');
+        doc.rect(xD,y,CHUNK*dW,RH).fillAndStroke('#EEF2FF','#CCC');
         doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+7,{width:CHUNK*dW,align:'center'});
-        doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
+        doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+7,{width:CT-4,align:'center'});
         y+=RH;
       });
@@ -859,7 +859,7 @@ ws.getColumn(6).width = 15;
        {code:'WO',label:'Week Off',red:false},
       ].forEach(({code,label,red})=>{
         const bw=14,lw=115;
-        doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
+        doc.rect(lx,y,bw,10).fillAndStroke(red?'#FF4444':'#FFFFFF','#999');
         doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
         lx+=bw+lw+10;
@@ -869,7 +869,7 @@ ws.getColumn(6).width = 15;
         if (PIN_ERROR_PNG_BUFFER) {
           doc.image(PIN_ERROR_PNG_PATH, lx, y-1, {width:bw, height:bw*84/64});
         } else {
-          doc.rect(lx,y,bw,10).fill('#FFFFFF').stroke('#999');
+          doc.rect(lx,y,bw,10).fillAndStroke('#FFFFFF','#999');
           doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',lx+1,y+2,{width:bw-2,align:'center'});
         }
         doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
@@ -886,11 +886,11 @@ ws.getColumn(6).width = 15;
       y+=4; if(y+130>PH-60){addPage();y=40;}
       const SW=240,SRH=16,SX=ML; let sy=y;
       const pdfRow=(label,value,type='row',rowH=SRH)=>{
-        if(type==='title'){doc.rect(SX,sy,SW,rowH).fill('#FFF').stroke('#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX+4,sy+5,{width:SW-8,align:'center'});}
-        else if(type==='sub'){doc.rect(SX,sy,SW,rowH).fill('#E8EDF4').stroke('#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
+        if(type==='title'){doc.rect(SX,sy,SW,rowH).fillAndStroke('#FFF','#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX+4,sy+5,{width:SW-8,align:'center'});}
+        else if(type==='sub'){doc.rect(SX,sy,SW,rowH).fillAndStroke('#E8EDF4','#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
         else{
-          doc.rect(SX,sy,SW*0.72,rowH).fill('#FFF').stroke('#000');
-          doc.rect(SX+SW*0.72,sy,SW*0.28,rowH).fill('#FFF').stroke('#000');
+          doc.rect(SX,sy,SW*0.72,rowH).fillAndStroke('#FFF','#000');
+          doc.rect(SX+SW*0.72,sy,SW*0.28,rowH).fillAndStroke('#FFF','#000');
           doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX+4,sy+3,{width:SW*0.68});
           if(value!==undefined) doc.text(String(value),SX+SW*0.72,sy+3,{width:SW*0.26,align:'center'});
         }
@@ -944,10 +944,10 @@ ws.getColumn(6).width = 15;
         const C2 = TW * 0.18;
         const C3 = TW * 0.18;
 
-        doc.rect(SX,        sy, C0, SRH).fill('#E8EDF4').stroke('#000');
-        doc.rect(SX+C0,     sy, C1, SRH).fill('#D1FAE5').stroke('#000');
-        doc.rect(SX+C0+C1,  sy, C2, SRH).fill('#FEF3C7').stroke('#000');
-        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill('#FEE2E2').stroke('#000');
+        doc.rect(SX,        sy, C0, SRH).fillAndStroke('#E8EDF4','#000');
+        doc.rect(SX+C0,     sy, C1, SRH).fillAndStroke('#D1FAE5','#000');
+        doc.rect(SX+C0+C1,  sy, C2, SRH).fillAndStroke('#FEF3C7','#000');
+        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke('#FEE2E2','#000');
 
         doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    sy+4, {width:C0-8});
         doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   sy+4, {width:C1,align:'center'});
@@ -957,10 +957,10 @@ ws.getColumn(6).width = 15;
 
         matrix.forEach(({ emp, cells }, idx) => {
           const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-          doc.rect(SX,          sy, C0, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0,       sy, C1, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1,    sy, C2, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX,          sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0,       sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0+C1,    sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
 
           const pres = cells.filter(c => c==='P'||c==='OD').length;
           const lv   = cells.filter(c => c==='L').length;

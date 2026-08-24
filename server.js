@@ -115,7 +115,6 @@ const limiter = rateLimit({
   max:             600,
   standardHeaders: true,
   legacyHeaders:   false,
-  keyGenerator:    (req) => req.ip || req.headers['x-forwarded-for'] || 'unknown',
 });
 app.use('/api/', limiter);
 

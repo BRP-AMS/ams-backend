@@ -774,16 +774,7 @@ ws.getColumn(6).width = 15;
 
       let y=drawTitle(ML);
       chunks.forEach((chunkDates,ci)=>{
-        if(ci>0){
-          if(y+RH>PH-60){addPage();y=drawTitle(28);}
-          else{
-            // Visual gap + a light rule between each 15-day block so they read
-            // as separate mini-tables instead of one continuous, unbroken grid.
-            y+=8;
-            doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#94A3B8').stroke();
-            doc.lineWidth(0.5);
-          }
-        }
+        if(ci>0 && y+RH>PH-60){addPage();y=drawTitle(28);}
         y=drawColHdr(y,chunkDates,'Subtotal');
         matrix.forEach(({emp,cells},idx)=>{
           if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}

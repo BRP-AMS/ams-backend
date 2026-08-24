@@ -717,7 +717,7 @@ ws.getColumn(6).width = 15;
       const CC=52,CN=130,CD=64,CT=40;
       const CHUNK=15; // days per row — long ranges wrap to a new row instead of squeezing every day into one line
       const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/CHUNK);
-      const RH=14;
+      const RH=24; // tall enough for a two-line employee name to wrap without spilling into the row below
       const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+CHUNK*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
@@ -779,9 +779,9 @@ ws.getColumn(6).width = 15;
           if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
           const bg=idx%2===0?'#F9F9F9':'#FFF';
           doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
-          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-          doc.font('Helvetica-Bold').fontSize(7).text(truncateToWidth(emp.name,CN-4),xN+2,y+3,{width:CN-4,lineBreak:false});
-          doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false});
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
+          doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
+          doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
           const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
           let pres=0;
           chunkCells.forEach((code,i)=>{
@@ -793,17 +793,17 @@ ws.getColumn(6).width = 15;
               const iconSize = Math.min(dW-3, RH-2);
               doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
             } else if (code === 'LOC_ERR') {
-              doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+3,{width:dW-2,align:'center'});
+              doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+8,{width:dW-2,align:'center'});
             } else
               if(code){
               doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
-                 .text(code,x+1,y+3,{width:dW-2,align:'center'});
+                 .text(code,x+1,y+8,{width:dW-2,align:'center'});
             }
             if(code==='P'||code==='OD') pres++;
           });
           for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fill('#F5F5F5').stroke('#CCC');
           doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
-          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+3,{width:CT-4,align:'center'});
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+7,{width:CT-4,align:'center'});
           y+=RH;
         });
       });
@@ -818,14 +818,14 @@ ws.getColumn(6).width = 15;
         if(y+RH>PH-60){addPage();y=28;}
         const bg=idx%2===0?'#F9F9F9':'#FFF';
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').fontSize(7).text(truncateToWidth(emp.name,CN-4),xN+2,y+3,{width:CN-4,lineBreak:false});
-        doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false});
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
+        doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
+        doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
         const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
         doc.rect(xD,y,CHUNK*dW,RH).fill('#EEF2FF').stroke('#CCC');
-        doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+3,{width:CHUNK*dW,align:'center'});
+        doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+7,{width:CHUNK*dW,align:'center'});
         doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+3,{width:CT-4,align:'center'});
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+7,{width:CT-4,align:'center'});
         y+=RH;
       });
 

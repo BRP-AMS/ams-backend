@@ -384,12 +384,12 @@ const GeoCache = mongoose.model('GeoCache', geoCacheSchema);
 
 // ── Holiday Master ────────────────────────────────────────────────────────
 const holidaySchema = new mongoose.Schema({
-  date:     { type: String, required: true, unique: true }, // 'YYYY-MM-DD'
+  date:     { type: String, required: true, unique: true }, // 'YYYY-MM-DD' — unique already creates the index
   name:     { type: String, required: true },
   type:     { type: String, enum: ['public', 'state', 'restricted'], default: 'public' },
   added_by: { type: String, ref: 'User', default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
-holidaySchema.index({ date: 1 });
+// NOTE: no explicit schema.index({ date: 1 }) — unique:true above already creates it
 const Holiday = mongoose.model('Holiday', holidaySchema);
 
 // ── ODA (On-Duty Away) Requests ────────────────────────────────────────────

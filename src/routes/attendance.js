@@ -473,7 +473,16 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     }
     // attendance.js — checkin
 const currentUserInfo = await User.findById(req.user.id).select('name profile_photo_path').lean();
-const faceResult = await verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype);
+let faceResult;
+try {
+  faceResult = await Promise.race([
+    verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
+  ]);
+} catch (faceErr) {
+  console.error('[CheckIn] Face verify error/timeout:', faceErr.message);
+  faceResult = { match: false, confidence: 0, reason: 'Face verification is temporarily unavailable. Please try again.' };
+}
 if (!faceResult.match) {
   return res.status(400).json({
     success:        false,
@@ -694,8 +703,17 @@ if (!req.file) {
   return res.status(400).json({ success: false, message: 'Checkout selfie is required.' });
 }
 // attendance.js — checkout
- const checkoutUser = await User.findById(req.user.id).select('profile_photo_path').lean();
-    const coFaceResult = await verifyFace(req.file.buffer, checkoutUser?.profile_photo_path, req.file.mimetype);
+const checkoutUser = await User.findById(req.user.id).select('profile_photo_path').lean();
+let coFaceResult;
+try {
+  coFaceResult = await Promise.race([
+    verifyFace(req.file.buffer, checkoutUser?.profile_photo_path, req.file.mimetype),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
+  ]);
+} catch (faceErr) {
+  console.error('[CheckOut] Face verify error/timeout:', faceErr.message);
+  coFaceResult = { match: false, confidence: 0, reason: 'Face verification is temporarily unavailable. Please try again.' };
+}
 if (!coFaceResult.match) {
   return res.status(400).json({
     success:        false,

@@ -235,6 +235,16 @@ const confidenceLevels = [0.3, 0.15];
   return null;
 }
 
+// ── 30-second hard timeout wrapper ────────────────────────────────────────
+function withTimeout(promise, ms, label = '') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`[FaceVerify] ${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 // ── Main export ────────────────────────────────────────────────────────────
 async function verifyFace(selfieBuffer, profilePhotoUrl, mimeType = 'image/jpeg') {
 

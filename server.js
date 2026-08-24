@@ -383,10 +383,24 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ success: false, message });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🚀 BRP Attendance API running on http://localhost:${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/api/health`);
   console.log(`\nRun 'npm run seed' to populate demo data\n`);
+});
+
+// Graceful shutdown — Render sends SIGTERM before killing the container.
+// Stop accepting new connections and let in-flight requests finish (max 15s).
+process.on('SIGTERM', () => {
+  console.log('[SIGTERM] Graceful shutdown starting…');
+  server.close(() => {
+    console.log('[SIGTERM] All connections closed — exiting');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.error('[SIGTERM] Forced exit after 15s timeout');
+    process.exit(1);
+  }, 15000);
 });
 
 module.exports = app;

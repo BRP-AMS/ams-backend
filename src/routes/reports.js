@@ -865,19 +865,21 @@ ws.getColumn(6).width = 15;
       // Summary
       y+=4; if(y+130>PH-60){addPage();y=40;}
       const SW=240,SRH=16,SX=ML; let sy=y;
-      const pdfRow=(label,value,type='row')=>{
-        if(type==='title'){doc.rect(SX,sy,SW,SRH).fill('#FFF').stroke('#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
-        else if(type==='sub'){doc.rect(SX,sy,SW,SRH).fill('#E8EDF4').stroke('#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
+      const pdfRow=(label,value,type='row',rowH=SRH)=>{
+        if(type==='title'){doc.rect(SX,sy,SW,rowH).fill('#FFF').stroke('#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX+4,sy+5,{width:SW-8,align:'center'});}
+        else if(type==='sub'){doc.rect(SX,sy,SW,rowH).fill('#E8EDF4').stroke('#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
         else{
-          doc.rect(SX,sy,SW*0.72,SRH).fill('#FFF').stroke('#000');
-          doc.rect(SX+SW*0.72,sy,SW*0.28,SRH).fill('#FFF').stroke('#000');
+          doc.rect(SX,sy,SW*0.72,rowH).fill('#FFF').stroke('#000');
+          doc.rect(SX+SW*0.72,sy,SW*0.28,rowH).fill('#FFF').stroke('#000');
           doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX+4,sy+3,{width:SW*0.68});
           if(value!==undefined) doc.text(String(value),SX+SW*0.72,sy+3,{width:SW*0.26,align:'center'});
         }
-        sy+=SRH;
+        sy+=rowH;
       };
+      // Title row gets extra height — the employee's full name + "Summary" often
+      // wraps to two lines at this width, and the fixed SRH was too short for that.
       const summaryTitle=role==='employee'?`${matrix[0]?.emp.name} Summary`:role==='manager'?'Team Summary':'Total Summary';
-      pdfRow(summaryTitle,undefined,'title');
+      pdfRow(summaryTitle,undefined,'title',34);
       pdfRow('No of Total Days',totalDays);
       pdfRow('No of Weekoff (WO)',woCount);
       pdfRow('No of Holidays (H)',holCount);

@@ -9,7 +9,6 @@ const { authenticate, authorize }                         = require('../middlewa
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
 const { employeeFolderPath } = require('../config/cloudinary');
-const { verifyFace } = require('../utils/faceVerify');
 // ── File-naming helper ───────────────────────────────────────────────────
 const makeDocName = (user, docType, ext = '') => {
   const name  = (user.name || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -471,31 +470,9 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
-    // attendance.js — checkin face verification
-    const currentUserInfo = await User.findById(req.user.id).select('name profile_photo_path').lean();
-    let faceResult;
-    let faceSystemError = false;
-    try {
-      faceResult = await Promise.race([
-        verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
-      ]);
-    } catch (faceErr) {
-      // System error (TF crash, timeout, OOM) — NOT the employee's fault.
-      // Accept the check-in and flag it for manual review by manager.
-      console.error('[CheckIn] Face verify system error — allowing check-in with manual_review flag:', faceErr.message);
-      faceResult     = { match: true, confidence: 0 };
-      faceSystemError = true;
-    }
-    if (!faceResult.match) {
-      // Genuine face mismatch — block the check-in
-      return res.status(400).json({
-        success:         false,
-        faceVerifyError: true,
-        faceConfidence:  faceResult.confidence,
-        message:         faceResult.reason,
-      });
-    }
+    // Face verification (TF) removed — selfie is still captured/stored, not matched.
+    const faceResult = { match: true, confidence: 0 };
+    const faceSystemError = false;
     const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 
     if (dutyType === 'On Duty' && !sector)
@@ -606,17 +583,8 @@ router.put('/:id/retake-face', authenticate, authorize('employee'), upload.singl
     const _rtExt = path.extname(req.file.originalname).replace('.', '') || 'jpg';
     const newSelfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'retake_selfie', _rtExt));
 
-   // attendance.js — retake-face
-const retakeUser = await User.findById(req.user.id).select('profile_photo_path').lean();
-const retakeResult = await verifyFace(req.file.buffer, retakeUser?.profile_photo_path, req.file.mimetype);
-if (!retakeResult.match) {
-  return res.status(400).json({
-    success:        false,
-    faceVerifyError: true,
-    faceConfidence: retakeResult.confidence,
-    message:        retakeResult.reason,
-  });
-}
+   // Face verification (TF) removed — retake just replaces the stored selfie.
+const retakeResult = { match: true, confidence: 0 };
 await AttendanceRecord.findByIdAndUpdate(req.params.id, {
   $set: { face_verification_status: 'verified', face_confidence: retakeResult.confidence, selfie_path: newSelfiePath },
 });
@@ -707,28 +675,9 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
 if (!req.file) {
   return res.status(400).json({ success: false, message: 'Checkout selfie is required.' });
 }
-// attendance.js — checkout
-const checkoutUser = await User.findById(req.user.id).select('profile_photo_path').lean();
-let coFaceResult;
-let coFaceSystemError = false;
-try {
-  coFaceResult = await Promise.race([
-    verifyFace(req.file.buffer, checkoutUser?.profile_photo_path, req.file.mimetype),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
-  ]);
-} catch (faceErr) {
-  console.error('[CheckOut] Face verify system error — allowing checkout with manual_review flag:', faceErr.message);
-  coFaceResult     = { match: true, confidence: 0 };
-  coFaceSystemError = true;
-}
-if (!coFaceResult.match) {
-  return res.status(400).json({
-    success:        false,
-    faceVerifyError: true,
-    faceConfidence: coFaceResult.confidence,
-    message:        coFaceResult.reason,
-  });
-}
+// Face verification (TF) removed — checkout selfie still captured/stored, not matched.
+const coFaceResult = { match: true, confidence: 0 };
+const coFaceSystemError = false;
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
     const capturedAtBody  = req.body?.capturedAt;

@@ -773,7 +773,16 @@ ws.getColumn(6).width = 15;
 
       let y=drawTitle(ML);
       chunks.forEach((chunkDates,ci)=>{
-        if(ci>0 && y+RH>PH-60){addPage();y=drawTitle(28);}
+        if(ci>0){
+          if(y+RH>PH-60){addPage();y=drawTitle(28);}
+          else{
+            // Visual gap + rule between each 15-day block so they read as
+            // separate mini-tables instead of one continuous, unbroken grid.
+            y+=8;
+            doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(1.5).strokeColor('#1F3864').stroke();
+            doc.lineWidth(1);
+          }
+        }
         y=drawColHdr(y,chunkDates,'Subtotal');
         matrix.forEach(({emp,cells},idx)=>{
           if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
@@ -829,8 +838,10 @@ ws.getColumn(6).width = 15;
         y+=RH;
       });
 
-      // Legend
+      // Legend — separated from the table with its own rule line + gap
       y+=10; if(y+20>PH-80){addPage();y=40;}
+      doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#AAAAAA').stroke();
+      y+=4;
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
@@ -909,7 +920,7 @@ ws.getColumn(6).width = 15;
 
   pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
   pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
-  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
+  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length, 'row', 26);
   pdfRow('No of Emergency Leaves',                 emergencyRecs.length);
   pdfRow('No of Casual Leaves',                    casualRecs.length);
   pdfRow('Total Effective Leaves',                 effectiveLeaves);

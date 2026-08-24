@@ -339,7 +339,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const [records, approvedLeaves, pendingLeaves] = await Promise.all([
       AttendanceRecord.find(
         { date: today, checkin_time: { $ne: null }, ...empFilter },
-        'emp_id checkin_time checkout_time status'
+        'emp_id checkin_time checkout_time status attendance_type leave_type'
       ).lean(),
       AttendanceRecord.find(
         { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
@@ -354,11 +354,14 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const statusMap = {};
     records.forEach(r => {
       statusMap[String(r.emp_id)] = {
-        checkedIn:   true,
-        checkedOut:  !!r.checkout_time,
-        checkinTime:  r.checkin_time  || null,
-        checkoutTime: r.checkout_time || null,
-        status:       r.status,
+        recordId:        r._id,
+        checkedIn:       true,
+        checkedOut:      !!r.checkout_time,
+        checkinTime:      r.checkin_time  || null,
+        checkoutTime:     r.checkout_time || null,
+        status:           r.status,
+        attendanceType:   r.attendance_type || null,
+        leaveType:        r.leave_type      || null,
       };
     });
     approvedLeaves.forEach(r => {
@@ -1228,6 +1231,58 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'REJECT', entity_type: 'attendance', entity_id: record._id, old_value: record.status, new_value: 'Rejected' });
     res.json({ success: true, message: 'Rejected' });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/regularize
+// Admin-only manual correction for a day left Partial/Irregular/Emergency
+// Leave/Half Day because the employee couldn't check in/out on time (e.g.
+// during a server outage). Marks the day Regular/Approved with an audit trail.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/regularize', authenticate, authorize('admin'), [
+  body('remark').trim().notEmpty().withMessage('A remark is required to regularize attendance'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { remark } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+
+    const isRegularizable =
+      ['Partial', 'Irregular'].includes(record.attendance_type) ||
+      ['Emergency Leave', 'Half Day'].includes(record.leave_type);
+    if (!isRegularizable) {
+      return res.status(400).json({ success: false, message: 'Only Partial, Irregular, Emergency Leave, or Half Day records can be regularized.' });
+    }
+
+    const update = {
+      status:          'Approved',
+      attendance_type: 'Regular',
+      leave_type:       null,
+      leave_status:      null,
+      admin_remark:     remark,
+      manager_remark:  `Regularized by Admin: ${remark}`,
+      actioned_by:      req.user.id,
+      actioned_at:      new Date(),
+    };
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
+
+    await notify(
+      record.emp_id, '✅ Attendance Regularized',
+      `Your attendance for ${record.date} has been manually regularized by Admin: ${remark}`,
+      'success', record._id, '/employee/history'
+    );
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_REGULARIZE',
+      entity_type: 'attendance', entity_id: record._id,
+      old_value: record.status, new_value: 'Approved',
+    });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    res.json({ success: true, message: 'Attendance regularized', data: formatRecord(updated) });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 

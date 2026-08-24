@@ -131,10 +131,6 @@ const buildLocationText = async (storedAddress, lat, lng) => {
 const IST      = 'Asia/Kolkata';
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: IST });
 const toObjId  = id => { try { return new mongoose.Types.ObjectId(String(id)); } catch { return id; } };
-const yesterdayIST = () => {
-  const d = new Date(); d.setDate(d.getDate()-1);
-  return d.toLocaleDateString('en-CA', { timeZone: IST });
-};
 
 const expandDates = (start, end) => {
   const out = [];
@@ -270,14 +266,12 @@ router.get('/export',
     if (!startDate||!endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    // Cap endDate to yesterday — today is never shown (incomplete day)
-    if (endDate >= todayIST()) endDate = yesterdayIST();
+    // Future/today dates are allowed — they render as blank (or WO/H) in the
+    // matrix below since attendance hasn't happened yet, rather than being cut off.
     if (startDate > endDate)
-      return res.status(400).json({success:false,message:'No completed dates in range. Report covers up to yesterday.'});
+      return res.status(400).json({success:false,message:'Start date must be on or before end date.'});
 
     const dates      = expandDates(startDate, endDate);
-    const multiMonth = new Date(startDate+'T00:00:00+05:30').getMonth() !==
-                       new Date(endDate  +'T00:00:00+05:30').getMonth();
     const totalDays  = dates.length;
  const woCount    = dates.filter(isNonWorkingDay).length;
     const holCount   = dates.filter(d => !isNonWorkingDay(d) && isHoliday(d)).length;
@@ -366,6 +360,7 @@ router.get('/export',
     }
 
     // ── Build cell matrix ──────────────────────────────────────────────────────
+    const todayReport = todayIST();
     const matrix = employees.map(emp => {
       const joinDate = emp.created_at
         ? new Date(emp.created_at).toLocaleDateString('en-CA', { timeZone: IST })
@@ -377,8 +372,9 @@ router.get('/export',
         emp,
         cells: dates.map(iso => {
           if (isNonWorkingDay(iso))           return 'WO'; // Sunday or 2nd/4th Sat
-          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           if (isHoliday(iso))                 return 'H';  // public holiday
+          if (iso > todayReport)              return '';   // future — hasn't happened yet
+          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           const rec = recIdx[String(emp._id)]?.[iso];
           return toCode(rec, ab, ad);
         }),
@@ -445,7 +441,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
-        ws.getRow(4).height=multiMonth?38:26;
+        ws.getRow(4).height=38;
         ws.getColumn(2).width=9; ws.getColumn(3).width=16; ws.getColumn(4).width=14;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
         const setHdr=(col,val)=>{
@@ -454,7 +450,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           ws.getColumn(col).width=col===2?9:col===3?16:col===4?14:4.2;
         };
         setHdr(2,'Emp code'); setHdr(3,'Employee Name'); setHdr(4,'Designation');
-        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`:`${dayNum(iso)}\n${dayAbbr(iso)}`));
+        dates.forEach((iso,i)=>setHdr(5+i,`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -718,79 +714,108 @@ ws.getColumn(6).width = 15;
       doc.pipe(res);
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
-      const CC=52,CN=105,CD=64,CT=36;
-      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/dates.length);
+      const CC=52,CN=130,CD=64,CT=40;
+      const CHUNK=15; // days per row — long ranges wrap to a new row instead of squeezing every day into one line
+      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/CHUNK);
       const RH=14;
-      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+dates.length*dW,tW=xT+CT-ML;
+      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+CHUNK*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
-     const drawHdr=y=>{
-  doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
-  doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
-  doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-     .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+      const drawTitle=y=>{
+        doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
+        doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
+        doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
+        doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
+        doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
+           .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+        return y+46;
+      };
 
-  const y2=y+46;
-  const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
+      const drawColHdr=(y,chunkDates,totalLabel)=>{
+        const HRH = 32;   // taller header row to fit day-num + weekday + month
+        [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
+          doc.rect(x,y,w,HRH).fill('#FFF').stroke('#AAA');
+          doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+             .text(l,x+2,y+(HRH-9)/2,{width:w-4,align:'center'});
+        });
+        chunkDates.forEach((iso,i)=>{
+          const x=xD+i*dW;
+          doc.rect(x,y,dW,HRH).fill('#FFF').stroke('#AAA');
+          doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
+             .text(String(dayNum(iso)),x+1,y+3,{width:dW-2,align:'center'});
+          doc.fillColor('#555').fontSize(5).font('Helvetica')
+             .text(dayAbbr(iso),x+1,y+11,{width:dW-2,align:'center'});
+          doc.fillColor('#888').fontSize(5).font('Helvetica')
+             .text(monAbbr(iso),x+1,y+19,{width:dW-2,align:'center'});
+        });
+        // Short last chunk (< CHUNK days) — fill the remaining columns so the grid stays a fixed width
+        for(let i=chunkDates.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,HRH).fill('#F5F5F5').stroke('#AAA');
+        doc.rect(xT,y,CT,HRH).fill('#FFF').stroke('#AAA');
+        doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+           .text(totalLabel,xT+2,y+(HRH-9)/2,{width:CT-4,align:'center'});
+        return y+HRH;
+      };
 
-  [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
-    doc.rect(x,y2,w,HRH).fill('#FFF').stroke('#AAA');
-    doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
-       .text(l,x+2,y2+(HRH-9)/2,{width:w-4,align:'center'});
-  });
+      const chunks=[];
+      for(let i=0;i<dates.length;i+=CHUNK) chunks.push(dates.slice(i,i+CHUNK));
 
-  dates.forEach((iso,i)=>{
-    const x=xD+i*dW;
-    doc.rect(x,y2,dW,HRH).fill('#FFF').stroke('#AAA');
-    doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
-       .text(String(dayNum(iso)),x+1,y2+3,{width:dW-2,align:'center'});
-    doc.fillColor('#555').fontSize(5).font('Helvetica')
-       .text(dayAbbr(iso),x+1,y2+11,{width:dW-2,align:'center'});
-    if (multiMonth) {
-      doc.fillColor('#888').fontSize(5).font('Helvetica')
-         .text(monAbbr(iso),x+1,y2+19,{width:dW-2,align:'center'});
-    }
-  });
+      let y=drawTitle(ML);
+      chunks.forEach((chunkDates,ci)=>{
+        if(ci>0 && y+RH>PH-60){addPage();y=drawTitle(28);}
+        y=drawColHdr(y,chunkDates,'Subtotal');
+        matrix.forEach(({emp,cells},idx)=>{
+          if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
+          const bg=idx%2===0?'#F9F9F9':'#FFF';
+          doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
+          doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,lineBreak:false,ellipsis:true});
+          doc.font('Helvetica-Bold').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
+          const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
+          let pres=0;
+          chunkCells.forEach((code,i)=>{
+            const x=xD+i*dW;
+            const isRed=code==='L'||code==='A';
+            const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+            doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
+              if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
+              const iconSize = Math.min(dW-3, RH-2);
+              doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
+            } else if (code === 'LOC_ERR') {
+              doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+3,{width:dW-2,align:'center'});
+            } else
+              if(code){
+              doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+                 .text(code,x+1,y+3,{width:dW-2,align:'center'});
+            }
+            if(code==='P'||code==='OD') pres++;
+          });
+          for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fill('#F5F5F5').stroke('#CCC');
+          doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+3,{width:CT-4,align:'center'});
+          y+=RH;
+        });
+      });
 
-  doc.rect(xT,y2,CT,HRH).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
-     .text('Total',xT+2,y2+(HRH-9)/2,{width:CT-4,align:'center'});
-
-  return y2+HRH;
-};
-      let y=drawHdr(ML);
+      // ── Grand Total block — one row per employee, full-period total ─────────
+      if(y+RH*2>PH-60){addPage();y=28;}
+      y+=6;
+      doc.rect(ML,y,tW,16).fill('#1F3864').stroke('#1F3864');
+      doc.fillColor('#FFFFFF').fontSize(8).font('Helvetica-Bold').text('GRAND TOTAL — Full Period',ML,y+4,{width:tW,align:'center'});
+      y+=16;
       matrix.forEach(({emp,cells},idx)=>{
-        if(y+RH>PH-60){addPage();y=drawHdr(28);}
+        if(y+RH>PH-60){addPage();y=28;}
         const bg=idx%2===0?'#F9F9F9':'#FFF';
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
-        doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
-        doc.font('Helvetica').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
-        let pres=0,locErr=0;
-        cells.forEach((code,i)=>{
-          const x=xD+i*dW;
-          const isRed=code==='L'||code==='A';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
-          doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
-            if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
-            const iconSize = Math.min(dW-3, RH-2);
-            doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
-          } else if (code === 'LOC_ERR') {
-            doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+3,{width:dW-2,align:'center'});
-          } else
-            if(code){
-            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
-               .text(code,x+1,y+3,{width:dW-2,align:'center'});
-          }
-          if(code==='P'||code==='OD') pres++;
-           if(code==='LOC_ERR') locErr++;
-        });
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
+        doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,lineBreak:false,ellipsis:true});
+        doc.font('Helvetica-Bold').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
+        const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
+        doc.rect(xD,y,CHUNK*dW,RH).fill('#EEF2FF').stroke('#CCC');
+        doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+3,{width:CHUNK*dW,align:'center'});
         doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+3,{width:CT-4,align:'center'});
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+3,{width:CT-4,align:'center'});
         y+=RH;
       });
 
@@ -803,25 +828,26 @@ ws.getColumn(6).width = 15;
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
       ].forEach(({code,label,red})=>{
-        const bw=14,lw=76;
+        const bw=14,lw=115;
         doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
         doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
-        doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
-        lx+=bw+lw+4;
+        doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
+        lx+=bw+lw+10;
       });
    {
-        const bw=14,lw=150;
+        const bw=14,lw=170;
         if (PIN_ERROR_PNG_BUFFER) {
           doc.image(PIN_ERROR_PNG_PATH, lx, y-1, {width:bw, height:bw*84/64});
         } else {
           doc.rect(lx,y,bw,10).fill('#FFFFFF').stroke('#999');
           doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',lx+1,y+2,{width:bw-2,align:'center'});
         }
-        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw});
-        lx+=bw+lw+4;
+        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
+        lx+=bw+lw+10;
       }
-      // NEW: same blank-cell explanation as the Excel legend note.
-      y+=12;
+      // Same blank-cell explanation as the Excel legend note — given its own
+      // clear row below the legend so it never collides with legend labels.
+      y+=16;
       doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
          .text('Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.', ML, y, { width: tW });
       y+=18;

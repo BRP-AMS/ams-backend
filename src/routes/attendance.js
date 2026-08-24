@@ -471,26 +471,31 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
-    // attendance.js — checkin
-const currentUserInfo = await User.findById(req.user.id).select('name profile_photo_path').lean();
-let faceResult;
-try {
-  faceResult = await Promise.race([
-    verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
-  ]);
-} catch (faceErr) {
-  console.error('[CheckIn] Face verify error/timeout:', faceErr.message);
-  faceResult = { match: false, confidence: 0, reason: 'Face verification is temporarily unavailable. Please try again.' };
-}
-if (!faceResult.match) {
-  return res.status(400).json({
-    success:        false,
-    faceVerifyError: true,
-    faceConfidence: faceResult.confidence,
-    message:        faceResult.reason,
-  });
-}
+    // attendance.js — checkin face verification
+    const currentUserInfo = await User.findById(req.user.id).select('name profile_photo_path').lean();
+    let faceResult;
+    let faceSystemError = false;
+    try {
+      faceResult = await Promise.race([
+        verifyFace(req.file.buffer, currentUserInfo?.profile_photo_path, req.file.mimetype),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
+      ]);
+    } catch (faceErr) {
+      // System error (TF crash, timeout, OOM) — NOT the employee's fault.
+      // Accept the check-in and flag it for manual review by manager.
+      console.error('[CheckIn] Face verify system error — allowing check-in with manual_review flag:', faceErr.message);
+      faceResult     = { match: true, confidence: 0 };
+      faceSystemError = true;
+    }
+    if (!faceResult.match) {
+      // Genuine face mismatch — block the check-in
+      return res.status(400).json({
+        success:         false,
+        faceVerifyError: true,
+        faceConfidence:  faceResult.confidence,
+        message:         faceResult.reason,
+      });
+    }
     const { dutyType, sector, description, latitude, longitude, locationAddress, capturedAt, capturedDate } = req.body;
 
     if (dutyType === 'On Duty' && !sector)
@@ -521,8 +526,8 @@ if (!faceResult.match) {
       hr_override: false, hr_remark: null, override_remark: null,
       overridden_by: null, hr_actioned_at: null,
       is_missed_checkout: false, checkout_remarks: null,
-     face_verification_status: 'verified',
-  face_confidence:          faceResult.confidence,
+      face_verification_status: faceSystemError ? 'manual_review' : 'verified',
+      face_confidence:          faceResult.confidence,
     };
 
     if (existingRejectedLeaveId) {
@@ -705,14 +710,16 @@ if (!req.file) {
 // attendance.js — checkout
 const checkoutUser = await User.findById(req.user.id).select('profile_photo_path').lean();
 let coFaceResult;
+let coFaceSystemError = false;
 try {
   coFaceResult = await Promise.race([
     verifyFace(req.file.buffer, checkoutUser?.profile_photo_path, req.file.mimetype),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Face verification timed out')), 30000)),
   ]);
 } catch (faceErr) {
-  console.error('[CheckOut] Face verify error/timeout:', faceErr.message);
-  coFaceResult = { match: false, confidence: 0, reason: 'Face verification is temporarily unavailable. Please try again.' };
+  console.error('[CheckOut] Face verify system error — allowing checkout with manual_review flag:', faceErr.message);
+  coFaceResult     = { match: true, confidence: 0 };
+  coFaceSystemError = true;
 }
 if (!coFaceResult.match) {
   return res.status(400).json({
@@ -887,6 +894,8 @@ if (!coFaceResult.match) {
       leave_type:                leaveType,
       leave_status:              leaveType ? (isAutoApproved ? 'Approved' : 'Pending') : null,
       attendance_type,
+      checkout_face_status:      coFaceSystemError ? 'manual_review' : 'verified',
+      checkout_face_confidence:  coFaceResult.confidence,
     };
 
     // Employee declined the 6:30pm "check out now?" prompt and gave a

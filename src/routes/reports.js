@@ -722,6 +722,16 @@ ws.getColumn(6).width = 15;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
+      // Manual truncation — measured against the real font metrics, so it can't
+      // silently wrap onto a second line the way relying on ellipsis:true can.
+      const truncateToWidth=(str,maxWidth,font='Helvetica-Bold',size=7)=>{
+        doc.font(font).fontSize(size);
+        if (doc.widthOfString(str) <= maxWidth) return str;
+        let s = str;
+        while (s.length > 1 && doc.widthOfString(s+'…') > maxWidth) s = s.slice(0,-1);
+        return s+'…';
+      };
+
       const drawTitle=y=>{
         doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
         doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
@@ -770,8 +780,8 @@ ws.getColumn(6).width = 15;
           const bg=idx%2===0?'#F9F9F9':'#FFF';
           doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
           doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-          doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,lineBreak:false,ellipsis:true});
-          doc.font('Helvetica-Bold').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
+          doc.font('Helvetica-Bold').fontSize(7).text(truncateToWidth(emp.name,CN-4),xN+2,y+3,{width:CN-4,lineBreak:false});
+          doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false});
           const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
           let pres=0;
           chunkCells.forEach((code,i)=>{
@@ -809,8 +819,8 @@ ws.getColumn(6).width = 15;
         const bg=idx%2===0?'#F9F9F9':'#FFF';
         doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
         doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,lineBreak:false,ellipsis:true});
-        doc.font('Helvetica-Bold').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
+        doc.font('Helvetica-Bold').fontSize(7).text(truncateToWidth(emp.name,CN-4),xN+2,y+3,{width:CN-4,lineBreak:false});
+        doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false});
         const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
         doc.rect(xD,y,CHUNK*dW,RH).fill('#EEF2FF').stroke('#CCC');
         doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+3,{width:CHUNK*dW,align:'center'});

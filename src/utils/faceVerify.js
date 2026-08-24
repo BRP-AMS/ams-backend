@@ -104,9 +104,10 @@ async function bufferToTensor(buffer, label = '') {
     throw new Error(`${label} image too small: ${width}x${height}`);
   }
 
-  // Resize: SSD Mobilenet works best with images 300–640px wide
-  const MAX_DIM = 640;
-  const MIN_DIM = 300;
+  // Resize: keep small to avoid OOM on Render's limited WASM memory.
+  // SSD Mobilenet works fine at 320px; 640px intermediate tensors exhaust ~512MB heap.
+  const MAX_DIM = 320;
+  const MIN_DIM = 224;
   let drawW = width;
   let drawH = height;
 
@@ -200,13 +201,15 @@ const confidenceLevels = [0.3, 0.15];
       // Rebuild tensor each attempt — necessary because tf.dispose() frees it
       tensor = await bufferToTensor(buffer, label);
 
-      const detection = await faceapi
-        .detectSingleFace(
-          tensor,
-          new faceapi.SsdMobilenetv1Options({ minConfidence: minConf })
-        )
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+      const detection = await tf.tidy(() =>
+        faceapi
+          .detectSingleFace(
+            tensor,
+            new faceapi.SsdMobilenetv1Options({ minConfidence: minConf })
+          )
+          .withFaceLandmarks()
+          .withFaceDescriptor()
+      );
 
       if (detection?.descriptor) {
         console.log(

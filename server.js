@@ -2,6 +2,14 @@ const dns = require('node:dns');
 dns.setServers(['8.8.8.8', '1.1.1.1']);
 require('dotenv').config();
 
+// Prevent uncaught TF/WASM errors from killing the whole server
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] Non-fatal — server stays up:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] Non-fatal — server stays up:', reason);
+});
+
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   console.error('FATAL: JWT_SECRET must be set and at least 32 characters');
   process.exit(1);

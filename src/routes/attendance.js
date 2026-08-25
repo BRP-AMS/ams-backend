@@ -9,7 +9,6 @@ const { authenticate, authorize }                         = require('../middlewa
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
 const { employeeFolderPath } = require('../config/cloudinary');
-const { verifyFace } = require('../utils/faceVerify');
 // ── File-naming helper ───────────────────────────────────────────────────
 const makeDocName = (user, docType, ext = '') => {
   const name  = (user.name || 'unknown').replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -144,6 +143,19 @@ const uploadSignedReport = multer({
 // ── Notification helper ───────────────────────────────────────────────────
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) =>
   Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
+
+// ── Shared tail for admin attendance-correction endpoints (regularize,
+// manual-checkout, …): notify the employee, write the audit log, respond. ──
+const finishAdminCorrection = async (req, res, record, { notifyTitle, notifyMsg, auditAction, auditNewValue, auditOldValue, successMsg }) => {
+  await notify(record.emp_id, notifyTitle, notifyMsg, 'success', record._id, '/employee/history');
+  await AuditLog.create({
+    _id: uuidv4(), user_id: req.user.id, action: auditAction,
+    entity_type: 'attendance', entity_id: record._id,
+    old_value: auditOldValue ?? record.status, new_value: auditNewValue,
+  });
+  const updated = await AttendanceRecord.findById(record._id).lean();
+  res.json({ success: true, message: successMsg, data: formatRecord(updated) });
+};
 
 // ── Aggregation pipeline helper ───────────────────────────────────────────
 const recordListPipeline = (match, sort, skip, limit) => [
@@ -340,7 +352,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const [records, approvedLeaves, pendingLeaves] = await Promise.all([
       AttendanceRecord.find(
         { date: today, checkin_time: { $ne: null }, ...empFilter },
-        'emp_id checkin_time checkout_time status'
+        'emp_id checkin_time checkout_time status attendance_type leave_type is_missed_checkout'
       ).lean(),
       AttendanceRecord.find(
         { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
@@ -355,11 +367,15 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const statusMap = {};
     records.forEach(r => {
       statusMap[String(r.emp_id)] = {
-        checkedIn:   true,
-        checkedOut:  !!r.checkout_time,
-        checkinTime:  r.checkin_time  || null,
-        checkoutTime: r.checkout_time || null,
-        status:       r.status,
+        recordId:        r._id,
+        checkedIn:       true,
+        checkedOut:      !!r.checkout_time,
+        checkinTime:      r.checkin_time  || null,
+        checkoutTime:     r.checkout_time || null,
+        status:           r.status,
+        attendanceType:   r.attendance_type || null,
+        leaveType:        r.leave_type      || null,
+        isMissedCheckout: r.is_missed_checkout === true,
       };
     });
     approvedLeaves.forEach(r => {
@@ -599,7 +615,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
 
-    const currentUserInfo = await User.findById(req.user.id).select('manager_id name profile_photo_path').lean();
+    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path').lean();
 
     if (!currentUserInfo?.profile_photo_path) {
       return res.status(400).json({
@@ -650,45 +666,24 @@ if (prevRecord && !prevRecord.checkout_time) {
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKIN', entity_type: 'attendance', entity_id: id });
     const record = await AttendanceRecord.findById(id).lean();
 
-    // ── Respond immediately — do NOT wait for face verification ──────────
+    // Face verification (TF) removed — selfie is still captured/stored, not
+    // matched. It was the root cause of repeated OOM crash-restarts on
+    // Render (WASM tensor allocation exhausting the container's memory),
+    // whether run synchronously or in the background as above.
     res.status(201).json({
       success:             true,
-      message:             'Check-in recorded! Verifying photo…',
-      verificationPending: true,
+      message:             'Check-in recorded!',
+      verificationPending: false,
       data:                formatRecord(record),
     });
 
-    // ── Runs AFTER the response has been sent ─────────────────────────────
-  // ── Runs AFTER the response has been sent ─────────────────────────────
-verifyFace(req.file.buffer, currentUserInfo.profile_photo_path, req.file.mimetype)
-  .then(async (faceResult) => {
-    if (faceResult.match) {
-      await AttendanceRecord.findByIdAndUpdate(id, {
-        $set: { face_verification_status: 'verified', face_confidence: faceResult.confidence },
-      });
-    } else {
-      // ── Mismatch: discard this check-in entirely — no retake, the
-      // employee does a fresh check-in (selfie + GPS + duty type) again.
-      // Only remove it if it's still an untouched, un-checked-out Draft —
-      // never touch a record that's already progressed.
-      await AttendanceRecord.deleteOne({ _id: id, status: 'Draft', checkout_time: null });
-
-      await AuditLog.create({
-        _id: uuidv4(), user_id: req.user.id, action: 'CHECKIN_FACE_MISMATCH_DISCARDED',
-        entity_type: 'attendance', entity_id: id, old_value: 'Draft', new_value: 'DELETED',
-      }).catch(() => {});
-
-      await notify(req.user.id, '⚠️ Face Verification Failed',
-        `${faceResult.reason} Your check-in was not accepted — please check in again.`,
-        'warning', null, '/employee/attendance');
+    // Late-login email — fire-and-forget, doesn't block the response
+    if (checkinTime > '10:00' && currentUserInfo?.email) {
+      sendMail(
+        currentUserInfo.email, '[AMS] Late Check-In Recorded',
+        `<p>Hi ${currentUserInfo.name || 'there'},</p><p>Your check-in today (${checkinDate}) was recorded at <strong>${checkinTime}</strong>, after the 10:00 AM cutoff.</p>`
+      ).catch(err => console.error('[CheckIn] Late-login email failed:', err.message));
     }
-  })
-  .catch(async (err) => {
-    console.error('[CheckIn] Background face verify failed:', err.message);
-    await AttendanceRecord.findByIdAndUpdate(id, {
-      $set: { face_verification_status: 'error' },
-    }).catch(() => {});
-  });
 
   } catch (err) {
     if (!res.headersSent) {
@@ -745,17 +740,8 @@ router.put('/:id/retake-face', authenticate, authorize('employee'), upload.singl
     const _rtExt = path.extname(req.file.originalname).replace('.', '') || 'jpg';
     const newSelfiePath = await uploadFile(req.file.buffer, `ams/users/${req.user.emp_id || req.user.id}/selfies`, req.file.originalname, req.file.mimetype, makeDocName(req.user, 'retake_selfie', _rtExt));
 
-   // attendance.js — retake-face
-const retakeUser = await User.findById(req.user.id).select('profile_photo_path').lean();
-const retakeResult = await verifyFace(req.file.buffer, retakeUser?.profile_photo_path, req.file.mimetype);
-if (!retakeResult.match) {
-  return res.status(400).json({
-    success:        false,
-    faceVerifyError: true,
-    faceConfidence: retakeResult.confidence,
-    message:        retakeResult.reason,
-  });
-}
+   // Face verification (TF) removed — retake just replaces the stored selfie.
+const retakeResult = { match: true, confidence: 0 };
 await AttendanceRecord.findByIdAndUpdate(req.params.id, {
   $set: { face_verification_status: 'verified', face_confidence: retakeResult.confidence, selfie_path: newSelfiePath },
 });
@@ -843,24 +829,11 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
 if (!req.file) {
   return res.status(400).json({ success: false, message: 'Checkout selfie is required.' });
 }
-const checkoutUser = await User.findById(req.user.id).select('name profile_photo_path').lean();
-if (!checkoutUser?.profile_photo_path) {
-  return res.status(400).json({ success: false, message: 'No profile photo enrolled.' });
-}
-
-// ── Face verification — synchronous, blocking. Checkout is only
-// committed if the selfie matches; on mismatch nothing is saved and the
-// employee retakes the checkout selfie (frontend already handles this
-// via faceVerifyError and stays on the checkout-confirm step).
-const checkoutFaceResult = await verifyFace(req.file.buffer, checkoutUser.profile_photo_path, req.file.mimetype);
-if (!checkoutFaceResult.match) {
-  return res.status(400).json({
-    success:         false,
-    faceVerifyError: true,
-    faceConfidence:  checkoutFaceResult.confidence,
-    message:         checkoutFaceResult.reason,
-  });
-}
+// Face verification (TF) removed — checkout selfie still captured/stored,
+// not matched. It was the root cause of repeated OOM crash-restarts on
+// Render, especially here where it ran synchronously and blocked the
+// request while allocating tensors.
+const checkoutFaceResult = { match: true, confidence: 0 };
     const now             = new Date();
     const checkinDateTime = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
     const capturedAtBody  = req.body?.capturedAt;
@@ -953,14 +926,11 @@ if (!checkoutFaceResult.match) {
   });
 }
 
-    // ── Determine leave type and auto-approval ────────────────────────────
-    // >= 7 hours → auto-approved, no manager review
-    // >= 6 hours → full day, needs manager review
+    // ── Determine leave type ────────────────────────────────────────────
+    // >= 7 hours → full day, needs manager review
     // >= 4 hours → half day leave attached, manager review
     // <  4 hours → emergency leave, manager review
-    const AUTO_APPROVE_HOURS = 7;
-    const isAutoApproved = hoursElapsed >= AUTO_APPROVE_HOURS;
-
+    // (No auto-approve shortcut — every checkout requires manager review.)
     let leaveType = null;
     if (hoursElapsed >= 7) {
       leaveType = null;               // Full day — no leave (whether auto-approved or pending)
@@ -1020,7 +990,7 @@ if (leaveType && !String(leaveReason || '').trim()) {
       worked_hours:              workedHours,
       leave_type:                leaveType,
       leave_reason:               leaveType ? leaveReason.trim() : null,
-      leave_status:              leaveType ? (isAutoApproved ? 'Approved' : 'Pending') : null,
+      leave_status:              leaveType ? 'Pending' : null,
       attendance_type,
   checkout_face_verification_status: 'verified',              // ✅
   checkout_face_confidence:          checkoutFaceResult.confidence,  // ✅
@@ -1036,17 +1006,8 @@ if (leaveType && !String(leaveReason || '').trim()) {
 
     const lateSuffix = updateFields.late_checkout_reason ? ` — Late check-out with reason: ${updateFields.late_checkout_reason}` : '';
 
-     if (isAutoApproved) {
-          // Direct approval — no manager action needed
-          updateFields.status       = 'Approved';
-          updateFields.actioned_by  = null; // system-approved
-          updateFields.actioned_at  = now;
-          updateFields.manager_remark = `Auto-approved: worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
-    } else {
-      updateFields.status = 'Pending';
-      updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
-        }
-    
+    updateFields.status = 'Pending';
+    updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
 
         const updated = await AttendanceRecord.findOneAndUpdate(
           { _id: record._id, checkout_time: null },
@@ -1061,8 +1022,8 @@ if (leaveType && !String(leaveReason || '').trim()) {
           });
         }
 
-        // Notify manager only if NOT auto-approved
-        if (!isAutoApproved && record.manager_id) {
+        // Every checkout now requires manager review — no auto-approve path.
+        if (record.manager_id) {
           const emp = await User.findById(req.user.id).select('name').lean();
           const hoursLabel = hoursElapsed >= 7
             ? `Full day (${workedHours.toFixed(1)} hrs)`
@@ -1076,49 +1037,31 @@ if (leaveType && !String(leaveReason || '').trim()) {
             'warning', record._id, '/manager/leaves'
           );
         }
-    
-        // Notify employee about auto-approval
-        if (isAutoApproved) {
-          await notify(
-            record.emp_id,
-            '✅ Attendance Auto-Approved',
-            `Your attendance for ${record.date} was automatically approved (${workedHours.toFixed(1)} hrs worked).`,
-            'success', record._id, '/employee/history'
-          );
-        }
-    
+
         await AuditLog.create({
           _id: uuidv4(), user_id: req.user.id,
-          action: isAutoApproved ? 'CHECKOUT_AUTO_APPROVED' : 'CHECKOUT',
+          action: 'CHECKOUT',
           entity_type: 'attendance', entity_id: record._id,
         });
-    
+
              res.json({
           success:             true,
-          message:             isAutoApproved
-            ? `Attendance auto-approved! You worked ${workedHours.toFixed(1)} hours.`
-            : 'Checked out and submitted for approval',
-          autoApproved:        isAutoApproved,
+          message:             'Checked out and submitted for approval',
+          autoApproved:        false,
           data:                formatRecord(updated),
         });
 
-        // Runs AFTER response is sent
-        // verifyFace(req.file.buffer, checkoutUser.profile_photo_path, req.file.mimetype)
-        //   .then(async (coFaceResult) => {
-        //     if (coFaceResult.match) {
-        //       await AttendanceRecord.findByIdAndUpdate(record._id, {
-        //         $set: { checkout_face_verification_status: 'verified', checkout_face_confidence: coFaceResult.confidence },
-        //       });
-        //     } else {
-        //       await AttendanceRecord.findByIdAndUpdate(record._id, {
-        //         $set: { checkout_face_verification_status: 'mismatch', checkout_face_confidence: coFaceResult.confidence },
-        //       });
-        //       await notify(req.user.id, '⚠️ Checkout Face Verification Failed',
-        //         `${coFaceResult.reason} Your checkout was still recorded.`,
-        //         'warning', record._id, '/employee/attendance');
-        //     }
-        //   })
-        //   .catch(err => console.error('[Checkout] Background face verify failed:', err.message));
+        // Early-logout email — fire-and-forget, doesn't block the response
+        if (checkoutTime < '17:00') {
+          User.findById(req.user.id).select('name email').lean().then(u => {
+            if (u?.email) {
+              sendMail(
+                u.email, '[AMS] Early Check-Out Recorded',
+                `<p>Hi ${u.name || 'there'},</p><p>Your check-out today (${record.date}) was recorded at <strong>${checkoutTime}</strong>, before the 5:00 PM cutoff.</p>`
+              ).catch(err => console.error('[CheckOut] Early-logout email failed:', err.message));
+            }
+          }).catch(() => {});
+        }
 
       } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
     });
@@ -1392,6 +1335,110 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'REJECT', entity_type: 'attendance', entity_id: record._id, old_value: record.status, new_value: 'Rejected' });
     res.json({ success: true, message: 'Rejected' });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/regularize
+// Admin-only manual correction for a day left Partial/Irregular/Emergency
+// Leave/Half Day because the employee couldn't check in/out on time (e.g.
+// during a server outage). Marks the day Regular/Approved with an audit trail.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/regularize', authenticate, authorize('admin'), [
+  body('remark').trim().notEmpty().withMessage('A remark is required to regularize attendance'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { remark } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+
+    const isRegularizable =
+      ['Partial', 'Irregular'].includes(record.attendance_type) ||
+      ['Emergency Leave', 'Half Day'].includes(record.leave_type);
+    if (!isRegularizable) {
+      return res.status(400).json({ success: false, message: 'Only Partial, Irregular, Emergency Leave, or Half Day records can be regularized.' });
+    }
+
+    const update = {
+      status:          'Approved',
+      attendance_type: 'Regular',
+      leave_type:       null,
+      leave_status:      null,
+      admin_remark:     remark,
+      manager_remark:  `Regularized by Admin: ${remark}`,
+      actioned_by:      req.user.id,
+      actioned_at:      new Date(),
+    };
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
+
+    await finishAdminCorrection(req, res, record, {
+      notifyTitle:   '✅ Attendance Regularized',
+      notifyMsg:     `Your attendance for ${record.date} has been manually regularized by Admin: ${remark}`,
+      auditAction:   'ADMIN_REGULARIZE',
+      auditNewValue: 'Approved',
+      successMsg:    'Attendance regularized',
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/manual-checkout
+// Admin-only — completes a record stuck with no check-out (e.g. a missed
+// check-out that only got approved as-is, leaving checkout_time null
+// forever) by setting an actual check-out time on the employee's behalf.
+// No selfie/GPS required — this is an administrative override, not a
+// self-service check-out. Immediately resolves the record so the employee
+// can check in normally again.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/manual-checkout', authenticate, authorize('admin'), [
+  body('remark').trim().notEmpty().withMessage('A remark is required for a manual check-out'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { remark, checkoutTime } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.checkout_time) return res.status(409).json({ success: false, message: 'Already checked out' });
+    if (!record.checkin_time) return res.status(400).json({ success: false, message: 'Cannot check out a record with no check-in' });
+
+    const timeRe = /^\d{2}:\d{2}$/;
+    const finalCheckoutTime = (checkoutTime && timeRe.test(checkoutTime)) ? checkoutTime : istTimeStr();
+
+    const checkinDateTime  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+    const checkoutDateTime = new Date(`${record.date}T${finalCheckoutTime}:00+05:30`);
+    if (checkoutDateTime < checkinDateTime) {
+      return res.status(400).json({ success: false, message: 'Check-out time cannot be before check-in time' });
+    }
+    const workedHours = Math.round(((checkoutDateTime - checkinDateTime) / 3600000) * 100) / 100;
+
+    const update = {
+      checkout_time:    finalCheckoutTime,
+      worked_hours:      workedHours,
+      status:            'Approved',
+      admin_remark:      remark,
+      checkout_remarks: `Manually checked out by Admin: ${remark}`,
+      actioned_by:       req.user.id,
+      actioned_at:       new Date(),
+      submitted_at:      new Date(),
+    };
+    const updated = await AttendanceRecord.findOneAndUpdate(
+      { _id: record._id, checkout_time: null },
+      { $set: update },
+      { new: true }
+    ).lean();
+    if (!updated) return res.status(409).json({ success: false, message: 'Already checked out.' });
+
+    await finishAdminCorrection(req, res, record, {
+      notifyTitle:   '✅ Check-Out Completed by Admin',
+      notifyMsg:     `Your check-out for ${record.date} was completed by Admin at ${finalCheckoutTime} (worked ${workedHours.toFixed(1)}h): ${remark}. You may check in again.`,
+      auditAction:   'ADMIN_MANUAL_CHECKOUT',
+      auditOldValue: 'no checkout',
+      auditNewValue: finalCheckoutTime,
+      successMsg:    'Check-out completed',
+    });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 

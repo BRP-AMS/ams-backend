@@ -6,7 +6,7 @@ const router   = express.Router();
 const ExcelJS  = require('exceljs');
 const PDFDoc   = require('pdfkit');
 const mongoose = require('mongoose');
-const { AttendanceRecord, User } = require('../models/database');
+const { AttendanceRecord, User, Holiday } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const fs       = require('fs');
 const path     = require('path');
@@ -116,7 +116,24 @@ const RESTRICTED_MMDD = new Set([
   '09-11','09-18','11-11','11-24','12-03','12-24',
 ]);
 
+// Dynamic holiday cache from the admin-managed Holiday collection (refreshed
+// hourly), falling back to the static list only when the cache is cold —
+// same pattern as attendance.js's isLeaveNonWorking, so reports stay in sync
+// with whatever holidays are actually configured instead of a fixed list.
+let _repHolCache = null;
+let _repHolCacheAt = 0;
+const refreshRepHolCache = async () => {
+  try {
+    const rows = await Holiday.find({}, { date: 1, _id: 0 }).lean();
+    _repHolCache = new Set(rows.map(h => h.date));
+    _repHolCacheAt = Date.now();
+  } catch { /* keep using static */ }
+};
+refreshRepHolCache();
+
 const isHoliday = iso => {
+  if (_repHolCache && Date.now() - _repHolCacheAt < 3600000) return _repHolCache.has(iso);
+  refreshRepHolCache().catch(() => {});
   const mmdd = iso.substring(5);
   return HOLIDAYS_MMDD.has(mmdd) || RESTRICTED_MMDD.has(mmdd);
 };

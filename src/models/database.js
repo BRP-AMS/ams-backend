@@ -410,6 +410,7 @@ const odaRequestSchema = new mongoose.Schema({
   from_date:     { type: String, required: true },   // 'YYYY-MM-DD'
   to_date:       { type: String, required: true },   // 'YYYY-MM-DD'
   duty_type:     { type: String, enum: ['Training', 'Head Office Visit', 'District Meeting', 'Election Duty', 'Other'], required: true },
+  district:      { type: String, required: true }, // geofence for the ODA duration is restricted to this district
   location_name: { type: String, required: true },
   reason:        { type: String, required: true },
   status:        { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },

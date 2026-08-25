@@ -127,11 +127,28 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // ── Models ────────────────────────────────────────────────────────────────
-const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken } = require('./src/models/database');
+const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken, Holiday } = require('./src/models/database');
 const { v4: uuidv4 } = require('uuid');
+const { sendMail } = require('./src/utils/mailer');
+
+// Shared by the reminder crons below — skip Sundays and configured holidays.
+const isNonWorkingDayForReminders = async (dateIST) => {
+  const dow = new Date(dateIST + 'T00:00:00+05:30').getDay();
+  if (dow === 0) return true; // Sunday
+  const holiday = await Holiday.findOne({ date: dateIST }).lean();
+  return !!holiday;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CRON 1 — Midnight IST (00:05): Mark unchecked-out records as missed-checkout
+//
+// Finds any Draft attendance record from YESTERDAY or earlier that has a
+// check-in but NO check-out, and converts it to:
+//   status           = 'Pending'
+//   is_missed_checkout = true
+//
+// This places it in the manager's queue so they can approve/reject it.
+// The employee is BLOCKED from checking in again until the manager acts.
 // ─────────────────────────────────────────────────────────────────────────────
 cron.schedule('5 0 * * *', async () => {
   console.log('[MissedCheckout Cron] Running at midnight IST...');
@@ -267,6 +284,96 @@ cron.schedule('30 18-23 * * *', async () => {
   timezone: 'Asia/Kolkata',
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 3 — 9:00 AM IST: Email reminder to check in.
+// Skips Sundays/holidays. Emails every active employee who hasn't checked in
+// yet today and isn't on approved leave.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('0 9 * * *', async () => {
+  console.log('[CheckIn Reminder Email] Cron triggered');
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    if (await isNonWorkingDayForReminders(todayIST)) return console.log('[CheckIn Reminder Email] Skipped — non-working day');
+
+    const employees = await User.find({ role: 'employee', is_active: { $ne: false } }).select('_id name email').lean();
+    const [checkedIn, onLeave] = await Promise.all([
+      AttendanceRecord.find({ date: todayIST, checkin_time: { $ne: null } }, 'emp_id').lean(),
+      AttendanceRecord.find({
+        duty_type: 'Leave', leave_status: 'Approved',
+        date: { $lte: todayIST }, $or: [{ end_date: null }, { end_date: { $gte: todayIST } }],
+      }, 'emp_id').lean(),
+    ]);
+    const skip = new Set([...checkedIn, ...onLeave].map(r => String(r.emp_id)));
+
+    let sent = 0;
+    for (const emp of employees) {
+      if (skip.has(String(emp._id)) || !emp.email) continue;
+      await sendMail(
+        emp.email, '[AMS] Check-In Reminder',
+        `<p>Hi ${emp.name},</p><p>Reminder to check in for today (${todayIST}).</p>`
+      ).catch(err => console.error('[CheckIn Reminder Email] Send failed for', emp.email, err.message));
+      sent++;
+    }
+    console.log(`[CheckIn Reminder Email] Sent ${sent} reminder(s).`);
+  } catch (err) {
+    console.error('[CheckIn Reminder Email] Error:', err.message);
+  }
+}, {
+  timezone: 'Asia/Kolkata',
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON 4 — 7:00 PM IST: Email reminder to check out.
+// Skips Sundays/holidays. Emails every employee still checked in (checkin
+// set, no checkout) for today.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('0 19 * * *', async () => {
+  console.log('[CheckOut Reminder Email] Cron triggered');
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    if (await isNonWorkingDayForReminders(todayIST)) return console.log('[CheckOut Reminder Email] Skipped — non-working day');
+
+    const unchecked = await AttendanceRecord.find({
+      date: todayIST, status: 'Draft', checkin_time: { $ne: null }, checkout_time: null,
+    }).lean();
+    const empIds = unchecked.map(r => r.emp_id);
+    const users  = await User.find({ _id: { $in: empIds } }).select('_id name email').lean();
+    const emailById = new Map(users.map(u => [String(u._id), u]));
+
+    let sent = 0;
+    for (const record of unchecked) {
+      const u = emailById.get(String(record.emp_id));
+      if (!u?.email) continue;
+      await sendMail(
+        u.email, '[AMS] Check-Out Reminder',
+        `<p>Hi ${u.name},</p><p>You checked in at ${record.checkin_time} on ${record.date} and haven't checked out yet. Please check out to avoid a missed check-out flag.</p>`
+      ).catch(err => console.error('[CheckOut Reminder Email] Send failed for', u.email, err.message));
+      sent++;
+    }
+    console.log(`[CheckOut Reminder Email] Sent ${sent} reminder(s).`);
+  } catch (err) {
+    console.error('[CheckOut Reminder Email] Error:', err.message);
+  }
+}, {
+  timezone: 'Asia/Kolkata',
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTE: The old CRON 3 ("system auto check-out after 8 hours") has been
+// removed on purpose. The system must never check an employee out for them.
+//
+// The employee ALWAYS checks out manually (with selfie + GPS + text address).
+// If they miss it, CRON 1 (midnight) flags the record as a missed check-out
+// and routes it to the manager queue. CRON 2 (6:30pm–11:30pm) nudges anyone
+// still checked in. When the employee eventually taps "Check Out" on a
+// missed-checkout record, the route in attendance.js (PUT /:id/checkout,
+// `record.is_missed_checkout` branch) auto-approves it if 8+ hours had
+// elapsed since check-in, otherwise it stays Pending for one manager
+// approve/reject decision. That logic already lived in attendance.js and
+// is untouched — this cron was the only thing fighting it.
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ── Revoked-token pruning ─────────────────────────────────────────────────
 const pruneRevokedTokens = async () => {
@@ -302,6 +409,7 @@ app.use('/api/oda',               require('./src/routes/oda'));
 app.use('/api/geocode',           require('./src/routes/geocode'));
 app.use('/api/file',              require('./src/routes/file'));
 app.use('/api/holidays',          require('./src/routes/holidays'));
+app.use('/api/dept-dashboard',    require('./src/routes/dept-dashboard'));
 
 // Health check — version bump triggers Render redeploy detection
 app.get('/api/health', (req, res) => {

@@ -13,6 +13,7 @@ router.post('/', authenticate, authorize('employee'), [
   body('from_date').matches(/^\d{4}-\d{2}-\d{2}$/),
   body('to_date').matches(/^\d{4}-\d{2}-\d{2}$/),
   body('duty_type').isIn(['Training', 'Head Office Visit', 'District Meeting', 'Election Duty', 'Other']),
+  body('district').trim().notEmpty(),
   body('location_name').trim().notEmpty(),
   body('reason').trim().notEmpty(),
 ], async (req, res) => {
@@ -20,7 +21,7 @@ router.post('/', authenticate, authorize('employee'), [
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
   try {
-    const { from_date, to_date, duty_type, location_name, reason } = req.body;
+    const { from_date, to_date, duty_type, district, location_name, reason } = req.body;
     const today = istDateStr();
 
     if (to_date < from_date)
@@ -36,7 +37,7 @@ router.post('/', authenticate, authorize('employee'), [
     const req_id = uuidv4();
     await ODARequest.create({
       _id: req_id, emp_id: req.user.id,
-      from_date, to_date, duty_type, location_name: location_name.trim(), reason: reason.trim(),
+      from_date, to_date, duty_type, district: district.trim(), location_name: location_name.trim(), reason: reason.trim(),
       status: 'pending',
     });
 

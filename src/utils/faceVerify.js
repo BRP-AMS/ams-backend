@@ -104,9 +104,10 @@ async function bufferToTensor(buffer, label = '') {
     throw new Error(`${label} image too small: ${width}x${height}`);
   }
 
-  // Resize: SSD Mobilenet works best with images 300–640px wide
-  const MAX_DIM = 640;
-  const MIN_DIM = 300;
+  // Resize: keep small to avoid OOM on Render's limited WASM memory.
+  // SSD Mobilenet works fine at 320px; 640px intermediate tensors exhaust ~512MB heap.
+  const MAX_DIM = 320;
+  const MIN_DIM = 224;
   let drawW = width;
   let drawH = height;
 
@@ -189,28 +190,32 @@ ensureModels().catch(err =>
 
 async function getDescriptor(buffer, label = '') {
   const tf = faceapi.tf;
-  const confidenceLevels = [0.3, 0.15];
 
+  // Confidence levels to try — from normal down to very lenient.
+  // Real-world profile photos (office lighting, slight angle) often score 0.2–0.35.
+  // const confidenceLevels = [0.3, 0.2, 0.15, 0.10];
+const confidenceLevels = [0.3, 0.15];
   for (const minConf of confidenceLevels) {
     let tensor = null;
-    tf.engine().startScope();          // ✅ open a manual scope
     try {
+      // Rebuild tensor each attempt — necessary because tf.dispose() frees it
       tensor = await bufferToTensor(buffer, label);
 
-      const detection = await faceapi
-        .detectSingleFace(
-          tensor,
-          new faceapi.SsdMobilenetv1Options({ minConfidence: minConf })
-        )
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+      const detection = await tf.tidy(() =>
+        faceapi
+          .detectSingleFace(
+            tensor,
+            new faceapi.SsdMobilenetv1Options({ minConfidence: minConf })
+          )
+          .withFaceLandmarks()
+          .withFaceDescriptor()
+      );
 
       if (detection?.descriptor) {
         console.log(
           `[FaceVerify] ✅ ${label}: face found | ` +
           `minConf=${minConf} | detectionScore=${detection.detection.score.toFixed(3)}`
         );
-        // descriptor is a plain Float32Array, safe to return after scope ends
         return detection.descriptor;
       }
 
@@ -219,17 +224,27 @@ async function getDescriptor(buffer, label = '') {
     } catch (innerErr) {
       console.error(`[FaceVerify] ${label} error at minConf=${minConf}:`, innerErr.message);
     } finally {
+      // Always dispose tensor to prevent GPU/memory leak
       if (tensor) {
         try { tf.dispose(tensor); } catch (_) {}
       }
-      tf.engine().endScope();          // ✅ frees every intermediate tensor from this attempt
     }
   }
 
   console.warn(`[FaceVerify] ❌ ${label}: no face found after all confidence levels`);
   return null;
 }
-console.log('[FaceVerify] TF memory:', faceapi.tf.memory());
+
+// ── 30-second hard timeout wrapper ────────────────────────────────────────
+function withTimeout(promise, ms, label = '') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`[FaceVerify] ${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 // ── Main export ────────────────────────────────────────────────────────────
 async function verifyFace(selfieBuffer, profilePhotoUrl, mimeType = 'image/jpeg') {
 

@@ -50,8 +50,9 @@ const refreshAttHolCache = async () => {
 refreshAttHolCache();
 
 const isLeaveNonWorking = iso => {
-  const d = new Date(iso + 'T00:00:00+05:30');
-  if (d.getDay() === 0 || d.getDay() === 6) return true;
+  const [y, m, d] = iso.split('-').map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // timezone-independent day-of-week
+  if (dow === 0 || dow === 6) return true;
   if (_attHolCache && Date.now() - _attHolCacheAt < 3600000)
     return _attHolCache.has(iso);
   refreshAttHolCache().catch(() => {});

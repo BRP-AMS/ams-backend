@@ -121,25 +121,43 @@ const isHoliday = iso => {
   return HOLIDAYS_MMDD.has(mmdd) || RESTRICTED_MMDD.has(mmdd);
 };
 
-const getNthSaturday = iso => {
-  const d = new Date(iso + 'T00:00:00+05:30');
-  if (d.getDay() !== 6) return 0;
-  let count = 0;
-  for (let i = 1; i <= d.getDate(); i++) {
-    if (new Date(d.getFullYear(), d.getMonth(), i).getDay() === 6) count++;
-  }
-  return count;
+// const getNthSaturday = iso => {
+//   const d = new Date(iso + 'T00:00:00+05:30');
+//   if (d.getDay() !== 6) return 0;
+//   let count = 0;
+//   for (let i = 1; i <= d.getDate(); i++) {
+//     if (new Date(d.getFullYear(), d.getMonth(), i).getDay() === 6) count++;
+//   }
+//   return count;
+// };
+
+// const isNonWorkingDay = iso => {
+//   const dow = new Date(iso + 'T00:00:00+05:30').getDay();
+//   if (dow === 0) return true;                          // Sunday
+//   if (dow === 6) return true;
+//   return false;
+// };
+
+// ── Timezone-safe date component helpers ───────────────────────────────
+// iso is always "YYYY-MM-DD" (already IST-normalized by expandDates/etc).
+// NEVER call Date#getDate()/getDay()/getFullYear() on a Date built from
+// an ISO+offset string without {timeZone:IST} — those getters read the
+// SERVER's local clock, not IST, and silently drift by a day on a host
+// that isn't set to Asia/Kolkata (e.g. any UTC cloud server).
+const isoParts = iso => iso.split('-').map(Number);           // [YYYY, MM, DD]
+const isoDay   = iso => isoParts(iso)[2];
+const isoYear  = iso => isoParts(iso)[0];
+const isoDow   = iso => {                                     // 0=Sun..6=Sat, timezone-independent
+  const [y, m, d] = isoParts(iso);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 };
 
 const isNonWorkingDay = iso => {
-  const dow = new Date(iso + 'T00:00:00+05:30').getDay();
-  if (dow === 0) return true;                          // Sunday
-  if (dow === 6) return true;
-  return false;
+  const dow = isoDow(iso);
+  return dow === 0 || dow === 6;                               // Sunday or Saturday
 };
-
 const isWeekend = iso => isNonWorkingDay(iso); // kept for PDF total WO count
-const dayNum    = iso => new Date(iso+'T00:00:00+05:30').getDate();
+const dayNum    = iso => isoDay(iso);
 const monAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'short'});
 const dayAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,weekday:'short'});
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
@@ -342,13 +360,10 @@ router.get('/export',
         }),
       };
     });
-
-    const sd = new Date(startDate+'T00:00:00+05:30');
-    const ed = new Date(endDate  +'T00:00:00+05:30');
-    const rangeTitle =
-      `for the period ${ordinal(sd.getDate())} ` +
-      `${sd.toLocaleDateString('en-IN',{timeZone:IST,month:'short'})}- ${sd.getFullYear()} To ` +
-      `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${ed.getFullYear()}`;
+       const rangeTitle =
+      `for the period ${ordinal(isoDay(startDate))} ` +
+      `${monAbbr(startDate)}- ${isoYear(startDate)} To ` +
+      `${ordinal(isoDay(endDate))} ${new Date(endDate+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${isoYear(endDate)}`;
 
     // ══════════════════════════════════════════════════════════════════════════
     //  EXCEL
@@ -859,6 +874,7 @@ ws.getColumn(6).width = 15;
       pdfRow('No of Holidays (H)',holCount);
 
       if (matrix.length === 1) {
+        
   const cells   = matrix[0].cells;
   const empIdStr = String(matrix[0].emp._id);
 
@@ -891,42 +907,49 @@ ws.getColumn(6).width = 15;
   pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);
   pdfRow('No of Location Not Captured',    cells.filter(c => c==='LOC_ERR').length);
 } else {
-        sy++;
-        const TW = SW;
-        const C0 = TW * 0.46;
-        const C1 = TW * 0.18;
-        const C2 = TW * 0.18;
-        const C3 = TW * 0.18;
+  sy++;
+  const TW = SW;
+  const C0 = TW * 0.46;
+  const C1 = TW * 0.18;
+  const C2 = TW * 0.18;
+  const C3 = TW * 0.18;
 
-        doc.rect(SX,        sy, C0, SRH).fillAndStroke('#E8EDF4','#000');
-        doc.rect(SX+C0,     sy, C1, SRH).fillAndStroke('#D1FAE5','#000');
-        doc.rect(SX+C0+C1,  sy, C2, SRH).fillAndStroke('#FEF3C7','#000');
-        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke('#FEE2E2','#000');
+  const drawSummaryHeader = (yy) => {
+    doc.rect(SX,        yy, C0, SRH).fillAndStroke('#E8EDF4','#000');
+    doc.rect(SX+C0,     yy, C1, SRH).fillAndStroke('#D1FAE5','#000');
+    doc.rect(SX+C0+C1,  yy, C2, SRH).fillAndStroke('#FEF3C7','#000');
+    doc.rect(SX+C0+C1+C2, yy, C3, SRH).fillAndStroke('#FEE2E2','#000');
+    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    yy+4, {width:C0-8});
+    doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   yy+4, {width:C1,align:'center'});
+    doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,yy+4, {width:C2,align:'center'});
+    doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,yy+4,{width:C3,align:'center'});
+    return yy + SRH;
+  };
 
-        doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    sy+4, {width:C0-8});
-        doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   sy+4, {width:C1,align:'center'});
-        doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,sy+4, {width:C2,align:'center'});
-        doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,sy+4,{width:C3,align:'center'});
-        sy += SRH;
+  sy = drawSummaryHeader(sy);
 
-        matrix.forEach(({ emp, cells }, idx) => {
-          const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-          doc.rect(SX,          sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
-          doc.rect(SX+C0,       sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
-          doc.rect(SX+C0+C1,    sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
-          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
+  matrix.forEach(({ emp, cells }, idx) => {
+    if (sy + SRH > PH - 60) {
+      doc.addPage({ size:'A3', layout:'landscape', margins:{top:28,bottom:28,left:28,right:28} });
+      sy = drawSummaryHeader(40);
+    }
+    const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
+    doc.rect(SX,          sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0,       sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1,    sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
 
-          const pres = cells.filter(c => c==='P'||c==='OD').length;
-          const lv   = cells.filter(c => c==='L').length;
-          const abs  = cells.filter(c => c==='A').length;
- const nlc  = cells.filter(c => c==='LOC_ERR').length;
-          doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,     SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
-          doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres), SX+C0,  sy+3,{width:C1,align:'center'});
-          doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),   SX+C0+C1,sy+3,{width:C2,align:'center'});
-          doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),  SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
-          sy += SRH;
-        });
-      }
+    const pres = cells.filter(c => c==='P'||c==='OD').length;
+    const lv   = cells.filter(c => c==='L').length;
+    const abs  = cells.filter(c => c==='A').length;
+
+    doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,     SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
+    doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres), SX+C0,  sy+3,{width:C1,align:'center'});
+    doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),   SX+C0+C1,sy+3,{width:C2,align:'center'});
+    doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),  SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
+    sy += SRH;
+  });
+}
 
       // Signatures (employee download only)
       sy+=24; if(sy+30>PH-28){addPage();sy=40;}
@@ -1087,12 +1110,10 @@ router.get('/leave-export',
           };
         });
 
-    const sd = new Date(startDate + 'T00:00:00+05:30');
-    const ed = new Date(endDate   + 'T00:00:00+05:30');
-    const rangeLabel =
-      `${ordinal(sd.getDate())} ${sd.toLocaleDateString('en-IN', { timeZone: IST, month: 'short' })} ${sd.getFullYear()}` +
+        const rangeLabel =
+      `${ordinal(isoDay(startDate))} ${monAbbr(startDate)} ${isoYear(startDate)}` +
       ` To ` +
-      `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN', { timeZone: IST, month: 'long' })} ${ed.getFullYear()}`;
+      `${ordinal(isoDay(endDate))} ${new Date(endDate+'T00:00:00+05:30').toLocaleDateString('en-IN', { timeZone: IST, month: 'long' })} ${isoYear(endDate)}`;
 
     const reportLabel = isMissedReport ? 'Missed Check-out Report' : 'Leave Report';
     const reportTitle = employees.length === 1
@@ -1864,12 +1885,10 @@ router.get('/late-checkout-export',
 
     const rows = await buildLateCheckoutRows({ startDate, endDate, employees });
 
-    const sd = new Date(startDate+'T00:00:00+05:30');
-    const ed = new Date(endDate  +'T00:00:00+05:30');
-    const rangeLabel =
-      `${ordinal(sd.getDate())} ${sd.toLocaleDateString('en-IN',{timeZone:IST,month:'short'})} ${sd.getFullYear()}` +
+        const rangeLabel =
+      `${ordinal(isoDay(startDate))} ${monAbbr(startDate)} ${isoYear(startDate)}` +
       ` To ` +
-      `${ordinal(ed.getDate())} ${ed.toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${ed.getFullYear()}`;
+      `${ordinal(isoDay(endDate))} ${new Date(endDate+'T00:00:00+05:30').toLocaleDateString('en-IN',{timeZone:IST,month:'long'})} ${isoYear(endDate)}`;
 
     const sanitize = s => String(s||'').trim().replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_+|_+$/g,'');
     const singleEmp = employees.length === 1

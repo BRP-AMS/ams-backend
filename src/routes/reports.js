@@ -93,10 +93,6 @@ const buildLocationText = async (storedAddress, lat, lng) => {
 const IST      = 'Asia/Kolkata';
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: IST });
 const toObjId  = id => { try { return new mongoose.Types.ObjectId(String(id)); } catch { return id; } };
-const yesterdayIST = () => {
-  const d = new Date(); d.setDate(d.getDate()-1);
-  return d.toLocaleDateString('en-CA', { timeZone: IST });
-};
 
 const expandDates = (start, end) => {
   const out = [];
@@ -232,14 +228,12 @@ router.get('/export',
     if (!startDate||!endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    // Cap endDate to yesterday — today is never shown (incomplete day)
-    if (endDate >= todayIST()) endDate = yesterdayIST();
+    // Future/today dates are allowed — they render as blank (or WO/H) in the
+    // matrix below since attendance hasn't happened yet, rather than being cut off.
     if (startDate > endDate)
-      return res.status(400).json({success:false,message:'No completed dates in range. Report covers up to yesterday.'});
+      return res.status(400).json({success:false,message:'Start date must be on or before end date.'});
 
     const dates      = expandDates(startDate, endDate);
-    const multiMonth = new Date(startDate+'T00:00:00+05:30').getMonth() !==
-                       new Date(endDate  +'T00:00:00+05:30').getMonth();
     const totalDays  = dates.length;
  const woCount    = dates.filter(isNonWorkingDay).length;
     const holCount   = dates.filter(d => !isNonWorkingDay(d) && isHoliday(d)).length;
@@ -328,6 +322,7 @@ router.get('/export',
     }
 
     // ── Build cell matrix ──────────────────────────────────────────────────────
+    const todayReport = todayIST();
     const matrix = employees.map(emp => {
       const joinDate = emp.created_at
         ? new Date(emp.created_at).toLocaleDateString('en-CA', { timeZone: IST })
@@ -339,8 +334,9 @@ router.get('/export',
         emp,
         cells: dates.map(iso => {
           if (isNonWorkingDay(iso))           return 'WO'; // Sunday or 2nd/4th Sat
-          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           if (isHoliday(iso))                 return 'H';  // public holiday
+          if (iso > todayReport)              return '';   // future — hasn't happened yet
+          if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           const rec = recIdx[String(emp._id)]?.[iso];
           return toCode(rec, ab, ad);
         }),
@@ -407,7 +403,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         ws.getRow(3).height=16;
 
         // ── Row 4: column headers ─────────────────────────────────────────────
-        ws.getRow(4).height=multiMonth?38:26;
+        ws.getRow(4).height=38;
         ws.getColumn(2).width=9; ws.getColumn(3).width=16; ws.getColumn(4).width=14;
         const HF={bold:true,size:9,color:{argb:'FF3366FF'},name:'Calibri'};
         const setHdr=(col,val)=>{
@@ -416,7 +412,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           ws.getColumn(col).width=col===2?9:col===3?16:col===4?14:4.2;
         };
         setHdr(2,'Emp code'); setHdr(3,'Employee Name'); setHdr(4,'Designation');
-        dates.forEach((iso,i)=>setHdr(5+i,multiMonth?`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`:`${dayNum(iso)}\n${dayAbbr(iso)}`));
+        dates.forEach((iso,i)=>setHdr(5+i,`${dayNum(iso)}\n${dayAbbr(iso)}\n${monAbbr(iso)}`));
 
         // ── Data rows ─────────────────────────────────────────────────────────
         empList.forEach(({emp,cells},idx)=>{
@@ -678,86 +674,137 @@ ws.getColumn(6).width = 15;
       res.setHeader('Content-Disposition',`attachment; filename="BRP_Attendance_${startDate}_to_${endDate}.pdf"`);
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
       doc.pipe(res);
+      doc.lineWidth(0.5); // light grid lines throughout — table borders were invisible before, don't overcorrect to heavy
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
-      const CC=52,CN=105,CD=64,CT=36;
-      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/dates.length);
-      const RH=14;
-      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+dates.length*dW,tW=xT+CT-ML;
+      const CC=52,CN=130,CD=64,CT=40;
+      const CHUNK=15; // days per row — long ranges wrap to a new row instead of squeezing every day into one line
+      const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/CHUNK);
+      const RH=24; // tall enough for a two-line employee name to wrap without spilling into the row below
+      const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+CHUNK*dW,tW=xT+CT-ML;
 
       const addPage=()=>doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
 
-     const drawHdr=y=>{
-  doc.rect(ML,y,tW,20).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
-  doc.rect(ML,y+20,tW,14).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
-  doc.rect(ML,y+34,tW,12).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
-     .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+      // Manual truncation — measured against the real font metrics, so it can't
+      // silently wrap onto a second line the way relying on ellipsis:true can.
+      const truncateToWidth=(str,maxWidth,font='Helvetica-Bold',size=7)=>{
+        doc.font(font).fontSize(size);
+        if (doc.widthOfString(str) <= maxWidth) return str;
+        let s = str;
+        while (s.length > 1 && doc.widthOfString(s+'…') > maxWidth) s = s.slice(0,-1);
+        return s+'…';
+      };
 
-  const y2=y+46;
-  const HRH = multiMonth ? 32 : 24;   // taller header row to fit day-num + weekday (+ month)
+      const drawTitle=y=>{
+        doc.rect(ML,y,tW,20).fillAndStroke('#FFF','#AAA');
+        doc.fillColor('#000').fontSize(12).font('Helvetica-Bold').text('Attendance details of BRP',ML,y+5,{width:tW,align:'center'});
+        doc.rect(ML,y+20,tW,14).fillAndStroke('#FFF','#AAA');
+        doc.fillColor('#161515').fontSize(8).font('Helvetica').text(rangeTitle,ML,y+23,{width:tW,align:'center'});
+        doc.rect(ML,y+34,tW,12).fillAndStroke('#FFF','#AAA');
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold')
+           .text('Location: Tripura',ML+4,y+37).text('Project: Block Resource Person',ML+tW/2,y+37);
+        return y+46;
+      };
 
-  [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
-    doc.rect(x,y2,w,HRH).fill('#FFF').stroke('#AAA');
-    doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
-       .text(l,x+2,y2+(HRH-9)/2,{width:w-4,align:'center'});
-  });
-
-  dates.forEach((iso,i)=>{
-    const x=xD+i*dW;
-    doc.rect(x,y2,dW,HRH).fill('#FFF').stroke('#AAA');
-    doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
-       .text(String(dayNum(iso)),x+1,y2+3,{width:dW-2,align:'center'});
-    doc.fillColor('#555').fontSize(5).font('Helvetica')
-       .text(dayAbbr(iso),x+1,y2+11,{width:dW-2,align:'center'});
-    if (multiMonth) {
-      doc.fillColor('#888').fontSize(5).font('Helvetica')
-         .text(monAbbr(iso),x+1,y2+19,{width:dW-2,align:'center'});
-    }
-  });
-
-  doc.rect(xT,y2,CT,HRH).fill('#FFF').stroke('#AAA');
-  doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
-     .text('Total',xT+2,y2+(HRH-9)/2,{width:CT-4,align:'center'});
-
-  return y2+HRH;
-};
-      let y=drawHdr(ML);
-      matrix.forEach(({emp,cells},idx)=>{
-        if(y+RH>PH-60){addPage();y=drawHdr(28);}
-        const bg=idx%2===0?'#F9F9F9':'#FFF';
-        doc.rect(ML,y,tW,RH).fill(bg).stroke('#CCC');
-        doc.fillColor('#000').fontSize(7).font('Helvetica').text(emp.emp_id||'',xC+2,y+3,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').text(emp.name,xN+2,y+3,{width:CN-4});
-        doc.font('Helvetica').fontSize(6.5).text(emp.role_type||emp.designation||'',xDes+2,y+4,{width:CD-4,align:'center',lineBreak:false,ellipsis:true});
-        let pres=0,locErr=0;
-        cells.forEach((code,i)=>{
-          const x=xD+i*dW;
-          const isRed=code==='L'||code==='A';
-          const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
-          doc.rect(x,y,dW,RH).fill(cellBg).stroke('#CCC');
-            if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
-            const iconSize = Math.min(dW-3, RH-2);
-            doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
-          } else if (code === 'LOC_ERR') {
-            doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+3,{width:dW-2,align:'center'});
-          } else
-            if(code){
-            doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
-               .text(code,x+1,y+3,{width:dW-2,align:'center'});
-          }
-          if(code==='P'||code==='OD') pres++;
-           if(code==='LOC_ERR') locErr++;
+      const drawColHdr=(y,chunkDates,totalLabel)=>{
+        const HRH = 32;   // taller header row to fit day-num + weekday + month
+        [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
+          doc.rect(x,y,w,HRH).fillAndStroke('#FFF','#AAA');
+          doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+             .text(l,x+2,y+(HRH-9)/2,{width:w-4,align:'center'});
         });
-        doc.rect(xT,y,CT,RH).fill('#FFF').stroke('#AAA');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+3,{width:CT-4,align:'center'});
+        chunkDates.forEach((iso,i)=>{
+          const x=xD+i*dW;
+          doc.rect(x,y,dW,HRH).fillAndStroke('#FFF','#AAA');
+          doc.fillColor('#3366FF').fontSize(6).font('Helvetica-Bold')
+             .text(String(dayNum(iso)),x+1,y+3,{width:dW-2,align:'center'});
+          doc.fillColor('#555').fontSize(5).font('Helvetica')
+             .text(dayAbbr(iso),x+1,y+11,{width:dW-2,align:'center'});
+          doc.fillColor('#888').fontSize(5).font('Helvetica')
+             .text(monAbbr(iso),x+1,y+19,{width:dW-2,align:'center'});
+        });
+        // Short last chunk (< CHUNK days) — fill the remaining columns so the grid stays a fixed width
+        for(let i=chunkDates.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,HRH).fillAndStroke('#F5F5F5','#AAA');
+        doc.rect(xT,y,CT,HRH).fillAndStroke('#FFF','#AAA');
+        doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
+           .text(totalLabel,xT+2,y+(HRH-9)/2,{width:CT-4,align:'center'});
+        return y+HRH;
+      };
+
+      const chunks=[];
+      for(let i=0;i<dates.length;i+=CHUNK) chunks.push(dates.slice(i,i+CHUNK));
+
+      let y=drawTitle(ML);
+      chunks.forEach((chunkDates,ci)=>{
+        if(ci>0 && y+RH>PH-60){addPage();y=drawTitle(28);}
+        y=drawColHdr(y,chunkDates,'Subtotal');
+        matrix.forEach(({emp,cells},idx)=>{
+          if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
+          const bg=idx%2===0?'#F9F9F9':'#FFF';
+          doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
+          // Vertical dividers between Emp code / Name / Designation — the
+          // header row already has these per-column, but the data rows only
+          // draw one wide background stripe with no internal separators.
+          doc.lineWidth(0.5).strokeColor('#DDD');
+          [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
+          doc.lineWidth(0.5);
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
+          doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
+          doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
+          const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
+          let pres=0;
+          chunkCells.forEach((code,i)=>{
+            const x=xD+i*dW;
+            const isRed=code==='L'||code==='A';
+            const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+            doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
+              if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
+              const iconSize = Math.min(dW-3, RH-2);
+              doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
+            } else if (code === 'LOC_ERR') {
+              doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+8,{width:dW-2,align:'center'});
+            } else
+              if(code){
+              doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+                 .text(code,x+1,y+8,{width:dW-2,align:'center'});
+            }
+            if(code==='P'||code==='OD') pres++;
+          });
+          for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fillAndStroke('#F5F5F5','#CCC');
+          doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
+          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+7,{width:CT-4,align:'center'});
+          y+=RH;
+        });
+      });
+
+      // ── Grand Total block — one row per employee, full-period total ─────────
+      if(y+RH*2>PH-60){addPage();y=28;}
+      y+=6;
+      doc.rect(ML,y,tW,16).fillAndStroke('#1F3864','#1F3864');
+      doc.fillColor('#FFFFFF').fontSize(8).font('Helvetica-Bold').text('GRAND TOTAL — Full Period',ML,y+4,{width:tW,align:'center'});
+      y+=16;
+      matrix.forEach(({emp,cells},idx)=>{
+        if(y+RH>PH-60){addPage();y=28;}
+        const bg=idx%2===0?'#F9F9F9':'#FFF';
+        doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
+        doc.lineWidth(0.5).strokeColor('#DDD');
+        [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
+        doc.lineWidth(0.5);
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
+        doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
+        doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
+        const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
+        doc.rect(xD,y,CHUNK*dW,RH).fillAndStroke('#EEF2FF','#CCC');
+        doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+7,{width:CHUNK*dW,align:'center'});
+        doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
+        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+7,{width:CT-4,align:'center'});
         y+=RH;
       });
 
-      // Legend
+      // Legend — separated from the table with its own rule line + gap
       y+=10; if(y+20>PH-80){addPage();y=40;}
+      doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#CBD5E1').stroke();
+      y+=4;
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
@@ -765,25 +812,26 @@ ws.getColumn(6).width = 15;
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
       ].forEach(({code,label,red})=>{
-        const bw=14,lw=76;
-        doc.rect(lx,y,bw,10).fill(red?'#FF4444':'#FFFFFF').stroke('#999');
+        const bw=14,lw=115;
+        doc.rect(lx,y,bw,10).fillAndStroke(red?'#FF4444':'#FFFFFF','#999');
         doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
-        doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw});
-        lx+=bw+lw+4;
+        doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
+        lx+=bw+lw+10;
       });
    {
-        const bw=14,lw=150;
+        const bw=14,lw=170;
         if (PIN_ERROR_PNG_BUFFER) {
           doc.image(PIN_ERROR_PNG_PATH, lx, y-1, {width:bw, height:bw*84/64});
         } else {
-          doc.rect(lx,y,bw,10).fill('#FFFFFF').stroke('#999');
+          doc.rect(lx,y,bw,10).fillAndStroke('#FFFFFF','#999');
           doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',lx+1,y+2,{width:bw-2,align:'center'});
         }
-        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw});
-        lx+=bw+lw+4;
+        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
+        lx+=bw+lw+10;
       }
-      // NEW: same blank-cell explanation as the Excel legend note.
-      y+=12;
+      // Same blank-cell explanation as the Excel legend note — given its own
+      // clear row below the legend so it never collides with legend labels.
+      y+=16;
       doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
          .text('Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.', ML, y, { width: tW });
       y+=18;
@@ -791,19 +839,21 @@ ws.getColumn(6).width = 15;
       // Summary
       y+=4; if(y+130>PH-60){addPage();y=40;}
       const SW=240,SRH=16,SX=ML; let sy=y;
-      const pdfRow=(label,value,type='row')=>{
-        if(type==='title'){doc.rect(SX,sy,SW,SRH).fill('#FFF').stroke('#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
-        else if(type==='sub'){doc.rect(SX,sy,SW,SRH).fill('#E8EDF4').stroke('#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
+      const pdfRow=(label,value,type='row',rowH=SRH)=>{
+        if(type==='title'){doc.rect(SX,sy,SW,rowH).fillAndStroke('#FFF','#000'); doc.fillColor('#C00000').fontSize(10).font('Helvetica-Bold').text(label,SX+4,sy+5,{width:SW-8,align:'center'});}
+        else if(type==='sub'){doc.rect(SX,sy,SW,rowH).fillAndStroke('#E8EDF4','#000'); doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX,sy+3,{width:SW,align:'center'});}
         else{
-          doc.rect(SX,sy,SW*0.72,SRH).fill('#FFF').stroke('#000');
-          doc.rect(SX+SW*0.72,sy,SW*0.28,SRH).fill('#FFF').stroke('#000');
+          doc.rect(SX,sy,SW*0.72,rowH).fillAndStroke('#FFF','#000');
+          doc.rect(SX+SW*0.72,sy,SW*0.28,rowH).fillAndStroke('#FFF','#000');
           doc.fillColor('#1F3864').fontSize(9).font('Helvetica-Bold').text(label,SX+4,sy+3,{width:SW*0.68});
           if(value!==undefined) doc.text(String(value),SX+SW*0.72,sy+3,{width:SW*0.26,align:'center'});
         }
-        sy+=SRH;
+        sy+=rowH;
       };
+      // Title row gets extra height — the employee's full name + "Summary" often
+      // wraps to two lines at this width, and the fixed SRH was too short for that.
       const summaryTitle=role==='employee'?`${matrix[0]?.emp.name} Summary`:role==='manager'?'Team Summary':'Total Summary';
-      pdfRow(summaryTitle,undefined,'title');
+      pdfRow(summaryTitle,undefined,'title',34);
       pdfRow('No of Total Days',totalDays);
       pdfRow('No of Weekoff (WO)',woCount);
       pdfRow('No of Holidays (H)',holCount);
@@ -833,7 +883,7 @@ ws.getColumn(6).width = 15;
 
   pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
   pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
-  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
+  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length, 'row', 26);
   pdfRow('No of Emergency Leaves',                 emergencyRecs.length);
   pdfRow('No of Casual Leaves',                    casualRecs.length);
   pdfRow('Total Effective Leaves',                 effectiveLeaves);
@@ -848,10 +898,10 @@ ws.getColumn(6).width = 15;
         const C2 = TW * 0.18;
         const C3 = TW * 0.18;
 
-        doc.rect(SX,        sy, C0, SRH).fill('#E8EDF4').stroke('#000');
-        doc.rect(SX+C0,     sy, C1, SRH).fill('#D1FAE5').stroke('#000');
-        doc.rect(SX+C0+C1,  sy, C2, SRH).fill('#FEF3C7').stroke('#000');
-        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill('#FEE2E2').stroke('#000');
+        doc.rect(SX,        sy, C0, SRH).fillAndStroke('#E8EDF4','#000');
+        doc.rect(SX+C0,     sy, C1, SRH).fillAndStroke('#D1FAE5','#000');
+        doc.rect(SX+C0+C1,  sy, C2, SRH).fillAndStroke('#FEF3C7','#000');
+        doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke('#FEE2E2','#000');
 
         doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    sy+4, {width:C0-8});
         doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   sy+4, {width:C1,align:'center'});
@@ -861,10 +911,10 @@ ws.getColumn(6).width = 15;
 
         matrix.forEach(({ emp, cells }, idx) => {
           const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-          doc.rect(SX,          sy, C0, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0,       sy, C1, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1,    sy, C2, SRH).fill(bg).stroke('#CCCCCC');
-          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fill(bg).stroke('#CCCCCC');
+          doc.rect(SX,          sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0,       sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0+C1,    sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
+          doc.rect(SX+C0+C1+C2, sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
 
           const pres = cells.filter(c => c==='P'||c==='OD').length;
           const lv   = cells.filter(c => c==='L').length;

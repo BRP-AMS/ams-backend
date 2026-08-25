@@ -339,7 +339,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     const [records, approvedLeaves, pendingLeaves] = await Promise.all([
       AttendanceRecord.find(
         { date: today, checkin_time: { $ne: null }, ...empFilter },
-        'emp_id checkin_time checkout_time status attendance_type leave_type'
+        'emp_id checkin_time checkout_time status attendance_type leave_type is_missed_checkout'
       ).lean(),
       AttendanceRecord.find(
         { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
@@ -362,6 +362,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
         status:           r.status,
         attendanceType:   r.attendance_type || null,
         leaveType:        r.leave_type      || null,
+        isMissedCheckout: r.is_missed_checkout === true,
       };
     });
     approvedLeaves.forEach(r => {

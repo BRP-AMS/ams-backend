@@ -443,7 +443,7 @@ router.post('/checkin', authenticate, authorize('employee'), upload.single('self
     // status moves to 'Approved' / 'Rejected' and this no longer matches.
     if (prevRecord && !prevRecord.checkout_time) {
       const isUnresolvedMissed =
-        prevRecord.is_missed_checkout === true ||
+        (prevRecord.is_missed_checkout === true && prevRecord.status === 'Pending') ||
         (prevRecord.status === 'Draft' && prevRecord.date < today);
       if (isUnresolvedMissed) {
         return res.status(403).json({

@@ -1443,6 +1443,66 @@ router.put('/:id/manual-checkout', authenticate, authorize('admin'), [
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/attendance/mark-present
+// Admin-only — for a day with NO attendance record at all (employee never
+// checked in, e.g. during a server outage). Creates a Regular/Approved
+// record on the employee's behalf. Distinct from /regularize, which only
+// fixes an *existing* Partial/Irregular/Emergency/Half-Day record.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/mark-present', authenticate, authorize('admin'), [
+  body('empId').trim().notEmpty().withMessage('Employee is required'),
+  body('date').matches(/^\d{4}-\d{2}-\d{2}$/).withMessage('A valid date is required'),
+  body('remark').trim().notEmpty().withMessage('A remark is required to mark attendance present'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { empId, date, remark } = req.body;
+    const today = istDateStr();
+    if (date > today) return res.status(400).json({ success: false, message: 'Cannot mark a future date present' });
+
+    const employee = await User.findById(empId).select('manager_id name').lean();
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    const existing = await AttendanceRecord.findOne({ emp_id: empId, date }).lean();
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'A record already exists for this day — use Regularize or Check Out instead.' });
+    }
+
+    const timeRe = /^\d{2}:\d{2}$/;
+    const checkinTime  = (req.body.checkinTime  && timeRe.test(req.body.checkinTime))  ? req.body.checkinTime  : '09:00';
+    const checkoutTime = (req.body.checkoutTime && timeRe.test(req.body.checkoutTime)) ? req.body.checkoutTime : '18:00';
+    const checkinDateTime  = new Date(`${date}T${checkinTime}:00+05:30`);
+    const checkoutDateTime = new Date(`${date}T${checkoutTime}:00+05:30`);
+    if (checkoutDateTime < checkinDateTime) {
+      return res.status(400).json({ success: false, message: 'Check-out time cannot be before check-in time' });
+    }
+    const workedHours = Math.round(((checkoutDateTime - checkinDateTime) / 3600000) * 100) / 100;
+
+    const id = uuidv4();
+    await AttendanceRecord.create({
+      _id: id, emp_id: empId, date, duty_type: 'Office Duty',
+      status: 'Approved', attendance_type: 'Regular',
+      checkin_time: checkinTime, checkout_time: checkoutTime, worked_hours: workedHours,
+      manager_id: employee.manager_id || null,
+      admin_remark: remark,
+      checkout_remarks: `Marked present by Admin (no check-in recorded): ${remark}`,
+      actioned_by: req.user.id, actioned_at: new Date(), submitted_at: new Date(),
+    });
+    const record = await AttendanceRecord.findById(id).lean();
+
+    await finishAdminCorrection(req, res, record, {
+      notifyTitle:   '✅ Attendance Marked Present by Admin',
+      notifyMsg:     `Your attendance for ${date} was marked present by Admin: ${remark}`,
+      auditAction:   'ADMIN_MARK_PRESENT',
+      auditOldValue: 'no record',
+      auditNewValue: 'Approved',
+      successMsg:    'Attendance marked present',
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/hr-override
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {

@@ -132,14 +132,6 @@ const { v4: uuidv4 } = require('uuid');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CRON 1 — Midnight IST (00:05): Mark unchecked-out records as missed-checkout
-//
-// Finds any Draft attendance record from YESTERDAY or earlier that has a
-// check-in but NO check-out, and converts it to:
-//   status           = 'Pending'
-//   is_missed_checkout = true
-//
-// This places it in the manager's queue so they can approve/reject it.
-// The employee is BLOCKED from checking in again until the manager acts.
 // ─────────────────────────────────────────────────────────────────────────────
 cron.schedule('5 0 * * *', async () => {
   console.log('[MissedCheckout Cron] Running at midnight IST...');
@@ -275,22 +267,6 @@ cron.schedule('30 18-23 * * *', async () => {
   timezone: 'Asia/Kolkata',
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NOTE: The old CRON 3 ("system auto check-out after 8 hours") has been
-// removed on purpose. The system must never check an employee out for them.
-//
-// The employee ALWAYS checks out manually (with selfie + GPS + text address).
-// If they miss it, CRON 1 (midnight) flags the record as a missed check-out
-// and routes it to the manager queue. CRON 2 (6:30pm–11:30pm) nudges anyone
-// still checked in. When the employee eventually taps "Check Out" on a
-// missed-checkout record, the route in attendance.js (PUT /:id/checkout,
-// `record.is_missed_checkout` branch) auto-approves it if 8+ hours had
-// elapsed since check-in, otherwise it stays Pending for one manager
-// approve/reject decision. That logic already lived in attendance.js and
-// is untouched — this cron was the only thing fighting it.
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ── Revoked-token pruning ─────────────────────────────────────────────────
 const pruneRevokedTokens = async () => {

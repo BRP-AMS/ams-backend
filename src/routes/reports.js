@@ -1,42 +1,4 @@
-/**
- * src/routes/reports.js
- *
- * P/OD logic (location-based, per employee assignment):
- *   - Employee has NO assigned_block/assigned_district → always P (default)
- *   - Employee HAS assignment:
- *       check-in location matches assigned_block or assigned_district → P
- *       check-in location is in ANY Tripura block/district (but not assigned) → OD
- *       check-in location is outside ALL known blocks/districts → '' (blank)
- *
- * Cell codes:
- *   P       = Present at assigned location        → no colour
- *   OD      = On Duty at other Tripura location    → no colour
- *   L       = Leave (approved) OR rejected leave with no re-check-in → RED
- *   A       = Absent (no check-in, after join)     → RED
- *   WO      = Weekend                              → light blue
- *   LOC_ERR = Checked in but GPS/network failed to capture a location →
- *             rendered as the location-pin-with-alert icon (pin_error.png),
- *             falls back to a red "!" text marker if the asset is missing
- *   ""      = Blank (future / pre-join / outside all known locations /
- *             leave still pending manager action)
- *
- * Leave status logic (UPDATED — see toCode()):
- *   leave_status === 'Pending'  → blank, for EVERY leave type. No code is
- *                                 shown until the manager approves/rejects it.
- *   leave_status === 'Approved' → L, unconditionally. A Half Day (or any
- *                                 other type) that was later checked in used
- *                                 to fall through to P/OD — it no longer does.
- *   leave_status === 'Rejected' + no re-check-in → L  (LOP)
- *   leave_status === 'Rejected' + re-checked in  → P / OD (normal attendance)
- *
- * endDate always capped to yesterday for ATTENDANCE exports (today is incomplete)
- * Leave exports: NO cap — leaves are complete records
- * Signature row: Employee Sign (left) + Manager Sign (right) — side by side
- *
- * Override mutex:
- *   After manager acts, EITHER hr OR super_admin can override (first-wins).
- *   Once one party overrides, the other sees the remark but cannot override again.
- */
+
 'use strict';
 
 const express  = require('express');

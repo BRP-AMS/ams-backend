@@ -120,13 +120,24 @@ const attendanceRecordSchema = new mongoose.Schema({
   hr_actioned_at:       { type: Date, default: null },
   overridden_by:        { type: String, enum: ['hr', 'super_admin', null], default: null },
   override_remark:      { type: String, default: null },
-  face_verification_status: { type: String, enum: ['pending', 'retake_pending', 'verified', 'failed', 'manager_review', 'manager_approved', 'manager_rejected', null], default: null },
-  face_confidence:          { type: Number, default: null },
+ face_verification_status: {
+  type: String,
+  enum: [
+    'pending', 'processing',
+    'verified', 'error',
+    null
+  ],
+  default: null
+},
+face_confidence:    { type: Number, default: null },
+checkout_face_verification_status: {
+  type: String,
+  enum: ['verified', 'error', null],   // ✅ 'mismatch' removed — mismatches are now blocked before save, never persisted
+  default: null
+},
+checkout_face_confidence: { type: Number, default: null },
   is_missed_checkout:       { type: Boolean, default: false },
   is_lop:                   { type: Boolean, default: false }, // Loss of Pay — balance was insufficient
-  // ── Late check-out (6:30pm prompt) ─────────────────────────────────────
-  // Set when the employee answers "No" to the 6:30pm "check out now?"
-  // prompt and gives a reason instead. Extends their checkout window by
   // 15–20 min and is surfaced to employee / manager / super_admin / hr.
   late_checkout_reason:         { type: String, default: null },
   late_checkout_requested_at:   { type: Date,   default: null },

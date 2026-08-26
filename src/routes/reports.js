@@ -386,7 +386,7 @@ router.get('/export',
     //  EXCEL
     // ══════════════════════════════════════════════════════════════════════════
     if (format==='excel') {
-      const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS';
+      const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS'; wb.calcProperties = { fullCalcOnLoad: true };
 
       const FILL_RED  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFF4444'}};
       const FILL_WO   = {type:'pattern',pattern:'solid',fgColor:{argb:'FFBDD7EE'}};
@@ -681,8 +681,17 @@ ws.getColumn(6).width = 15;
         const allName =role==='manager'?'Team Report':'All emp Reports';
         const allTitle=role==='manager'?'Team Summary':'Total Summary';
         buildSheet(wb.addWorksheet(allName),matrix,allTitle,managerName,holCount);
+        const usedSheetNames = new Set([allName]);
         matrix.forEach(({emp,cells})=>{
-          const name=emp.name.replace(/[:\\/?*[\]]/g,'').substring(0,31);
+          let name=(emp.name||'Employee').replace(/[:\\/?*[\]]/g,'').trim().substring(0,26) || 'Employee';
+          // Sheet names must be unique — two employees can share the same
+          // (or same-after-sanitizing) name, which would otherwise crash
+          // wb.addWorksheet() mid-export and abort the whole file.
+          if (usedSheetNames.has(name)) {
+            const suffix = `_${(emp.emp_id||emp._id||'').toString().slice(-4)}`;
+            name = `${name.substring(0,31-suffix.length)}${suffix}`;
+          }
+          usedSheetNames.add(name);
           buildSheet(wb.addWorksheet(name),[{emp,cells}],`${emp.name} Summary`,managerName,holCount);
         });
       }
@@ -1146,7 +1155,7 @@ router.get('/leave-export',
     //  EXCEL
     // ══════════════════════════════════════════════════════════════════════════
     if (format === 'excel') {
-      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
+      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS'; wb.calcProperties = { fullCalcOnLoad: true };
       const ws = wb.addWorksheet(isMissedReport ? 'Missed Checkout Report' : 'Leave Report');
 
       const FILL_HDR     = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
@@ -1655,7 +1664,7 @@ router.get('/daily-log-export',
     //  EXCEL
     // ══════════════════════════════════════════════════════════════════════
     if (format === 'excel') {
-      const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS';
+      const wb = new ExcelJS.Workbook(); wb.creator='RAMP AMS'; wb.calcProperties = { fullCalcOnLoad: true };
       const ws = wb.addWorksheet('Daily Log');
 
       const NAVY   = {type:'pattern',pattern:'solid',fgColor:{argb:'FF1F3864'}};
@@ -1916,7 +1925,7 @@ router.get('/late-checkout-export',
       : `BRP_LateCheckout_${startDate}_to_${endDate}`;
 
     if (format === 'excel') {
-      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS';
+      const wb = new ExcelJS.Workbook(); wb.creator = 'RAMP AMS'; wb.calcProperties = { fullCalcOnLoad: true };
       const ws = wb.addWorksheet('Late Check-out');
 
       const NAVY = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1F3864' } };

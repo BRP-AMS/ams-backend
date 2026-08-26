@@ -1271,6 +1271,7 @@ function formatUser(u) {
     createdAt:        u.created_at,
     assignedBlock:    u.assigned_block,
     assignedDistrict: u.assigned_district,
+    allocatedEmployeeIds: (u.allocated_employee_ids || []).map(String),
     // ── New grouped scan papers ─────────────────────────────────────
     // Shape: { "2026-04": { month, monthLabel, files: [...] }, ... }
     scan_papers:         papersByMonth,
@@ -1318,6 +1319,30 @@ router.patch('/:id/leave-balance', authenticate, authorize('admin', 'hr', 'super
     }).catch(() => {});
 
     res.json({ success: true, data: { leave_balance: newBalance } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── PATCH /api/users/:id/allocated-employees — Super Admin picks which
+// employees a department_portal account can see. Admin-only, and only
+// meaningful for a target user with role:'department_portal'. ─────────────
+router.patch('/:id/allocated-employees', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
+  try {
+    const { employeeIds } = req.body;
+    if (!Array.isArray(employeeIds)) return res.status(400).json({ success: false, message: 'employeeIds must be an array' });
+
+    const target = await User.findById(req.params.id).select('role').lean();
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    if (target.role !== 'department_portal') {
+      return res.status(400).json({ success: false, message: 'Employee allocation only applies to Department Portal accounts' });
+    }
+
+    const validIds = await User.find({ _id: { $in: employeeIds }, role: 'employee' }, '_id').lean();
+    const cleanIds = validIds.map(e => String(e._id));
+
+    await User.findByIdAndUpdate(req.params.id, { $set: { allocated_employee_ids: cleanIds } });
+    res.json({ success: true, data: { allocated_employee_ids: cleanIds } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

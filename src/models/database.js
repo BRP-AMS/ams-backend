@@ -23,6 +23,9 @@ const userSchema = new mongoose.Schema({
   is_active:         { type: Number, default: 1 },
   assigned_block:    { type: String, default: null },
   assigned_district: { type: String, default: null },
+  // Only meaningful for role:'department_portal' — the specific employees
+  // this dept-portal account is allowed to see, set by Super Admin.
+  allocated_employee_ids: [{ type: String, ref: 'User' }],
   // ── Email verification ───────────────────────────────────────────────
   email_verified:       { type: Boolean, default: false },
   email_verify_token:   { type: String,  default: null },  // hashed token

@@ -5,6 +5,18 @@ const { authenticate, authorize } = require('../middleware/auth');
 
 const guard = [authenticate, authorize('department_portal', 'super_admin')];
 
+// department_portal accounts only see employees Super Admin has allocated
+// to them; super_admin (and any other role that reaches this guard) sees
+// everyone. Returns { role:'employee', is_active:{$ne:0}, [_id]? } ready
+// to spread into a User.find() filter.
+function employeeScope(req) {
+  const base = { role: 'employee', is_active: { $ne: 0 } };
+  if (req.user.role === 'department_portal') {
+    base._id = { $in: (req.user.allocated_employee_ids || []).map(String) };
+  }
+  return base;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function todayIST() {
@@ -99,7 +111,7 @@ router.get('/summary', guard, async (req, res) => {
     const from = isDate(req.query.from) ? req.query.from : (isDate(req.query.date) ? req.query.date : today);
     const to   = isDate(req.query.to)   ? req.query.to   : from;
 
-    const employees = await User.find({ role: 'employee', is_active: { $ne: 0 } }, '_id').lean();
+    const employees = await User.find(employeeScope(req), '_id').lean();
     const totalEmployees = employees.length;
     const userIds = employees.map(e => String(e._id));
 
@@ -170,7 +182,9 @@ router.get('/trend', guard, async (req, res) => {
     const startDate = dateRange[0];
     const endDate   = dateRange[dateRange.length - 1];
 
-    const totalEmployees = await User.countDocuments({ role: 'employee', is_active: { $ne: 0 } });
+    const scope = employeeScope(req);
+    const totalEmployees = await User.countDocuments(scope);
+    const scopedUserIds = scope._id ? scope._id.$in : null;
 
     // Count employees who checked in per day (have a checkin_time, no leave)
     const agg = await AttendanceRecord.aggregate([
@@ -179,6 +193,7 @@ router.get('/trend', guard, async (req, res) => {
           date:        { $gte: startDate, $lte: endDate },
           checkin_time: { $ne: null },
           $or: [{ leave_type: null }, { leave_status: { $ne: 'Approved' } }],
+          ...(scopedUserIds ? { emp_id: { $in: scopedUserIds } } : {}),
         },
       },
       {
@@ -219,7 +234,7 @@ router.get('/by-district', guard, async (req, res) => {
     const to   = isDate(req.query.to)   ? req.query.to   : from;
 
     const employees = await User
-      .find({ role: 'employee', is_active: { $ne: 0 } }, '_id assigned_district')
+      .find(employeeScope(req), '_id assigned_district')
       .lean();
 
     const districtMap = {};
@@ -285,7 +300,7 @@ router.get('/employees-by-district', guard, async (req, res) => {
     const to       = isDate(req.query.to)   ? req.query.to   : from;
     const district = req.query.district || '';
 
-    const query = { role: 'employee', is_active: { $ne: 0 } };
+    const query = employeeScope(req);
     if (district === 'Unassigned') {
       query.$or = [{ assigned_district: null }, { assigned_district: '' }];
     } else if (district) {
@@ -340,7 +355,7 @@ router.get('/export', guard, async (req, res) => {
     const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : todayIST();
 
     const employees = await User
-      .find({ role: 'employee', is_active: { $ne: 0 } }, '_id assigned_district')
+      .find(employeeScope(req), '_id assigned_district')
       .lean();
     const allUserIds = employees.map(e => String(e._id));
     const recordMap  = await fetchRecordMap(allUserIds, date);

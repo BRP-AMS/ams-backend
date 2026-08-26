@@ -21,7 +21,7 @@ const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user    = await User
       .findById(decoded.id)
-      .select('_id emp_id name email role department manager_id phone is_active pwd_changed_at active_session_jti')
+      .select('_id emp_id name email role department manager_id phone is_active pwd_changed_at active_session_jti allocated_employee_ids')
       .lean();
 
     // Handle both numeric (1/0) and boolean (true/false) is_active values

@@ -37,8 +37,10 @@ app.set('trust proxy', 1);
 // error responses) before any other middleware can interfere.
 const ALLOWED_ORIGINS = [
   'https://monitermark.brptripura.com',
-  'https://monitormark.brptripura.com', 
+  'https://monitormark.brptripura.com',
   'https://mm-service.brptripura.com',
+  'https://mm-services.brptripura.com',
+  'https://monitormark-frontend.onrender.com',
   process.env.FRONTEND_URL,
   process.env.BACKEND_URL,
   'http://localhost:3000',
@@ -285,44 +287,6 @@ cron.schedule('30 18-23 * * *', async () => {
     console.log('[MissedCheckout Reminder] Done');
   } catch (err) {
     console.error('[MissedCheckout Reminder] Error:', err.message);
-  }
-}, {
-  timezone: 'Asia/Kolkata',
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CRON 3 — 9:00 AM IST: Email reminder to check in.
-// Skips Sundays/holidays. Emails every active employee who hasn't checked in
-// yet today and isn't on approved leave.
-// ─────────────────────────────────────────────────────────────────────────────
-cron.schedule('0 9 * * *', async () => {
-  console.log('[CheckIn Reminder Email] Cron triggered');
-  try {
-    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    if (await isNonWorkingDayForReminders(todayIST)) return console.log('[CheckIn Reminder Email] Skipped — non-working day');
-
-    const employees = await User.find({ role: 'employee', is_active: { $ne: false } }).select('_id name email').lean();
-    const [checkedIn, onLeave] = await Promise.all([
-      AttendanceRecord.find({ date: todayIST, checkin_time: { $ne: null } }, 'emp_id').lean(),
-      AttendanceRecord.find({
-        duty_type: 'Leave', leave_status: 'Approved',
-        date: { $lte: todayIST }, $or: [{ end_date: null }, { end_date: { $gte: todayIST } }],
-      }, 'emp_id').lean(),
-    ]);
-    const skip = new Set([...checkedIn, ...onLeave].map(r => String(r.emp_id)));
-
-    let sent = 0;
-    for (const emp of employees) {
-      if (skip.has(String(emp._id)) || !emp.email) continue;
-      await sendMail(
-        emp.email, '[AMS] Check-In Reminder',
-        `<p>Hi ${emp.name},</p><p>Reminder to check in for today (${todayIST}).</p>`
-      ).catch(err => console.error('[CheckIn Reminder Email] Send failed for', emp.email, err.message));
-      sent++;
-    }
-    console.log(`[CheckIn Reminder Email] Sent ${sent} reminder(s).`);
-  } catch (err) {
-    console.error('[CheckIn Reminder Email] Error:', err.message);
   }
 }, {
   timezone: 'Asia/Kolkata',

@@ -3,7 +3,7 @@ const router     = express.Router();
 const { Holiday } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
-const MANAGE_ROLES = ['admin', 'super_admin'];
+const MANAGE_ROLES = ['admin', 'super_admin', 'manager'];
 
 const SEED_2026 = [
   { date: '2026-01-14', name: 'Pous Parban',                                        type: 'public' },
@@ -51,7 +51,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/holidays — admin, super_admin only
+// POST /api/holidays — admin, super_admin, manager
 router.post('/', authenticate, authorize(...MANAGE_ROLES), async (req, res) => {
   try {
     const { date, name, type } = req.body;
@@ -67,7 +67,7 @@ router.post('/', authenticate, authorize(...MANAGE_ROLES), async (req, res) => {
   }
 });
 
-// PUT /api/holidays/:id — admin, super_admin only
+// PUT /api/holidays/:id — admin, super_admin, manager
 router.put('/:id', authenticate, authorize(...MANAGE_ROLES), async (req, res) => {
   try {
     const { name, type } = req.body;

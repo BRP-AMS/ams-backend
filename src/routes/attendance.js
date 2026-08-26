@@ -679,8 +679,10 @@ if (prevRecord && !prevRecord.checkout_time) {
     // Late-login email — fire-and-forget, doesn't block the response
     if (checkinTime > '10:00' && currentUserInfo?.email) {
       sendMail(
-        currentUserInfo.email, '[AMS] Late Check-In Recorded',
-        `<p>Hi ${currentUserInfo.name || 'there'},</p><p>Your check-in today (${checkinDate}) was recorded at <strong>${checkinTime}</strong>, after the 10:00 AM cutoff.</p>`
+        currentUserInfo.email, '[AMS] ⚠️ Late Check-In Recorded',
+        `<p>Hi ${currentUserInfo.name || 'there'},</p>
+         <p style="font-size:15px;"><strong style="color:#DC2626;">Your check-in today (${checkinDate}) has been recorded as LATE — at ${checkinTime}, after the 10:00 AM cutoff.</strong></p>
+         <p>This late check-in is visible to your manager. Please ensure you check in before 10:00 AM going forward.</p>`
       ).catch(err => console.error('[CheckIn] Late-login email failed:', err.message));
     }
 
@@ -1005,15 +1007,10 @@ if (leaveType && !String(leaveReason || '').trim()) {
 
     const lateSuffix = updateFields.late_checkout_reason ? ` — Late check-out with reason: ${updateFields.late_checkout_reason}` : '';
 
-     const isFullDay = hoursElapsed >= 7;
-
-    updateFields.status = isFullDay ? 'Approved' : 'Pending';
-    updateFields.manager_remark = isFullDay
-      ? `Worked ${workedHours.toFixed(1)} hours — auto-approved (full day)${lateSuffix}`
-      : `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
-    if (isFullDay) {
-      updateFields.actioned_at = new Date();
-    }
+    // Every checkout requires manager review — no auto-approve path,
+    // regardless of hours worked.
+    updateFields.status = 'Pending';
+    updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
 
         const updated = await AttendanceRecord.findOneAndUpdate(
           { _id: record._id, checkout_time: null },
@@ -1028,17 +1025,11 @@ if (leaveType && !String(leaveReason || '').trim()) {
           });
         }
 
-              if (isFullDay) {
-          // Auto-approved — notify the employee directly, no manager action needed
-          await notify(
-            record.emp_id,
-            '✅ Attendance Approved',
-            `Your attendance for ${record.date} (${workedHours.toFixed(1)} hrs) was auto-approved.`,
-            'success', record._id, '/employee/history'
-          );
-        } else if (record.manager_id) {
+        if (record.manager_id) {
           const emp = await User.findById(req.user.id).select('name').lean();
-          const hoursLabel = hoursElapsed >= 4
+          const hoursLabel = hoursElapsed >= 7
+            ? `Full day (${workedHours.toFixed(1)} hrs)`
+            : hoursElapsed >= 4
             ? `Half Day (${workedHours.toFixed(1)} hrs)`
             : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
           await notify(
@@ -1055,10 +1046,10 @@ if (leaveType && !String(leaveReason || '').trim()) {
           entity_type: 'attendance', entity_id: record._id,
         });
 
-                       res.json({
+        res.json({
           success:             true,
-          message:             isFullDay ? 'Checked out and auto-approved' : 'Checked out and submitted for approval',
-          autoApproved:        isFullDay,
+          message:             'Checked out and submitted for approval',
+          autoApproved:        false,
           data:                formatRecord(updated),
         });
 

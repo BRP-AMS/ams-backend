@@ -230,14 +230,13 @@ router.get('/', authenticate, async (req, res) => {
           ],
         });
       } else if (status === 'Missed Check-out') {
-        // Dedicated filter tab for the Leaves page
-        andConds.push({
-          $or: [
-            { is_missed_checkout: true },
-            { status: 'Draft', checkin_time: { $ne: null }, checkout_time: null, date: { $lt: todayIST } },
-          ],
-        });
-      } else if (onlyLeaves === 'true') {
+  andConds.push({
+    $or: [
+      { is_missed_checkout: true, checkout_time: null },              // ✅ still actually missing
+      { status: 'Draft', checkin_time: { $ne: null }, checkout_time: null, date: { $lt: todayIST } },
+    ],
+  });
+} else if (onlyLeaves === 'true') {
         andConds.push({ $or: [{ leave_status: status }, { is_missed_checkout: true, status } ] });
       } else {
         match.status = status;

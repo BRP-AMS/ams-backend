@@ -1222,7 +1222,11 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
-    const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+ const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+
+    if (req.user.role === 'admin' && (record.is_missed_checkout || isMissedDraft) && record.status === 'Pending') {
+      return res.status(403).json({ success: false, message: 'Manager must act on this missed check-out first.' });
+    }
 
     if (req.user.role === 'manager') {
       const emp = await User.findOne({ _id: record.emp_id, manager_id: req.user.id }).lean();
@@ -1308,6 +1312,10 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     const today = istDateStr();
     const isFaceReviewRecord = record.face_verification_status === 'manager_review';
     const isMissedDraft = record.status === 'Draft' && record.checkin_time && !record.checkout_time && record.date < today;
+
+    if (req.user.role === 'admin' && (record.is_missed_checkout || isMissedDraft) && record.status === 'Pending') {
+      return res.status(403).json({ success: false, message: 'Manager must act on this missed check-out first.' });
+    }
 
     // A manager acts on a given record exactly ONCE. Block re-rejecting
     // something already Approved/Rejected (mirrors the guard on /approve),
@@ -1554,6 +1562,11 @@ router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), asy
     if (!remark?.trim()) return res.status(400).json({ success: false, message: 'Override remark is required' });
     const rec = await AttendanceRecord.findById(req.params.id).lean();
     if (!rec) return res.status(404).json({ success: false, message: 'Record not found' });
+
+    if (rec.status === 'Pending') {
+      return res.status(400).json({ success: false, message: 'Override is only available after the manager has approved or rejected this record.' });
+    }
+
     const role = req.user.role;
     if (rec.overridden_by && rec.overridden_by !== role)
       return res.status(403).json({ success: false, message: `Already overridden by ${rec.overridden_by === 'hr' ? 'HR' : 'Super Admin'}.`, overridden_by: rec.overridden_by });

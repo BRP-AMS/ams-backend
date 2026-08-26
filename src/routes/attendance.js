@@ -1343,6 +1343,9 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
 // Admin-only manual correction for a day left Partial/Irregular/Emergency
 // Leave/Half Day because the employee couldn't check in/out on time (e.g.
 // during a server outage). Marks the day Regular/Approved with an audit trail.
+// Also covers a raw unresolved missed check-out (checkin set, no checkout,
+// never yet classified) as an alternative to /manual-checkout — in that case
+// a check-out time is required to compute worked_hours.
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/regularize', authenticate, authorize('admin'), [
   body('remark').trim().notEmpty().withMessage('A remark is required to regularize attendance'),
@@ -1350,15 +1353,18 @@ router.put('/:id/regularize', authenticate, authorize('admin'), [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
   try {
-    const { remark } = req.body;
+    const { remark, checkoutTime } = req.body;
     const record = await AttendanceRecord.findById(req.params.id).lean();
     if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
 
+    const isMissedCheckout = !!record.checkin_time && !record.checkout_time &&
+      (record.is_missed_checkout === true || record.status === 'Draft');
     const isRegularizable =
       ['Partial', 'Irregular'].includes(record.attendance_type) ||
-      ['Emergency Leave', 'Half Day'].includes(record.leave_type);
+      ['Emergency Leave', 'Half Day'].includes(record.leave_type) ||
+      isMissedCheckout;
     if (!isRegularizable) {
-      return res.status(400).json({ success: false, message: 'Only Partial, Irregular, Emergency Leave, or Half Day records can be regularized.' });
+      return res.status(400).json({ success: false, message: 'Only Partial, Irregular, Emergency Leave, Half Day, or an unresolved Missed Check-out record can be regularized.' });
     }
 
     const update = {
@@ -1371,6 +1377,18 @@ router.put('/:id/regularize', authenticate, authorize('admin'), [
       actioned_by:      req.user.id,
       actioned_at:      new Date(),
     };
+
+    if (isMissedCheckout) {
+      const timeRe = /^\d{2}:\d{2}$/;
+      const finalCheckoutTime = (checkoutTime && timeRe.test(checkoutTime)) ? checkoutTime : istTimeStr();
+      const checkinDateTime  = new Date(`${record.date}T${record.checkin_time}:00+05:30`);
+      const checkoutDateTime = new Date(`${record.date}T${finalCheckoutTime}:00+05:30`);
+      if (checkoutDateTime < checkinDateTime) {
+        return res.status(400).json({ success: false, message: 'Check-out time cannot be before check-in time' });
+      }
+      update.checkout_time = finalCheckoutTime;
+      update.worked_hours  = Math.round(((checkoutDateTime - checkinDateTime) / 3600000) * 100) / 100;
+    }
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
 
     await finishAdminCorrection(req, res, record, {

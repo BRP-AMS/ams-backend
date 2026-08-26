@@ -199,6 +199,12 @@ cron.schedule('5 0 * * *', async () => {
           related_record_id: record._id,
           link:              '/manager/leaves',
         });
+        const manager = await User.findById(record.manager_id).select('name email').lean();
+        if (manager?.email) {
+          sendMail(manager.email, '[AMS] Missed Check-Out — Action Required',
+            `<p>Hi ${manager.name || 'there'},</p><p><strong>${emp?.name || 'An employee'}</strong> did not check out on ${record.date} (checked in at ${record.checkin_time}). They cannot check in again until you approve or reject this record.</p><p>Please review it in the Leaves queue.</p>`
+          ).catch(err => console.error('[MissedCheckout Cron] Manager email failed:', err.message));
+        }
       }
 
       await require('./src/models/database').AuditLog?.create?.({

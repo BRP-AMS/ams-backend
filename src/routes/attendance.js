@@ -1242,18 +1242,26 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
 
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
 
-    const notifTitle = record.is_missed_checkout ? 'Missed Check-Out Approved ✓' : record.leave_type ? 'Leave Approved ✓' : 'Attendance Approved ✓';
-    const notifMsg   = record.is_missed_checkout
+    // `record` was fetched before the isMissedDraft branch above set
+    // is_missed_checkout:true, so it's stale for that flag — combine with
+    // isMissedDraft so the notification/email below reflect what actually
+    // happened, not the record's pre-update state.
+    const isMissedCheckoutRecord = record.is_missed_checkout || isMissedDraft;
+    const notifTitle = isMissedCheckoutRecord ? 'Missed Check-Out Approved ✓' : record.leave_type ? 'Leave Approved ✓' : 'Attendance Approved ✓';
+    const notifMsg   = isMissedCheckoutRecord
       ? `Your missed check-out on ${record.date} has been approved by your manager. You may check in again.`
       : record.leave_type ? `Your ${record.leave_type} for ${record.date} has been approved.` : `Your attendance for ${record.date} has been approved.`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'success', record._id, '/employee/history');
 
-    if (record.leave_type) {
+    if (record.leave_type || isMissedCheckoutRecord) {
       const empUser = await User.findById(record.emp_id).select('email name').lean();
       if (empUser?.email) {
-        sendMail(empUser.email, `[AMS] ${record.leave_type} Approved`,
-          `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong>.</p>`);
+        const subject = record.leave_type ? `[AMS] ${record.leave_type} Approved` : '[AMS] Missed Check-Out Approved';
+        const body = record.leave_type
+          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong>.</p>`
+          : `<p>Hi ${empUser.name},</p><p>Your missed check-out on <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong> by your manager. You may check in again.</p>`;
+        sendMail(empUser.email, subject, body).catch(err => console.error('[Approve] Employee email failed:', err.message));
       }
     }
 
@@ -1316,20 +1324,26 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     }
 
     const isFaceReject = record.face_verification_status === 'manager_review';
-    const notifTitle = isFaceReject ? 'Check-In Rejected ✗' : record.is_missed_checkout ? 'Missed Check-Out Rejected ✗' : record.leave_type ? 'Leave Rejected ✗' : 'Attendance Rejected ✗';
+    // Same staleness issue as /approve — record was fetched before the
+    // isMissedDraft branch set is_missed_checkout:true.
+    const isMissedCheckoutRecord = record.is_missed_checkout || isMissedDraft;
+    const notifTitle = isFaceReject ? 'Check-In Rejected ✗' : isMissedCheckoutRecord ? 'Missed Check-Out Rejected ✗' : record.leave_type ? 'Leave Rejected ✗' : 'Attendance Rejected ✗';
     const notifMsg   = isFaceReject
       ? `Your check-in for ${record.date} was rejected by your manager: ${remark}`
-      : record.is_missed_checkout
+      : isMissedCheckoutRecord
         ? `Your missed check-out on ${record.date} was rejected: ${remark}. You may check in again.`
         : record.leave_type ? `Your ${record.leave_type} for ${record.date} was rejected: ${remark}` : `Your attendance for ${record.date} was rejected: ${remark}`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'error', record._id, '/employee/history');
 
-    if (record.leave_type) {
+    if (record.leave_type || isMissedCheckoutRecord) {
       const empUser = await User.findById(record.emp_id).select('email name').lean();
       if (empUser?.email) {
-        sendMail(empUser.email, `[AMS] ${record.leave_type} Rejected`,
-          `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#dc2626">rejected</strong>.</p><p><strong>Reason:</strong> ${remark}</p>`);
+        const subject = record.leave_type ? `[AMS] ${record.leave_type} Rejected` : '[AMS] Missed Check-Out Rejected';
+        const body = record.leave_type
+          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#dc2626">rejected</strong>.</p><p><strong>Reason:</strong> ${remark}</p>`
+          : `<p>Hi ${empUser.name},</p><p>Your missed check-out on <strong>${record.date}</strong> was <strong style="color:#dc2626">rejected</strong> by your manager.</p><p><strong>Reason:</strong> ${remark}</p><p>You may check in again.</p>`;
+        sendMail(empUser.email, subject, body).catch(err => console.error('[Reject] Employee email failed:', err.message));
       }
     }
 

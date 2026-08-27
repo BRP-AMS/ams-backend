@@ -119,7 +119,7 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
 
 // ── GET /api/activity ──────────────────────────────────────────────────
 router.get('/', authenticate, [
-  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'custom']),
+  query('filter').optional().isIn(['weekly', 'biweekly', 'monthly', 'custom', 'all']), // ← add 'all'
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
   query('block').optional().trim(),
@@ -139,8 +139,12 @@ router.get('/', authenticate, [
     if (support_type && !safeParam.test(support_type))
       return res.status(400).json({ success: false, message: 'Invalid support_type parameter' });
 
-    const { start, end } = dateRangeFromFilter(filter, startDate, endDate);
-    const matchFilter = { activity_date: { $gte: start, $lte: end } };
+    const matchFilter = {};
+    let start = 'All', end = 'All';
+    if (filter !== 'all') {
+      ({ start, end } = dateRangeFromFilter(filter, startDate, endDate));
+      matchFilter.activity_date = { $gte: start, $lte: end };
+    }
 
     if (req.user.role === 'employee') {
       // Some old records store user_id as emp_id (legacy), new ones use UUID _id

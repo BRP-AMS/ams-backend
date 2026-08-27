@@ -8,43 +8,6 @@ const PDFDoc   = require('pdfkit');
 const mongoose = require('mongoose');
 const { AttendanceRecord, User, Holiday } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const fs       = require('fs');
-const path     = require('path');
-const PIN_ERROR_PNG_PATH = path.join(__dirname, '../assets/pin_error.png');
-// Load defensively — a missing/renamed asset should degrade to the 'LOC_ERR'
-// text code instead of crashing the whole reports router at require-time.
-let PIN_ERROR_PNG_BUFFER = null;
-try {
-  PIN_ERROR_PNG_BUFFER = fs.readFileSync(PIN_ERROR_PNG_PATH);
-} catch (e) {
-  console.error('[reports.js] pin_error.png not found — LOC_ERR cells will fall back to text.', e.message);
-}
-
-// ── Tripura blocks & districts ────────────────────────────────────────────────
-const TRIPURA_BLOCKS = [
-  'Agartala','Amarpur','Ambassa','Bagafa','Belonia','Bishalgarh','Boxanagar',
-  'Dhalai','Dharmanagar','Gandacherra','Jampui Hills','Jolaibari','Jirania',
-  'Kakraban','Kamalpur','Kanchanpur','Karbook','Khowai','Lefunga',
-  'Longtarai Valley','Majlishpur','Matarbari','Melaghar','Mohanpur',
-  'Mungiakami','Murasingh','Nasingh Para','Padmabil','Panisagar',
-  'Ramchandraghat','Rupaichari','Sabroom','Salema','Sonamura','Surma','Teliamura',
-];
-const TRIPURA_DISTRICTS = [
-  'Dhalai','Gomati','Khowai','North Tripura','Sipahijala',
-  'South Tripura','Unakoti','West Tripura',
-];
-const ALL_TRIPURA = [...TRIPURA_BLOCKS, ...TRIPURA_DISTRICTS, 'Tripura'];
-
-const isInTripura = addr => {
-  if (!addr) return false;
-  const a = addr.toLowerCase();
-  return ALL_TRIPURA.some(loc => a.includes(loc.toLowerCase()));
-};
-
-const matchesLocation = (addr, locationName) => {
-  if (!addr || !locationName) return false;
-  return addr.toLowerCase().includes(locationName.toLowerCase());
-};
 const https = require('https');
 const _geocodeCache = new Map(); // "lat,lng" (4dp) -> address string
 
@@ -195,9 +158,6 @@ const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-
 //     employee, same visual as a normal approved leave).
 //   • Rejected leave WITH a re-check-in → falls through to normal attendance
 //     (the employee actually came in after the rejection).
-//   • Checked in but GPS/network failed to capture a usable address → 'LOC_ERR'
-//     (rendered as the location-pin-with-alert icon, not a text code — see
-//     `PIN_ERROR_PNG_BUFFER` usage below).
 const toCode = (rec, assignedBlock, assignedDistrict) => {
   if (!rec) return 'A';
 
@@ -222,29 +182,17 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   // ── Regular attendance ─────────────────────────────────────────────────────
   if (rec.status === 'Rejected') return 'A';
 
-  // duty_type drives P vs OD — location is only a fallback
+  // duty_type drives P vs OD.
   const dutyType = (rec.duty_type || '').trim();
 
-  if (dutyType === 'On Duty') return 'OD';   // employee chose "On Duty (Field)"
+  if (dutyType === 'On Duty' || dutyType === 'On Duty Away') return 'OD';
 
-  // dutyType === 'Office Duty' (or blank/unknown) → location-based check
-  const addr = rec.location_address || rec.locationAddress || '';
-
-  // No assignment → always P
-  if (!assignedBlock && !assignedDistrict) return 'P';
-
-  const matchesAssigned =
-    (assignedBlock    && matchesLocation(addr, assignedBlock))   ||
-    (assignedDistrict && matchesLocation(addr, assignedDistrict));
-
-  if (matchesAssigned)   return 'P';    // at assigned workplace
-  if (isInTripura(addr)) return 'OD';   // elsewhere in Tripura (location fallback)
-
-  // Check-in didn't resolve to the assigned location or anywhere in Tripura —
-  // covers: GPS/network failed at check-in (no address captured), employee
-  // didn't grant location permission, or the resolved address is genuinely
-  // outside all known blocks/districts. All of these get the same icon.
-  return 'LOC_ERR';
+  // Office Duty (or blank/unknown) — check-in is geofenced to the employee's
+  // assigned block already (POST /checkin rejects a check-in more than 200m
+  // away), so a resolved check-in here is always at the assigned workplace.
+  // No further location-text verification needed — the old LOC_ERR fallback
+  // (address text didn't match / GPS failed) is retired for the same reason.
+  return 'P';
 };
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/reports/export
@@ -398,7 +346,6 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         if (code==='H')             return FILL_HOL;
-        if (code==='LOC_ERR')       return rf;   // neutral — icon carries the meaning
         return rf;
       };
     const TH  = ()=>({style:'thin',  color:{argb:'FFCCCCCC'}});
@@ -414,9 +361,6 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       };
   const buildSheet = (ws, empList, sheetTitle, mgrName,hCount=0) => {
         const LAST = 4+dates.length;
-        const pinImgId = PIN_ERROR_PNG_BUFFER
-          ? wb.addImage({ buffer: PIN_ERROR_PNG_BUFFER, extension: 'png' })
-          : null;
 
         // ── Rows 1-3: header ──────────────────────────────────────────────────
         mc(ws,1,2,1,LAST);
@@ -458,21 +402,8 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             c.alignment={horizontal:'center',vertical:'center',wrapText:false};
             c.fill=codeFill(code,rf); c.protection={locked:true};
 
-            if (code === 'LOC_ERR' && pinImgId != null) {
-              c.value = '';
-              ws.addImage(pinImgId, {
-                tl: { col: (4+i) + 0.2, row: (rowN-1) + 0.12 },
-                br: { col: (4+i) + 0.8, row: (rowN-1) + 0.88 },
-                editAs: 'oneCell',
-              });
-            } else if (code === 'LOC_ERR') {
-              // Icon asset missing — fall back to a plain text marker.
-              c.value = '⚠';
-              c.font  = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FFDC2626' } };
-            } else {
-              c.value = code;
-              c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
-            }
+            c.value = code;
+            c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
           });
         });
 
@@ -486,26 +417,13 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
          {code:'L',label:'Leave / LOP',isRed:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
-         {code:'LOC_ERR',label:'Location not captured (GPS/network failed)',isRed:false,isIcon:true},
         ];
-        legendItems.forEach(({code,label,isRed,isAmber,isIcon},i)=>{
+        legendItems.forEach(({code,label,isRed,isAmber},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
           cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          if (isIcon && pinImgId != null) {
-            cc.value=''; cc.fill=FILL_WHT;
-            ws.addImage(pinImgId, {
-              tl: { col: (4+i*2) + 0.15, row: (legendRow-1) + 0.05 },
-              br: { col: (4+i*2) + 0.85, row: (legendRow-1) + 0.95 },
-              editAs: 'oneCell',
-            });
-          } else if (isIcon) {
-            cc.value='⚠'; cc.fill=FILL_WHT;
-            cc.font={bold:true,size:8,name:'Calibri',color:{argb:'FFDC2626'}};
-          } else {
-            cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
-            cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
-          }
+          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
+          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         });
@@ -569,7 +487,6 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
     if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
     return sum;
   }, 0);
-  const locErrCount = empList[0].cells.filter(c => c === 'LOC_ERR').length;
   sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
   sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
   sumRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
@@ -578,14 +495,12 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   sumRow('Total Effective Leaves', effectiveLeaves);
   sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
   sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
-    sumRow('No of Location Not Captured', locErrCount);
 }else {
           // ── Table header row ────────────────────────────────────────────────
           r++; ws.getRow(r).height = 17;
           ws.getColumn(2).width = 22; ws.getColumn(3).width = 16;
           ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
-ws.getColumn(6).width = 15;
-         [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C'], ['Loc. Not Captured','FF6B7280']].forEach(([hdr, argb], i) => {
+         [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C']].forEach(([hdr, argb], i) => {
             const c = ws.getCell(r, 2 + i);
             c.value = hdr; c.fill = FILL_SUBH; c.border = CBDR;
             c.font = { bold: true, size: 10, color: { argb }, name: 'Calibri' };
@@ -624,16 +539,10 @@ ws.getColumn(6).width = 15;
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
 
-            const cnl = ws.getCell(r, 6);
-            cnl.value = empList[idx].cells.filter(c => c === 'LOC_ERR').length; // computed in JS — not a cell-text COUNTIF
-            cnl.fill = rf; cnl.border = CBDR;
-            cnl.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF6B7280' } };
-            cnl.alignment = { horizontal: 'center', vertical: 'center' };
-            cnl.protection = { locked: true };
           });
         }
 
-        outerBorder(ws, SR, 2, r, 6);
+        outerBorder(ws, SR, 2, r, 5);
 
         // ── Signatures ────────────────────────────────────────────────────────
         r+=3; ws.getRow(r).height=20;
@@ -799,13 +708,7 @@ ws.getColumn(6).width = 15;
             const isRed=code==='L'||code==='A';
             const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
             doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
-              if (code === 'LOC_ERR' && PIN_ERROR_PNG_BUFFER) {
-              const iconSize = Math.min(dW-3, RH-2);
-              doc.image(PIN_ERROR_PNG_PATH, x+(dW-iconSize)/2, y+(RH-iconSize)/2, {width:iconSize, height:iconSize});
-            } else if (code === 'LOC_ERR') {
-              doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',x+1,y+8,{width:dW-2,align:'center'});
-            } else
-              if(code){
+            if(code){
               doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
                  .text(code,x+1,y+8,{width:dW-2,align:'center'});
             }
@@ -859,17 +762,6 @@ ws.getColumn(6).width = 15;
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
         lx+=bw+lw+10;
       });
-   {
-        const bw=14,lw=170;
-        if (PIN_ERROR_PNG_BUFFER) {
-          doc.image(PIN_ERROR_PNG_PATH, lx, y-1, {width:bw, height:bw*84/64});
-        } else {
-          doc.rect(lx,y,bw,10).fillAndStroke('#FFFFFF','#999');
-          doc.fillColor('#DC2626').fontSize(6).font('Helvetica-Bold').text('!',lx+1,y+2,{width:bw-2,align:'center'});
-        }
-        doc.fillColor('#333').fontSize(7).font('Helvetica').text('Location not captured (GPS/network failed)',lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
-        lx+=bw+lw+10;
-      }
       // Same blank-cell explanation as the Excel legend note — given its own
       // clear row below the legend so it never collides with legend labels.
       y+=16;
@@ -931,7 +823,6 @@ ws.getColumn(6).width = 15;
   pdfRow('Total Effective Leaves',                 effectiveLeaves);
   pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
   pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);
-  pdfRow('No of Location Not Captured',    cells.filter(c => c==='LOC_ERR').length);
 } else {
   sy++;
   const TW = SW;

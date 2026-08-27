@@ -120,6 +120,106 @@ router.put('/:id', authenticate, authorize('admin', 'super_admin'), async (req, 
   }
 });
 
+// ── Bulk coordinate import ───────────────────────────────────────────────────
+// Admin pastes a table (Block Name / District / Lat / Long) copied from a
+// spreadsheet. Names in the wild rarely match stored block_name exactly
+// ("Pecharthal RD Block" vs stored "Pecharthal"), so matching strips the
+// generic "R.D Block"/"Block" suffix but keeps "Municipal Council"/"Nagar
+// Panchayat" (those ARE distinct blocks from their base-name counterpart,
+// e.g. "Ambassa" vs "Ambassa Municipal Council" are two separate rows).
+const normalizeBlockName = s => String(s || '')
+  .toLowerCase()
+  .replace(/[.,°'"]/g, '')
+  .replace(/\br\.?\s*d\.?\s*block\b/g, '')
+  .replace(/\bblock\b/g, '')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const normalizeDistrict = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+// Tripura's rough bounding box — flags obviously-wrong coordinates (e.g. a
+// copy-paste from a different state) without blocking the import outright.
+const TRIPURA_BBOX = { latMin: 22.5, latMax: 24.8, lngMin: 90.8, lngMax: 92.6 };
+
+// Pulls the first decimal-degree number out of a messy pasted value —
+// handles "23.831°", "23.831 Degree", plain "23.831". Returns null for
+// genuinely unparseable input (DMS notation, dates, garbage) rather than
+// guessing — those rows must be entered manually via the per-block editor.
+const parseCoord = (raw) => {
+  if (raw == null) return null;
+  const m = String(raw).match(/-?\d+\.\d+/);
+  return m ? parseFloat(m[0]) : null;
+};
+
+// POST /api/blocks/bulk-coordinates — dryRun:true previews matches without
+// writing; dryRun:false (or omitted) commits every row that matched exactly
+// one existing block. Unmatched/ambiguous/unparseable/out-of-bounds rows are
+// always skipped and reported back, never guessed at.
+router.post('/bulk-coordinates', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
+  try {
+    const { rows, dryRun } = req.body;
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ success: false, message: 'rows array required' });
+    }
+
+    const allBlocks = await CustomBlock.find({}).lean();
+
+    const results = rows.map(row => {
+      const { blockName, district } = row;
+      const lat = parseCoord(row.latitude);
+      const lng = parseCoord(row.longitude);
+      const base = { input: row };
+
+      if (!blockName?.trim()) return { ...base, status: 'error', reason: 'No block name' };
+      if (lat === null || lng === null) return { ...base, status: 'error', reason: 'Could not parse latitude/longitude (not plain decimal degrees)' };
+      if (lat < TRIPURA_BBOX.latMin || lat > TRIPURA_BBOX.latMax || lng < TRIPURA_BBOX.lngMin || lng > TRIPURA_BBOX.lngMax) {
+        return { ...base, status: 'error', reason: `Coordinates (${lat}, ${lng}) are outside Tripura — looks wrong, not imported` };
+      }
+
+      const normName = normalizeBlockName(blockName);
+      const normDist = normalizeDistrict(district);
+
+      // Prefer a match within the stated district; fall back to a name-only
+      // match anywhere (district field in pasted data is often mistyped).
+      let candidates = allBlocks.filter(b => normalizeBlockName(b.block_name) === normName && normalizeDistrict(b.district) === normDist);
+      let districtMismatch = false;
+      if (!candidates.length) {
+        candidates = allBlocks.filter(b => normalizeBlockName(b.block_name) === normName);
+        districtMismatch = candidates.length > 0;
+      }
+
+      if (!candidates.length) return { ...base, status: 'unmatched', reason: 'No existing block matches this name', lat, lng };
+      if (candidates.length > 1) return { ...base, status: 'ambiguous', reason: `Matches ${candidates.length} blocks — too ambiguous to auto-import`, lat, lng };
+
+      const match = candidates[0];
+      return {
+        ...base, status: 'matched', lat, lng,
+        blockId: match._id, matchedName: match.block_name, matchedDistrict: match.district,
+        districtMismatch,
+        alreadySet: match.latitude != null,
+      };
+    });
+
+    if (!dryRun) {
+      const toWrite = results.filter(r => r.status === 'matched');
+      await Promise.all(toWrite.map(r =>
+        CustomBlock.findByIdAndUpdate(r.blockId, { $set: { latitude: r.lat, longitude: r.lng } })
+      ));
+    }
+
+    const summary = {
+      total: results.length,
+      matched: results.filter(r => r.status === 'matched').length,
+      unmatched: results.filter(r => r.status === 'unmatched').length,
+      ambiguous: results.filter(r => r.status === 'ambiguous').length,
+      error: results.filter(r => r.status === 'error').length,
+    };
+    res.json({ success: true, dryRun: !!dryRun, summary, results });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // DELETE /api/blocks/:id — remove any block
 router.delete('/:id', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {

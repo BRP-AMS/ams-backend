@@ -1198,6 +1198,77 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/attendance/manager-apply-leave
+// Manager (or admin) adds a leave directly on behalf of a team member —
+// created already Approved (the manager IS the approver), not Pending,
+// since there's no one else to review it. Employee is notified + emailed.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/manager-apply-leave', authenticate, authorize('manager', 'admin'), [
+  body('empId').trim().notEmpty().withMessage('Employee is required'),
+  body('date').isDate().withMessage('Valid start date required'),
+  body('endDate').optional().isDate(),
+  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('reason').notEmpty(),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { empId, date, endDate, leaveType, reason } = req.body;
+    const finalEndDate = endDate || date;
+    if (finalEndDate < date) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
+
+    const emp = await User.findOne({ _id: empId, role: 'employee' }).select('manager_id name email leave_balance auto_leave_enabled').lean();
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+    if (req.user.role === 'manager' && String(emp.manager_id) !== String(req.user.id)) {
+      return res.status(403).json({ success: false, message: 'Not your team member' });
+    }
+
+    const existing = await AttendanceRecord.findOne({ emp_id: empId, date }).lean();
+    if (existing) return res.status(409).json({ success: false, message: `${emp.name} already has a record for ${date}.` });
+
+    const isMultiDay = finalEndDate !== date;
+    const dayCount   = countWorkingDays(date, finalEndDate);
+    const id = uuidv4();
+
+    const balance = emp.leave_balance ?? 0;
+    const autoEnabled = emp.auto_leave_enabled !== false;
+    const isLOP = autoEnabled && balance < dayCount;
+    const leaveNote = isLOP ? ' (LOP — insufficient balance)' : '';
+
+    await AttendanceRecord.create({
+      _id: id, emp_id: empId, date, end_date: isMultiDay ? finalEndDate : null,
+      duty_type: 'Leave', status: 'Approved', manager_id: emp.manager_id || null,
+      leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Approved',
+      is_lop: isLOP, submitted_at: new Date(),
+      actioned_by: req.user.id, actioned_at: new Date(),
+      manager_remark: `Added by ${req.user.role === 'admin' ? 'Admin' : 'Manager'}: ${reason}`,
+    });
+
+    if (autoEnabled && !isLOP && balance > 0) {
+      await User.findByIdAndUpdate(empId, { $inc: { leave_balance: -dayCount } });
+    }
+    await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'MANAGER_ADD_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
+
+    const dateRange = isMultiDay ? `${date} to ${finalEndDate}` : date;
+    await notify(empId, `${leaveType} Added ✓`,
+      `Your manager added ${leaveType} for you (${dayCount} day${dayCount !== 1 ? 's' : ''}) — ${dateRange}: ${reason}`,
+      'success', id, '/employee/history');
+    if (emp.email) {
+      sendMail(emp.email, `[AMS] ${leaveType} Added on Your Behalf`,
+        `<p>Hi ${emp.name},</p><p>Your manager added <strong>${leaveType}</strong> for you ${isMultiDay ? `from <strong>${date}</strong> to <strong>${finalEndDate}</strong> (${dayCount} days)` : `on <strong>${date}</strong>`}.</p><p><strong>Reason:</strong> ${reason}</p>`
+      ).catch(err => console.error('[ManagerApplyLeave] Employee email failed:', err.message));
+    }
+
+    const record = await AttendanceRecord.findById(id).lean();
+    res.status(201).json({
+      success: true,
+      message: `${leaveType} added for ${emp.name} (${dayCount} day${dayCount !== 1 ? 's' : ''})`,
+      data: formatRecord(record),
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/attendance/:id/cancel-leave  (employee only, Pending leaves only)
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/:id/cancel-leave', authenticate, authorize('employee'), async (req, res) => {

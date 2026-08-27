@@ -329,6 +329,36 @@ cron.schedule('0 19 * * *', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CRON 5 — 00:10 IST on the 1st of each month: monthly leave accrual.
+// Credits +1 leave day to every active employee with auto_leave_enabled
+// (default true). Guarded by last_accrual_date so a duplicate cron fire
+// on the same day never double-credits.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('10 0 1 * *', async () => {
+  console.log('[Leave Accrual] Cron triggered');
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const employees = await User.find({
+      role: 'employee', is_active: { $ne: 0 },
+      auto_leave_enabled: { $ne: false },
+      last_accrual_date: { $ne: todayIST },
+    }).select('_id').lean();
+
+    if (!employees.length) { console.log('[Leave Accrual] Nothing to accrue.'); return; }
+
+    await User.updateMany(
+      { _id: { $in: employees.map(e => e._id) } },
+      { $inc: { leave_balance: 1 }, $set: { last_accrual_date: todayIST } }
+    );
+    console.log(`[Leave Accrual] +1 day credited to ${employees.length} employee(s) on ${todayIST}.`);
+  } catch (err) {
+    console.error('[Leave Accrual] Error:', err.message);
+  }
+}, {
+  timezone: 'Asia/Kolkata',
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NOTE: The old CRON 3 ("system auto check-out after 8 hours") has been

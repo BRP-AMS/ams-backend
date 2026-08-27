@@ -4,7 +4,7 @@ const multer         = require('multer');
 const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
-const { AttendanceRecord, User, Notification, AuditLog } = require('../models/database');
+const { AttendanceRecord, User, Notification, AuditLog, CustomBlock } = require('../models/database');
 const { authenticate, authorize }                         = require('../middleware/auth');
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
@@ -24,6 +24,19 @@ const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
 // ── HTML entity decoder (handles multiple encodings like &amp;amp;) ────────
 const _decodeHtml  = s => String(s ?? '').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'");
+
+// ── Check-in geofence: how far (meters) a check-in can be from the
+// employee's assigned block's coordinates. Skipped entirely if the block
+// has no coordinates set yet (admin hasn't configured it) or the employee
+// has no assigned_block.
+const CHECKIN_GEOFENCE_METERS = 200;
+const haversineMeters = (lat1, lon1, lat2, lon2) => {
+  const R = 6371000; // Earth radius, meters
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
 const _fullyDecode = s => { let p; do { p = s; s = _decodeHtml(s); } while (s !== p); return s; };
 
 // ── Holiday / working-day helpers ────────────────────────────────────────
@@ -614,7 +627,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
 
-    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path').lean();
+    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path assigned_block').lean();
 
     if (!currentUserInfo?.profile_photo_path) {
       return res.status(400).json({
@@ -627,6 +640,25 @@ if (prevRecord && !prevRecord.checkout_time) {
 
     if (dutyType === 'On Duty' && !sector)
       return res.status(400).json({ success: false, message: 'Sector is required for On Duty' });
+
+    // Check-in geofence — only for Office Duty at the employee's assigned
+    // block; On Duty / On Duty Away are field visits, not restricted here.
+    if (dutyType === 'Office Duty' && currentUserInfo?.assigned_block) {
+      const block = await CustomBlock.findOne({ block_name: currentUserInfo.assigned_block }).select('latitude longitude').lean();
+      if (block?.latitude != null && block?.longitude != null) {
+        const lat = parseFloat(latitude), lng = parseFloat(longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          return res.status(400).json({ success: false, message: 'A valid GPS location is required to check in.' });
+        }
+        const distance = haversineMeters(lat, lng, block.latitude, block.longitude);
+        if (distance > CHECKIN_GEOFENCE_METERS) {
+          return res.status(403).json({
+            success: false,
+            message: `You are ${Math.round(distance)}m from ${currentUserInfo.assigned_block} — check-in is only allowed within ${CHECKIN_GEOFENCE_METERS}m of your assigned block.`,
+          });
+        }
+      }
+    }
 
     const managerId = currentUserInfo?.manager_id || null;
     const checkinTime = istTimeStr();

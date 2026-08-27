@@ -778,26 +778,27 @@ router.delete('/:id', authenticate, authorize('admin', 'super_admin'), async (re
 
 // ── POST /api/users/request-assignment ───────────────────────────────────
 router.post('/request-assignment', authenticate, authorize('employee'), [
-  body('type').isIn(['manager', 'block', 'photo', 'location', 'role_type', 'district', 'hr']).withMessage('Invalid request type'),
+  body('type').isIn(['manager', 'block', 'photo', 'location', 'role_type', 'district', 'hr', 'coordinates']).withMessage('Invalid request type'),
   body('note').optional().trim(),
 ], validate, async (req, res) => {
   try {
     const { type, note } = req.body;
-    const emp    = await User.findById(req.user.id).select('name emp_id email').lean();
+    const emp    = await User.findById(req.user.id).select('name emp_id email assigned_block').lean();
     const admins = await User.find({ role: 'admin', is_active: 1 }).select('_id email').lean();
     const labelMap = {
-      manager:   'Manager Assignment',
-      block:     'Block Assignment',
-      photo:     'Profile Photo Update',
-      location:  'Location / Block Change',
-      role_type: 'Designation Change',
-      district:  'District Assignment',
-      hr:        'HR (Competent Authority) Assignment',
+      manager:     'Manager Assignment',
+      block:       'Block Assignment',
+      photo:       'Profile Photo Update',
+      location:    'Location / Block Change',
+      role_type:   'Designation Change',
+      district:    'District Assignment',
+      hr:          'HR (Competent Authority) Assignment',
+      coordinates: `Block Coordinates Correction${emp.assigned_block ? ` (${emp.assigned_block})` : ''}`,
     };
     const label     = labelMap[type] || `${type} Change`;
     const title     = `Request: ${label}`;
     const message   = `${escapeHtml(emp.name)} (${escapeHtml(emp.emp_id)}) has requested: ${escapeHtml(label)}.${note ? ` Note: ${escapeHtml(note)}` : ''}`;
-    const actionMap = { photo: 'photo-update', manager: 'manager-assignment', hr: 'hr-assignment', district: 'district-assignment', block: 'block-assignment', role_type: 'designation-change', location: 'location-change' };
+    const actionMap = { photo: 'photo-update', manager: 'manager-assignment', hr: 'hr-assignment', district: 'district-assignment', block: 'block-assignment', role_type: 'designation-change', location: 'location-change', coordinates: 'coordinates-correction' };
     const action    = actionMap[type] || '';
     const link      = `/admin/users?editUser=${req.user.id}${action ? `&action=${action}` : ''}`;
 

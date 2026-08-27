@@ -36,7 +36,10 @@ router.get('/', async (req, res) => {
     const result = {};
     for (const b of all) {
       if (!result[b.district]) result[b.district] = [];
-      result[b.district].push({ _id: b._id, name: b.block_name, isCustom: !!b.added_by });
+      result[b.district].push({
+        _id: b._id, name: b.block_name, isCustom: !!b.added_by,
+        latitude: b.latitude ?? null, longitude: b.longitude ?? null,
+      });
     }
     for (const d of Object.keys(result)) {
       result[d].sort((a, b) => a.name.localeCompare(b.name));
@@ -50,15 +53,20 @@ router.get('/', async (req, res) => {
 // POST /api/blocks — add a new block (admin / super_admin)
 router.post('/', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
-    const { district, block_name } = req.body;
+    const { district, block_name, latitude, longitude } = req.body;
     if (!district || !block_name?.trim()) {
       return res.status(400).json({ success: false, message: 'district and block_name required' });
     }
     const trimmed = block_name.trim();
     const exists = await CustomBlock.findOne({ district, block_name: trimmed });
     if (exists) return res.status(409).json({ success: false, message: 'Block already exists in this district' });
-    const block = await CustomBlock.create({ district, block_name: trimmed, added_by: req.user._id || req.user.id });
-    res.status(201).json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: true } });
+    const lat = latitude !== undefined && latitude !== '' ? parseFloat(latitude) : null;
+    const lng = longitude !== undefined && longitude !== '' ? parseFloat(longitude) : null;
+    const block = await CustomBlock.create({
+      district, block_name: trimmed, added_by: req.user._id || req.user.id,
+      latitude: Number.isFinite(lat) ? lat : null, longitude: Number.isFinite(lng) ? lng : null,
+    });
+    res.status(201).json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: true, latitude: block.latitude, longitude: block.longitude } });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ success: false, message: 'Block already exists' });
     res.status(500).json({ success: false, message: err.message });
@@ -84,14 +92,29 @@ router.put('/rename-district', authenticate, authorize('admin', 'super_admin'), 
   }
 });
 
-// PUT /api/blocks/:id — rename any block
+// PUT /api/blocks/:id — rename a block and/or set its geofence coordinates
 router.put('/:id', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
-    const { block_name } = req.body;
-    if (!block_name?.trim()) return res.status(400).json({ success: false, message: 'block_name required' });
-    const block = await CustomBlock.findByIdAndUpdate(req.params.id, { block_name: block_name.trim() }, { new: true });
+    const { block_name, latitude, longitude } = req.body;
+    const update = {};
+    if (block_name !== undefined) {
+      if (!block_name.trim()) return res.status(400).json({ success: false, message: 'block_name required' });
+      update.block_name = block_name.trim();
+    }
+    if (latitude !== undefined || longitude !== undefined) {
+      const lat = latitude === '' || latitude === null ? null : parseFloat(latitude);
+      const lng = longitude === '' || longitude === null ? null : parseFloat(longitude);
+      if ((lat !== null && !Number.isFinite(lat)) || (lng !== null && !Number.isFinite(lng))) {
+        return res.status(400).json({ success: false, message: 'latitude/longitude must be numbers' });
+      }
+      update.latitude  = lat;
+      update.longitude = lng;
+    }
+    if (!Object.keys(update).length) return res.status(400).json({ success: false, message: 'Nothing to update' });
+
+    const block = await CustomBlock.findByIdAndUpdate(req.params.id, { $set: update }, { new: true });
     if (!block) return res.status(404).json({ success: false, message: 'Block not found' });
-    res.json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: !!block.added_by } });
+    res.json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: !!block.added_by, latitude: block.latitude ?? null, longitude: block.longitude ?? null } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

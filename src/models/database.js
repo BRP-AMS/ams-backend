@@ -376,6 +376,10 @@ const customBlockSchema = new mongoose.Schema({
   district:   { type: String, required: true },
   block_name: { type: String, required: true },
   added_by:   { type: String, ref: 'User', default: null },
+  // Check-in geofence center for this block. Null until an admin sets it —
+  // check-in geofencing is skipped for a block with no coordinates.
+  latitude:   { type: Number, default: null },
+  longitude:  { type: Number, default: null },
 }, { timestamps: true });
 customBlockSchema.index({ district: 1, block_name: 1 }, { unique: true });
 const CustomBlock = mongoose.model('CustomBlock', customBlockSchema);

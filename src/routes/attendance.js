@@ -1039,10 +1039,16 @@ if (leaveType && !String(leaveReason || '').trim()) {
 
     const lateSuffix = updateFields.late_checkout_reason ? ` — Late check-out with reason: ${updateFields.late_checkout_reason}` : '';
 
-    // Every checkout requires manager review — no auto-approve path,
-    // regardless of hours worked.
-    updateFields.status = 'Pending';
-    updateFields.manager_remark = `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
+    // 7+ hours worked → auto-approved, no manager review needed. Under 7
+    // hours (Half Day / Emergency Leave) still requires manager review.
+    const isFullDay = hoursElapsed >= 7;
+    updateFields.status = isFullDay ? 'Approved' : 'Pending';
+    updateFields.manager_remark = isFullDay
+      ? `Worked ${workedHours.toFixed(1)} hours — auto-approved (full day)${lateSuffix}`
+      : `Worked ${workedHours.toFixed(1)} hours${lateSuffix}`;
+    if (isFullDay) {
+      updateFields.actioned_at = now;
+    }
 
         const updated = await AttendanceRecord.findOneAndUpdate(
           { _id: record._id, checkout_time: null },
@@ -1057,11 +1063,16 @@ if (leaveType && !String(leaveReason || '').trim()) {
           });
         }
 
-        if (record.manager_id) {
+        if (isFullDay) {
+          await notify(
+            record.emp_id,
+            '✅ Attendance Approved',
+            `Your attendance for ${record.date} (${workedHours.toFixed(1)} hrs) was auto-approved.`,
+            'success', record._id, '/employee/history'
+          );
+        } else if (record.manager_id) {
           const emp = await User.findById(req.user.id).select('name').lean();
-          const hoursLabel = hoursElapsed >= 7
-            ? `Full day (${workedHours.toFixed(1)} hrs)`
-            : hoursElapsed >= 4
+          const hoursLabel = hoursElapsed >= 4
             ? `Half Day (${workedHours.toFixed(1)} hrs)`
             : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
           await notify(
@@ -1080,8 +1091,8 @@ if (leaveType && !String(leaveReason || '').trim()) {
 
         res.json({
           success:             true,
-          message:             'Checked out and submitted for approval',
-          autoApproved:        false,
+          message:             isFullDay ? 'Checked out and auto-approved' : 'Checked out and submitted for approval',
+          autoApproved:        isFullDay,
           data:                formatRecord(updated),
         });
 

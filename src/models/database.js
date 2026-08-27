@@ -99,6 +99,12 @@ const attendanceRecordSchema = new mongoose.Schema({
   checkout_time:        { type: String, default: null },
   checkin_lat:          { type: Number, default: null },
   checkin_lng:          { type: Number, default: null },
+  // GPS coordinates are client-supplied and spoofable — this is a
+  // best-effort, non-blocking corroboration signal (coarse IP geolocation
+  // vs. the reported GPS) so a manager/admin can review a mismatch instead
+  // of the check-in being silently trusted with no independent signal.
+  location_flagged:     { type: Boolean, default: false },
+  location_flag_reason: { type: String, default: null },
   checkout_lat:         { type: Number, default: null },
   checkout_lng:         { type: Number, default: null },
   manager_id:           { type: String, ref: 'User', default: null },

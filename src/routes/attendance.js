@@ -39,6 +39,66 @@ const haversineMeters = (lat1, lon1, lat2, lon2) => {
 };
 const _fullyDecode = s => { let p; do { p = s; s = _decodeHtml(s); } while (s !== p); return s; };
 
+// ── Coarse IP-geolocation corroboration for check-in GPS ───────────────────
+// The client-supplied lat/lng that the geofence check above relies on is
+// fully spoofable (just edit the request body) — this is a second,
+// independent signal that's much harder to fake at the same time (it'd
+// require also routing the request through a Tripura-based proxy/VPN).
+// Deliberately non-blocking: IP geolocation is coarse and unreliable for
+// mobile carrier NAT — a mismatch only sets a review flag, never rejects
+// the check-in, so no legitimate employee ever gets locked out by it.
+const http  = require('http');
+const IP_GEO_MISMATCH_KM = 150;
+
+const clientIp = (req) => {
+  const fwd = req.headers['x-forwarded-for'];
+  const ip  = (fwd ? fwd.split(',')[0].trim() : req.ip || req.socket?.remoteAddress || '');
+  return ip.replace(/^::ffff:/, ''); // strip IPv4-mapped-IPv6 prefix
+};
+
+const ipGeolocate = (ip) => new Promise(resolve => {
+  if (!ip || ip === '127.0.0.1' || ip === '::1' || /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(ip)) {
+    return resolve(null); // private/local IP — nothing to check (dev/behind-LB edge cases)
+  }
+  const req = http.get(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,lat,lon,countryCode`, { timeout: 2500 }, resp => {
+    let data = '';
+    resp.on('data', c => data += c);
+    resp.on('end', () => {
+      try {
+        const parsed = JSON.parse(data);
+        resolve(parsed.status === 'success' ? parsed : null);
+      } catch { resolve(null); }
+    });
+  });
+  req.on('error', () => resolve(null));
+  req.on('timeout', () => { req.destroy(); resolve(null); });
+});
+
+// Fire-and-forget — called AFTER the check-in response is already sent, so
+// this never adds latency to the employee's check-in. Looks up the block's
+// coordinates itself so the caller doesn't need to thread them through.
+const flagCheckinIfIpMismatch = async (recordId, req, assignedBlockName) => {
+  try {
+    const geo = await ipGeolocate(clientIp(req));
+    if (!geo) return; // lookup unavailable/failed — don't flag on missing data
+    if (geo.countryCode && geo.countryCode !== 'IN') {
+      await AttendanceRecord.findByIdAndUpdate(recordId, {
+        $set: { location_flagged: true, location_flag_reason: `Request IP resolved outside India (${geo.countryCode}) while GPS claimed Tripura` },
+      });
+      return;
+    }
+    if (!assignedBlockName || geo.lat == null || geo.lon == null) return;
+    const block = await CustomBlock.findOne({ block_name: assignedBlockName }).select('latitude longitude').lean();
+    if (block?.latitude == null || block?.longitude == null) return;
+    const km = haversineMeters(geo.lat, geo.lon, block.latitude, block.longitude) / 1000;
+    if (km > IP_GEO_MISMATCH_KM) {
+      await AttendanceRecord.findByIdAndUpdate(recordId, {
+        $set: { location_flagged: true, location_flag_reason: `Request IP location is ~${Math.round(km)}km from the assigned block despite GPS matching it` },
+      });
+    }
+  } catch (err) { console.error('[CheckIn] IP geolocation flag failed:', err.message); }
+};
+
 // ── Holiday / working-day helpers ────────────────────────────────────────
 const LEAVE_HOLIDAYS_MMDD = new Set([
   '01-14','01-23','01-26','03-04','03-21','04-03','04-14','04-15','04-21',
@@ -717,6 +777,21 @@ if (prevRecord && !prevRecord.checkout_time) {
          <p>This late check-in is visible to your manager. Please ensure you check in before 10:00 AM going forward.</p>`
       ).catch(err => console.error('[CheckIn] Late-login email failed:', err.message));
     }
+
+    // GPS is client-supplied and spoofable — corroborate with a coarse IP
+    // geolocation, fire-and-forget so it never delays the response. Flags
+    // the record for review only; never blocks or rejects the check-in.
+    flagCheckinIfIpMismatch(id, req, currentUserInfo?.assigned_block).then(async () => {
+      const flagged = await AttendanceRecord.findById(id).select('location_flagged location_flag_reason').lean();
+      if (flagged?.location_flagged && currentUserInfo?.manager_id) {
+        await notify(
+          currentUserInfo.manager_id,
+          '⚠️ Check-in location flagged for review',
+          `${currentUserInfo.name}'s check-in on ${checkinDate} was flagged: ${flagged.location_flag_reason}`,
+          'warning', id, '/manager/leaves'
+        ).catch(() => {});
+      }
+    }).catch(() => {});
 
   } catch (err) {
     if (!res.headersSent) {
@@ -2006,6 +2081,8 @@ function formatRecord(r) {
     checkoutLat:              r.checkout_lat,
     checkoutLng:              r.checkout_lng,
     checkoutLocationAddress:  r.checkout_location_address,
+    locationFlagged:          r.location_flagged === true,
+    locationFlagReason:       r.location_flag_reason || null,
     managerId:                r.manager_id,
     managerName:              r.manager_name,
     managerRemark:            r.manager_remark ? r.manager_remark.replace(/^\[(HR|Super Admin) Override\]\s*/i, '').trim() : '',

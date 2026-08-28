@@ -217,6 +217,11 @@ const uploadSignedReport = multer({
 const notify = async (userId, title, message, type = 'info', recordId = null, link = null) =>
   Notification.create({ _id: uuidv4(), user_id: userId, title, message, type, related_record_id: recordId, link });
 
+// Formats a record's date for display — a plain day, or "D1 to D2" when a
+// multi-day leave's end_date extends past its (start-only) date field.
+const recordDateLabel = (record) =>
+  (record.end_date && record.end_date > record.date) ? `${record.date} to ${record.end_date}` : record.date;
+
 // ── Shared tail for admin attendance-correction endpoints (regularize,
 // manual-checkout, …): notify the employee, write the audit log, respond. ──
 const finishAdminCorrection = async (req, res, record, { notifyTitle, notifyMsg, auditAction, auditNewValue, auditOldValue, successMsg }) => {
@@ -1445,7 +1450,7 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
     const notifTitle = isMissedCheckoutRecord ? 'Missed Check-Out Approved ✓' : record.leave_type ? 'Leave Approved ✓' : 'Attendance Approved ✓';
     const notifMsg   = isMissedCheckoutRecord
       ? `Your missed check-out on ${record.date} has been approved by your manager. You may check in again.`
-      : record.leave_type ? `Your ${record.leave_type} for ${record.date} has been approved.` : `Your attendance for ${record.date} has been approved.`;
+      : record.leave_type ? `Your ${record.leave_type} for ${recordDateLabel(record)} has been approved.` : `Your attendance for ${record.date} has been approved.`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'success', record._id, '/employee/history');
 
@@ -1454,7 +1459,7 @@ router.put('/:id/approve', authenticate, authorize('manager', 'admin'), async (r
       if (empUser?.email) {
         const subject = record.leave_type ? `[AMS] ${record.leave_type} Approved` : '[AMS] Missed Check-Out Approved';
         const body = record.leave_type
-          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong>.</p>`
+          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${recordDateLabel(record)}</strong> has been <strong style="color:#16a34a">approved</strong>.</p>`
           : `<p>Hi ${empUser.name},</p><p>Your missed check-out on <strong>${record.date}</strong> has been <strong style="color:#16a34a">approved</strong> by your manager. You may check in again.</p>`;
         sendMail(empUser.email, subject, body).catch(err => console.error('[Approve] Employee email failed:', err.message));
       }
@@ -1531,7 +1536,7 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
       ? `Your check-in for ${record.date} was rejected by your manager: ${remark}`
       : isMissedCheckoutRecord
         ? `Your missed check-out on ${record.date} was rejected: ${remark}. You may check in again.`
-        : record.leave_type ? `Your ${record.leave_type} for ${record.date} was rejected: ${remark}` : `Your attendance for ${record.date} was rejected: ${remark}`;
+        : record.leave_type ? `Your ${record.leave_type} for ${recordDateLabel(record)} was rejected: ${remark}` : `Your attendance for ${record.date} was rejected: ${remark}`;
 
     await notify(record.emp_id, notifTitle, notifMsg, 'error', record._id, '/employee/history');
 
@@ -1540,7 +1545,7 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
       if (empUser?.email) {
         const subject = record.leave_type ? `[AMS] ${record.leave_type} Rejected` : '[AMS] Missed Check-Out Rejected';
         const body = record.leave_type
-          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${record.date}</strong> has been <strong style="color:#dc2626">rejected</strong>.</p><p><strong>Reason:</strong> ${remark}</p>`
+          ? `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type}</strong> for <strong>${recordDateLabel(record)}</strong> has been <strong style="color:#dc2626">rejected</strong>.</p><p><strong>Reason:</strong> ${remark}</p>`
           : `<p>Hi ${empUser.name},</p><p>Your missed check-out on <strong>${record.date}</strong> was <strong style="color:#dc2626">rejected</strong> by your manager.</p><p><strong>Reason:</strong> ${remark}</p><p>You may check in again.</p>`;
         sendMail(empUser.email, subject, body).catch(err => console.error('[Reject] Employee email failed:', err.message));
       }

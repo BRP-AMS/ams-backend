@@ -886,8 +886,8 @@ router.put('/:id/late-checkout-reason', authenticate, authorize('employee'), [
 
     const { reason } = req.body;
     const now = new Date();
-    // Extend by 20 minutes (within the requested 15–20 min window)
-    const extendedUntil = new Date(now.getTime() + 20 * 60 * 1000);
+    // Extend by 2 hours (within the requested 15–20 min window)
+   const extendedUntil = new Date(now.getTime() + 2 * 60 * 60 * 1000);
 
     const updated = await AttendanceRecord.findByIdAndUpdate(record._id, {
       $set: {
@@ -917,7 +917,7 @@ router.put('/:id/late-checkout-reason', authenticate, authorize('employee'), [
       entity_type: 'attendance', entity_id: record._id, new_value: reason,
     });
 
-    res.json({ success: true, message: 'Reason saved. Checkout window extended by 20 minutes.', data: formatRecord(updated) });
+    res.json({ success: true, message: 'Reason saved. Checkout window extended by 45 minutes.', data: formatRecord(updated) });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
 });
 
@@ -963,22 +963,21 @@ const checkoutFaceResult = { match: true, confidence: 0 };
         hoursRemaining: remaining,
       });
     }
-
+ const today = istDateStr();
+    const nowIST = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const isAfterCutoff = nowIST.getHours() > 18 || (nowIST.getHours() === 18 && nowIST.getMinutes() >= 31);
+    if (record.date === today && isAfterCutoff && !record.late_checkout_reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'A late check-out reason is required after 6:30 PM. Please submit a reason first.',
+      });
+    }
     // Require a human-readable text address on checkout, not just raw
     // GPS coordinates — the frontend should reverse-geocode via /api/geocode
     // and send the resolved string as `locationAddress`.
     if (!req.body.locationAddress || !String(req.body.locationAddress).trim()) {
       return res.status(400).json({ success: false, message: 'Check-out address is required. Please allow location access so we can resolve your address.' });
     }
-
-    // ── Missed check-out catch-up ──────────────────────────────────────────
-    // If this record was already flagged as a missed check-out (cron ran at
-    // midnight, or the manager approved it as Pending), the employee can
-    // still come back and record the actual check-out. Skip the normal
-    // half-day/emergency-leave classification (it's not "today" anymore) —
-    // just record the checkout and, per policy, auto-approve if the total
-    // time on duty was 7+ hours, otherwise leave it Pending for the manager
-    // (who must attach a remark per the mandatory-remark rule below).
     if (record.is_missed_checkout) {
   const { latitude, longitude, locationAddress, capturedAt } = req.body;
 

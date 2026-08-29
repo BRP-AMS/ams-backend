@@ -1576,7 +1576,12 @@ recs = expandedRecs.sort((a, b) => a.date.localeCompare(b.date));
     });
 
     const workingDays    = rows.filter(r => r.dutyType==='Office Duty' || r.dutyType==='On Duty').length;
-    const holidays        = recs.filter(r => (r.duty_type||'').toLowerCase()==='holiday').length;
+    // Holidays are DB-driven (Holiday collection via isHoliday()), never a
+    // per-record duty_type flag — no code path ever writes duty_type:'holiday',
+    // so the old `recs.filter(...duty_type==='holiday')` here always returned 0.
+    // Count actual calendar holidays in the requested window instead, same
+    // convention as the /export route's holCount.
+    const holidays = expandDates(startDate, endDate).filter(d => !isNonWorkingDay(d) && isHoliday(d)).length;
     // Only count leave that's actually confirmed — a Pending or Rejected
     // leave application isn't a "day off", it just looked like one until
     // this filter was added (matches the Approved-gated logic everywhere

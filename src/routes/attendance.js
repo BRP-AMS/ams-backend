@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog, CustomBlock, ODARequest } = require('../models/database');
 const { clampLeaveBalance, roundHalfDay } = require('../utils/leaveBalance');
+const { fmt12h } = require('../utils/time');
 const { authenticate, authorize }                         = require('../middleware/auth');
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
@@ -23,18 +24,6 @@ const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
-// Emails/notifications are user-facing text, not stored data — the app's
-// screens all show times as "h:MM AM/PM" (see fmtTime() in the web/mobile
-// Layout/theme files), so emails should match that instead of embedding the
-// raw 24h "HH:MM" string istTimeStr() stores in the DB.
-const fmt12h = (hhmm) => {
-  const [hStr, mStr] = String(hhmm || '').split(':');
-  const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
-  if (isNaN(h) || isNaN(m)) return hhmm;
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  const h12  = h % 12 || 12;
-  return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
-};
 // ── HTML entity decoder (handles multiple encodings like &amp;amp;) ────────
 const _decodeHtml  = s => String(s ?? '').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'");
 

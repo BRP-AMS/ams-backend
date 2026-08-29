@@ -7,6 +7,7 @@ const ExcelJS  = require('exceljs');
 const PDFDoc   = require('pdfkit');
 const mongoose = require('mongoose');
 const { AttendanceRecord, User, Holiday } = require('../models/database');
+const { fmt12h } = require('../utils/time');
 const { authenticate, authorize } = require('../middleware/auth');
 const https = require('https');
 const _geocodeCache = new Map(); // "lat,lng" (4dp) -> address string
@@ -1532,7 +1533,8 @@ recs = expandedRecs.sort((a, b) => a.date.localeCompare(b.date));
     };
 
     const fmtHM   = mins => `${Math.floor(mins/60)}h ${mins%60}m`;
-    const timeStr = d => d ? d.toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:false}) : '';
+    // 12h to match the app's other exports/screens (see fmt12h() in attendance.js).
+    const timeStr = d => d ? d.toLocaleTimeString('en-IN',{timeZone:IST,hour:'2-digit',minute:'2-digit',hour12:true}) : '';
 
     // Threshold buckets — matches the legend (Check-In: 10 AM · Check-Out: 4 PM / 5:30 PM)
     const CHECKIN_CUTOFF = 10*60;         // 10:00 AM in minutes
@@ -1816,10 +1818,10 @@ const buildLateCheckoutRows = async ({ startDate, endDate, employees }) => {
       empName:  emp?.name   || '',
       date:     r.date,
       checkinLocationTime:  r.checkin_time
-        ? `${checkinLoc || 'Address not captured'} (${r.checkin_time})`
+        ? `${checkinLoc || 'Address not captured'} (${fmt12h(r.checkin_time)})`
         : (checkinLoc || ''),
       checkoutLocationTime: r.checkout_time
-        ? `${checkoutLoc || 'Address not captured'} (${r.checkout_time})`
+        ? `${checkoutLoc || 'Address not captured'} (${fmt12h(r.checkout_time)})`
         : (checkoutLoc || ''),
       reason: (r.late_checkout_reason && r.late_checkout_reason.trim()) || 'No reason provided',
     };

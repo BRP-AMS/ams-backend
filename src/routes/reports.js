@@ -185,6 +185,12 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
   // duty_type drives P vs OD.
   const dutyType = (rec.duty_type || '').trim();
 
+  // On Duty Away filed without a pre-approved ODA request sits Pending until
+  // the manager acts on it (see POST /checkin's odaPending branch) — blank
+  // until then, same convention as a Pending leave, rather than counting as
+  // OD before it's actually approved.
+  if (dutyType === 'On Duty Away' && rec.status === 'Pending') return '';
+
   if (dutyType === 'On Duty' || dutyType === 'On Duty Away') return 'OD';
 
   // Office Duty (or blank/unknown) — check-in is geofenced to the employee's

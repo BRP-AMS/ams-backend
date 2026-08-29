@@ -4,7 +4,7 @@ const multer         = require('multer');
 const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
-const { AttendanceRecord, User, Notification, AuditLog, CustomBlock } = require('../models/database');
+const { AttendanceRecord, User, Notification, AuditLog, CustomBlock, ODARequest } = require('../models/database');
 const { authenticate, authorize }                         = require('../middleware/auth');
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
@@ -30,6 +30,13 @@ const _decodeHtml  = s => String(s ?? '').replace(/&amp;/gi,'&').replace(/&lt;/g
 // has no coordinates set yet (admin hasn't configured it) or the employee
 // has no assigned_block.
 const CHECKIN_GEOFENCE_METERS = 200;
+// On Duty check-in is allowed anywhere in the employee's assigned district —
+// there's no stored district polygon, so this approximates "in the district"
+// as being within this radius of ANY block belonging to that district (using
+// the same CustomBlock coordinates the Office Duty geofence already relies
+// on). 15km comfortably covers gaps between block centers within one district
+// without opening the door to a check-in from a different district entirely.
+const ON_DUTY_DISTRICT_GEOFENCE_METERS = 15000;
 const haversineMeters = (lat1, lon1, lat2, lon2) => {
   const R = 6371000; // Earth radius, meters
   const toRad = d => d * Math.PI / 180;
@@ -724,7 +731,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
 
-    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path assigned_block').lean();
+    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path assigned_block assigned_district').lean();
 
     if (!currentUserInfo?.profile_photo_path) {
       return res.status(400).json({
@@ -734,27 +741,82 @@ if (prevRecord && !prevRecord.checkout_time) {
     }
 
     const { dutyType, sector, description, latitude, longitude, locationAddress } = req.body;
+    const lat = parseFloat(latitude), lng = parseFloat(longitude);
 
     if (dutyType === 'On Duty' && !sector)
       return res.status(400).json({ success: false, message: 'Sector is required for On Duty' });
 
-    // Check-in geofence — only for Office Duty at the employee's assigned
-    // block; On Duty / On Duty Away are field visits, not restricted here.
-    if (dutyType === 'Office Duty' && currentUserInfo?.assigned_block) {
+    // On Duty requires a filled-in purpose/location description (the client
+    // pre-fills a template — this just guards against submitting it blank
+    // or untouched) — see ON_DUTY_DESCRIPTION_MIN_LEN below.
+    if (dutyType === 'On Duty' && (!description || description.trim().length < 15)) {
+      return res.status(400).json({ success: false, message: 'Please describe the purpose and location of your visit for On Duty check-in.' });
+    }
+    // On Duty Away also needs a reason — it's what the manager sees when
+    // deciding whether to approve an unplanned away check-in (see odaPending below).
+    if (dutyType === 'On Duty Away' && (!description || !description.trim())) {
+      return res.status(400).json({ success: false, message: 'Please provide a reason for On Duty Away check-in.' });
+    }
+
+    if (['Office Duty', 'On Duty'].includes(dutyType) && (!Number.isFinite(lat) || !Number.isFinite(lng))) {
+      return res.status(400).json({ success: false, message: 'A valid GPS location is required to check in.' });
+    }
+
+    // Office Duty — hard-restricted to the employee's assigned block. A
+    // missing assigned_block or missing block coordinates used to silently
+    // skip this check (letting Office Duty check in from anywhere); now it
+    // blocks the check-in instead, since "restricted to the office" is the
+    // whole point of this duty type.
+    if (dutyType === 'Office Duty') {
+      if (!currentUserInfo?.assigned_block) {
+        return res.status(403).json({ success: false, message: 'No block is assigned to your profile — contact admin before checking in as Office Duty.' });
+      }
       const block = await CustomBlock.findOne({ block_name: currentUserInfo.assigned_block }).select('latitude longitude').lean();
-      if (block?.latitude != null && block?.longitude != null) {
-        const lat = parseFloat(latitude), lng = parseFloat(longitude);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-          return res.status(400).json({ success: false, message: 'A valid GPS location is required to check in.' });
-        }
-        const distance = haversineMeters(lat, lng, block.latitude, block.longitude);
-        if (distance > CHECKIN_GEOFENCE_METERS) {
+      if (block?.latitude == null || block?.longitude == null) {
+        return res.status(403).json({ success: false, message: `Your assigned block (${currentUserInfo.assigned_block}) has no GPS coordinates configured yet — contact admin.` });
+      }
+      const distance = haversineMeters(lat, lng, block.latitude, block.longitude);
+      if (distance > CHECKIN_GEOFENCE_METERS) {
+        return res.status(403).json({
+          success: false,
+          message: `You are ${Math.round(distance)}m from ${currentUserInfo.assigned_block} — check-in is only allowed within ${CHECKIN_GEOFENCE_METERS}m of your assigned block.`,
+        });
+      }
+    }
+
+    // On Duty — allowed anywhere in the employee's assigned district (see
+    // ON_DUTY_DISTRICT_GEOFENCE_METERS). Skipped if no district is assigned
+    // or the district has no blocks with coordinates yet, same "don't block
+    // on missing admin setup" fallback as before for this duty type.
+    if (dutyType === 'On Duty' && currentUserInfo?.assigned_district) {
+      const districtBlocks = await CustomBlock.find({
+        district: currentUserInfo.assigned_district,
+        latitude: { $ne: null }, longitude: { $ne: null },
+      }).select('latitude longitude').lean();
+      if (districtBlocks.length) {
+        const nearestMeters = Math.min(...districtBlocks.map(b => haversineMeters(lat, lng, b.latitude, b.longitude)));
+        if (nearestMeters > ON_DUTY_DISTRICT_GEOFENCE_METERS) {
           return res.status(403).json({
             success: false,
-            message: `You are ${Math.round(distance)}m from ${currentUserInfo.assigned_block} — check-in is only allowed within ${CHECKIN_GEOFENCE_METERS}m of your assigned block.`,
+            message: `You appear to be outside your assigned district (${currentUserInfo.assigned_district}) — On Duty check-in is only allowed within it.`,
           });
         }
       }
+    }
+
+    // On Duty Away — no GPS restriction (it's an away visit by definition).
+    // If the employee already has an admin-approved ODA request covering
+    // today, this check-in proceeds normally like any other duty type. If
+    // not, it's still allowed, but is filed as a pending approval for the
+    // employee's manager instead of counting immediately — see checkinFields
+    // below and the manager-notification block after the record is created.
+    let odaPending = false;
+    if (dutyType === 'On Duty Away') {
+      const approvedOda = await ODARequest.findOne({
+        emp_id: req.user.id, status: 'approved',
+        from_date: { $lte: today }, to_date: { $gte: today },
+      }).lean();
+      odaPending = !approvedOda;
     }
 
     const managerId = currentUserInfo?.manager_id || null;
@@ -767,7 +829,7 @@ if (prevRecord && !prevRecord.checkout_time) {
     let id = uuidv4();
     const checkinFields = {
       emp_id: req.user.id, date: checkinDate, duty_type: dutyType, sector: sector || null,
-      description: description || '', status: 'Draft', selfie_path: selfiePath,
+      description: description || '', status: odaPending ? 'Pending' : 'Draft', selfie_path: selfiePath,
       latitude: parseFloat(latitude), longitude: parseFloat(longitude),
       location_address: locationAddress || '', checkin_time: checkinTime,
       checkin_lat: parseFloat(latitude), checkin_lng: parseFloat(longitude),
@@ -800,10 +862,27 @@ if (prevRecord && !prevRecord.checkout_time) {
     // whether run synchronously or in the background as above.
     res.status(201).json({
       success:             true,
-      message:             'Check-in recorded!',
+      message:             odaPending ? 'Check-in submitted — pending your manager\'s approval.' : 'Check-in recorded!',
       verificationPending: false,
+      managerApprovalPending: odaPending,
       data:                formatRecord(record),
     });
+
+    // On Duty Away without a pre-approved ODA — notify + email the manager
+    // so they can approve/reject it from the same Queue they already use
+    // for leave/missed-checkout, same pattern as apply-leave above.
+    if (odaPending && managerId) {
+      notify(managerId, 'On Duty Away — Approval Needed',
+        `${currentUserInfo.name} checked in as On Duty Away today (${checkinDate}) without a pre-approved ODA request: ${description}`,
+        'warning', id, '/manager/leaves').catch(() => {});
+      User.findById(managerId).select('email name').then(manager => {
+        if (manager?.email) {
+          sendMail(manager.email, `[AMS] On Duty Away Approval Needed – ${currentUserInfo.name} (${checkinDate})`,
+            `<p>Hi ${manager.name},</p><p><strong>${currentUserInfo.name}</strong> checked in as <strong>On Duty Away</strong> today (<strong>${checkinDate}</strong>) without a pre-approved ODA request.</p><p><strong>Reason:</strong> ${description}</p>`
+          ).catch(err => console.error('[CheckIn] ODA-pending manager email failed:', err.message));
+        }
+      }).catch(() => {});
+    }
 
     // Late-login email — fire-and-forget, doesn't block the response
     if (checkinTime > '10:00' && currentUserInfo?.email) {

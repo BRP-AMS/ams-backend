@@ -23,6 +23,18 @@ const istDateStr    = () => new Date().toLocaleDateString('en-CA',  { timeZone: 
 const istTimeStr    = () => new Date().toLocaleTimeString('en-GB',  { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).substring(0, 5);
 const istMonthStr   = () => new Date().toLocaleDateString('en-CA',  { timeZone: 'Asia/Kolkata' }).substring(0, 7);
 const istMonthLabel = () => new Date().toLocaleDateString('en-IN',  { timeZone: 'Asia/Kolkata', month: 'long', year: 'numeric' });
+// Emails/notifications are user-facing text, not stored data — the app's
+// screens all show times as "h:MM AM/PM" (see fmtTime() in the web/mobile
+// Layout/theme files), so emails should match that instead of embedding the
+// raw 24h "HH:MM" string istTimeStr() stores in the DB.
+const fmt12h = (hhmm) => {
+  const [hStr, mStr] = String(hhmm || '').split(':');
+  const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
+  if (isNaN(h) || isNaN(m)) return hhmm;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12  = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+};
 // ── HTML entity decoder (handles multiple encodings like &amp;amp;) ────────
 const _decodeHtml  = s => String(s ?? '').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#39;/gi,"'");
 
@@ -897,7 +909,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       sendMail(
         currentUserInfo.email, '[AMS] ⚠️ Late Check-In Recorded',
         `<p>Hi ${currentUserInfo.name || 'there'},</p>
-         <p style="font-size:15px;"><strong style="color:#DC2626;">Your check-in today (${checkinDate}) has been recorded as LATE — at ${checkinTime}, after the 10:00 AM cutoff.</strong></p>
+         <p style="font-size:15px;"><strong style="color:#DC2626;">Your check-in today (${checkinDate}) has been recorded as LATE — at ${fmt12h(checkinTime)}, after the 10:00 AM cutoff.</strong></p>
          <p>This late check-in is visible to your manager. Please ensure you check in before 10:00 AM going forward.</p>`
       ).catch(err => console.error('[CheckIn] Late-login email failed:', err.message));
     }
@@ -1300,7 +1312,7 @@ if (leaveType && !String(leaveReason || '').trim()) {
             if (u?.email) {
               sendMail(
                 u.email, '[AMS] Early Check-Out Recorded',
-                `<p>Hi ${u.name || 'there'},</p><p>Your check-out today (${record.date}) was recorded at <strong>${checkoutTime}</strong>, before the 5:00 PM cutoff.</p>`
+                `<p>Hi ${u.name || 'there'},</p><p>Your check-out today (${record.date}) was recorded at <strong>${fmt12h(checkoutTime)}</strong>, before the 5:00 PM cutoff.</p>`
               ).catch(err => console.error('[CheckOut] Early-logout email failed:', err.message));
             }
           }).catch(() => {});

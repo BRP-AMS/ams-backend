@@ -288,29 +288,24 @@ router.get('/export',
     if (status && status !== 'All') recFilter.status = status;
     const rawRecs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
 
-    // Build index — prefer real check-in records over rejected leave records for the same date
+    // Build index — prefer real check-in records over rejected leave records for the same date.
+    // A multi-day leave (duty_type:'Leave' with end_date set) is stored as ONE record whose
+    // `date` field is only the start day — index it at every day in [date, end_date], not just
+    // the start, or every day after the first silently reads as Absent in the matrix below.
     const recIdx = {};
-for (const r of rawRecs) {
-  const eid = String(r.emp_id);
-  if (!recIdx[eid]) recIdx[eid] = {};
-
-  const isMultiDayLeave =
-    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim())) &&
-    r.end_date && r.end_date > r.date;
-
-  const spanDates = isMultiDayLeave ? expandDates(r.date, r.end_date) : [r.date];
-
-  spanDates.forEach(d => {
-    const existing = recIdx[eid][d];
-    const existingIsRejectedLeave =
-      existing &&
-      (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
-      (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
-    if (!existing || existingIsRejectedLeave) {
-      recIdx[eid][d] = r;
+    for (const r of rawRecs) {
+      const eid = String(r.emp_id);
+      if (!recIdx[eid]) recIdx[eid] = {};
+      const existing = recIdx[eid][r.date];
+      const existingIsRejectedLeave =
+        existing &&
+        (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
+        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+      // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
+      if (!existing || existingIsRejectedLeave) {
+        recIdx[eid][r.date] = r;
+      }
     }
-  });
-}
 
     // ── Build cell matrix ──────────────────────────────────────────────────────
     const todayReport = todayIST();
@@ -485,21 +480,32 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   const casualRecs    = byType('casual');
   const pendingRecs   = empLeaveRecs.filter(r => (r.leave_status || r.status || 'Pending') === 'Pending');
 
-  // Effective leave days: matches toCode()'s L logic, half-day counts as 0.5
+  // Working-day span of a leave record — mirrors the matrix cell logic
+  // above (WO/H checked before the leave record, so those days render as
+  // WO/H, not L). A record's own `date` field is only the START day; a
+  // multi-day leave needs every day in [date, end_date] counted, not 1.
+  const leaveDaySpan = r => {
+    if (!r.end_date || r.end_date <= r.date) return 1;
+    return expandDates(r.date, r.end_date).filter(d => !isNonWorkingDay(d) && !isHoliday(d)).length;
+  };
+  const sumDays = recs => recs.reduce((s, r) => s + leaveDaySpan(r), 0);
+
+  // Effective leave days: matches toCode()'s L logic, half-day counts as 0.5/day
   const effectiveLeaves = empLeaveRecs.reduce((sum, r) => {
     const ls = r.leave_status || r.status || 'Pending';
     if (ls === 'Pending') return sum;
     const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
     const hasCheckin = r.checkin_time || r.checkinTime;
-    if (ls === 'Approved') return sum + (isHalf ? 0.5 : 1); // approved leave always counts (matches toCode's unconditional 'L')
-    if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
+    const days = leaveDaySpan(r) * (isHalf ? 0.5 : 1);
+    if (ls === 'Approved') return sum + days; // approved leave always counts (matches toCode's unconditional 'L')
+    if (ls === 'Rejected') return hasCheckin ? sum : sum + days;
     return sum;
   }, 0);
   sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
   sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
-  sumRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length);
-  sumRow('No of Emergency Leaves', emergencyRecs.length);
-  sumRow('No of Casual Leaves', casualRecs.length);
+  sumRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs));
+  sumRow('No of Emergency Leaves', sumDays(emergencyRecs));
+  sumRow('No of Casual Leaves', sumDays(casualRecs));
   sumRow('Total Effective Leaves', effectiveLeaves);
   sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
   sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
@@ -813,21 +819,30 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   const emergencyRecs = byType('emergency');
   const casualRecs    = byType('casual');
   const pendingRecs   = empLeaveRecs.filter(r => (r.leave_status || r.status || 'Pending') === 'Pending');
+  // Working-day span of a leave record (mirrors the reports matrix's own
+  // WO/H-before-L precedence) — a record's `date` is only the START day,
+  // so a multi-day leave needs every day in [date, end_date] counted.
+  const leaveDaySpan = r => {
+    if (!r.end_date || r.end_date <= r.date) return 1;
+    return expandDates(r.date, r.end_date).filter(d => !isNonWorkingDay(d) && !isHoliday(d)).length;
+  };
+  const sumDays = recs => recs.reduce((s, r) => s + leaveDaySpan(r), 0);
   const effectiveLeaves = empLeaveRecs.reduce((sum, r) => {
     const ls = r.leave_status || r.status || 'Pending';
     if (ls === 'Pending') return sum;
     const isHalf = String(r.leave_type||'').toLowerCase().includes('half');
     const hasCheckin = r.checkin_time || r.checkinTime;
-    if (ls === 'Approved') return sum + (isHalf ? 0.5 : 1); // approved leave always counts (matches toCode's unconditional 'L')
-    if (ls === 'Rejected') return hasCheckin ? sum : sum + (isHalf ? 0.5 : 1);
+    const days = leaveDaySpan(r) * (isHalf ? 0.5 : 1);
+    if (ls === 'Approved') return sum + days; // approved leave always counts (matches toCode's unconditional 'L')
+    if (ls === 'Rejected') return hasCheckin ? sum : sum + days;
     return sum;
   }, 0);
 
   pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
   pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
-  pdfRow('No of Half Day Leaves (each = 0.5 day)', halfDayRecs.length, 'row', 26);
-  pdfRow('No of Emergency Leaves',                 emergencyRecs.length);
-  pdfRow('No of Casual Leaves',                    casualRecs.length);
+  pdfRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs), 'row', 26);
+  pdfRow('No of Emergency Leaves',                 sumDays(emergencyRecs));
+  pdfRow('No of Casual Leaves',                    sumDays(casualRecs));
   pdfRow('Total Effective Leaves',                 effectiveLeaves);
   pdfRow('No of Absent (A)',               cells.filter(c => c==='A').length);
   pdfRow('No of Leave Applied / Pending (LA)',      pendingRecs.length);

@@ -10,6 +10,7 @@ const { authenticate, authorize } = require('../middleware/auth');
 const { sendMail } = require('../utils/mailer');
 const path            = require('path');
 const { uploadFile }  = require('../utils/storage');
+const { clampLeaveBalance } = require('../utils/leaveBalance');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -300,7 +301,7 @@ router.get('/leave-balance-template', authenticate, authorize('manager', 'admin'
     ws.columns = [
       { header: 'Employee Code (emp_id)', key: 'emp_id', width: 24 },
       { header: 'Name (read-only)', key: 'name', width: 28 },
-      { header: 'New Balance (days)', key: 'leave_balance', width: 22 },
+      { header: 'New Balance (0–24, steps of 0.5)', key: 'leave_balance', width: 28 },
       { header: 'Reason', key: 'reason', width: 32 },
     ];
     ws.getRow(1).font = { bold: true };
@@ -1304,10 +1305,10 @@ router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', '
 
     let newBalance;
     if (set !== undefined && set !== null && set !== '') {
-      newBalance = Math.max(0, Number(set));
+      newBalance = clampLeaveBalance(Number(set));
       await User.findByIdAndUpdate(req.params.id, { $set: { leave_balance: newBalance } });
     } else if (delta !== undefined) {
-      newBalance = Math.max(0, (emp.leave_balance || 0) + Number(delta));
+      newBalance = clampLeaveBalance((emp.leave_balance || 0) + Number(delta));
       await User.findByIdAndUpdate(req.params.id, { $set: { leave_balance: newBalance } });
     } else {
       return res.status(400).json({ success: false, message: 'Provide delta or set' });
@@ -1363,9 +1364,9 @@ router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super
     for (const emp of employees) {
       let newBalance;
       if (set !== undefined && set !== null && set !== '') {
-        newBalance = Math.max(0, Number(set));
+        newBalance = clampLeaveBalance(Number(set));
       } else if (delta !== undefined) {
-        newBalance = Math.max(0, (emp.leave_balance || 0) + Number(delta));
+        newBalance = clampLeaveBalance((emp.leave_balance || 0) + Number(delta));
       } else continue;
       updates.push({ updateOne: { filter: { _id: emp._id }, update: { $set: { leave_balance: newBalance } } } });
     }
@@ -1417,7 +1418,7 @@ router.post('/bulk-leave-balance-excel', authenticate, authorize('manager', 'adm
       if (newBal === null || newBal === '' || isNaN(Number(newBal))) {
         errors.push(`Row ${rn}: invalid balance value "${newBal}"`); return;
       }
-      const balance = Math.max(0, Number(newBal));
+      const balance = clampLeaveBalance(Number(newBal));
       updates.push({ emp, balance, reason });
     });
 

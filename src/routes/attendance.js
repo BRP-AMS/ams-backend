@@ -5,6 +5,7 @@ const { uploadFile } = require('../utils/storage');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { AttendanceRecord, User, Notification, AuditLog, CustomBlock, ODARequest } = require('../models/database');
+const { clampLeaveBalance, roundHalfDay } = require('../utils/leaveBalance');
 const { authenticate, authorize }                         = require('../middleware/auth');
 const { sendMail }                                        = require('../utils/mailer');
 const path = require('path');
@@ -148,6 +149,13 @@ const countWorkingDays = (startISO, endISO) => {
   }
   return count || 1;
 };
+// Leave-balance cost of a request, in days — countWorkingDays() always
+// returns whole numbers, but Half Day leave costs exactly half a day
+// regardless of how many calendar days it spans (it's always a single day
+// in practice). Used for balance deduction/refund only, never for the
+// attendance-matrix display, which still shows Half Day as its own code.
+const leaveDayUnits = (leaveType, startISO, endISO) =>
+  leaveType === 'Half Day' ? 0.5 : countWorkingDays(startISO, endISO);
 const addDays = (isoDate, n) => {
   const d = new Date(isoDate + 'T00:00:00+05:30');
   d.setDate(d.getDate() + n);
@@ -1341,26 +1349,33 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     if (existing) return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} that overlaps this request.` });
 
     const isMultiDay = finalEndDate !== date;
-    const dayCount   = countWorkingDays(date, finalEndDate);
+    const dayCount   = countWorkingDays(date, finalEndDate); // for display/messaging only
+    const dayUnits   = leaveDayUnits(leaveType, date, finalEndDate); // for balance math — Half Day = 0.5
     const id = uuidv4();
 
-    // ── Leave balance & LOP logic ───────────────────────────────────────
+    // ── Leave balance & partial-LOP logic ────────────────────────────────
+    // Deduct whatever balance is available (down to 0) and mark only the
+    // remaining shortfall as LOP — e.g. balance=1, requesting 3 days uses
+    // the 1 available day and marks 2 as LOP, rather than voiding the
+    // whole request's balance use just because it doesn't fully cover it.
     const balance = currentUser?.leave_balance ?? 0;
     const autoEnabled = currentUser?.auto_leave_enabled !== false;
-    const isLOP = autoEnabled && balance < dayCount;
-    const effectiveLeaveType = isLOP ? leaveType : leaveType; // keep type, mark LOP separately
-    const leaveNote = isLOP ? ' (LOP — insufficient balance)' : '';
+    const paidDays = autoEnabled ? Math.min(balance, dayUnits) : 0;
+    const lopDays  = roundHalfDay(dayUnits - paidDays);
+    const isLOP    = lopDays > 0;
+    const leaveNote = !isLOP ? '' : paidDays > 0
+      ? ` (${paidDays} day${paidDays !== 1 ? 's' : ''} balance, ${lopDays} day${lopDays !== 1 ? 's' : ''} LOP)`
+      : ' (LOP — insufficient balance)';
 
     await AttendanceRecord.create({
       _id: id, emp_id: req.user.id, date, end_date: isMultiDay ? finalEndDate : null,
       duty_type: 'Leave', status: 'Pending', manager_id: managerId,
       leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Pending',
-      is_lop: isLOP, submitted_at: new Date(),
+      is_lop: isLOP, paid_days: paidDays, lop_days: lopDays, submitted_at: new Date(),
     });
 
-    // Deduct balance if sufficient
-    if (autoEnabled && !isLOP && balance > 0) {
-      await User.findByIdAndUpdate(req.user.id, { $inc: { leave_balance: -dayCount } });
+    if (paidDays > 0) {
+      await User.findByIdAndUpdate(req.user.id, { $set: { leave_balance: clampLeaveBalance(balance - paidDays) } });
     }
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'APPLY_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
 
@@ -1428,25 +1443,31 @@ router.post('/manager-apply-leave', authenticate, authorize('manager', 'admin'),
     if (existing) return res.status(409).json({ success: false, message: `${emp.name} already has a record for ${recordDateLabel(existing)} that overlaps this request.` });
 
     const isMultiDay = finalEndDate !== date;
-    const dayCount   = countWorkingDays(date, finalEndDate);
+    const dayCount   = countWorkingDays(date, finalEndDate); // for display/messaging only
+    const dayUnits   = leaveDayUnits(leaveType, date, finalEndDate); // for balance math — Half Day = 0.5
     const id = uuidv4();
 
+    // Partial LOP — see apply-leave above for the rationale.
     const balance = emp.leave_balance ?? 0;
     const autoEnabled = emp.auto_leave_enabled !== false;
-    const isLOP = autoEnabled && balance < dayCount;
-    const leaveNote = isLOP ? ' (LOP — insufficient balance)' : '';
+    const paidDays = autoEnabled ? Math.min(balance, dayUnits) : 0;
+    const lopDays  = roundHalfDay(dayUnits - paidDays);
+    const isLOP    = lopDays > 0;
+    const leaveNote = !isLOP ? '' : paidDays > 0
+      ? ` (${paidDays} day${paidDays !== 1 ? 's' : ''} balance, ${lopDays} day${lopDays !== 1 ? 's' : ''} LOP)`
+      : ' (LOP — insufficient balance)';
 
     await AttendanceRecord.create({
       _id: id, emp_id: empId, date, end_date: isMultiDay ? finalEndDate : null,
       duty_type: 'Leave', status: 'Approved', manager_id: emp.manager_id || null,
       leave_type: leaveType, leave_reason: reason + leaveNote, leave_status: 'Approved',
-      is_lop: isLOP, submitted_at: new Date(),
+      is_lop: isLOP, paid_days: paidDays, lop_days: lopDays, submitted_at: new Date(),
       actioned_by: req.user.id, actioned_at: new Date(),
       manager_remark: `Added by ${req.user.role === 'admin' ? 'Admin' : 'Manager'}: ${reason}`,
     });
 
-    if (autoEnabled && !isLOP && balance > 0) {
-      await User.findByIdAndUpdate(empId, { $inc: { leave_balance: -dayCount } });
+    if (paidDays > 0) {
+      await User.findByIdAndUpdate(empId, { $set: { leave_balance: clampLeaveBalance(balance - paidDays) } });
     }
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'MANAGER_ADD_LEAVE', entity_type: 'attendance', entity_id: id, new_value: leaveType });
 
@@ -1483,10 +1504,17 @@ router.delete('/:id/cancel-leave', authenticate, authorize('employee'), async (r
     await AttendanceRecord.findByIdAndDelete(record._id);
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CANCEL_LEAVE', entity_type: 'attendance', entity_id: record._id, new_value: record.leave_type });
 
-    // Restore leave balance if it was deducted at application time
-    if (!record.is_lop) {
-      const days = countWorkingDays(record.date, record.end_date || record.date);
-      await User.findByIdAndUpdate(req.user.id, { $inc: { leave_balance: days } });
+    // Restore whatever was actually deducted at application time. paid_days
+    // is undefined (not 0) on records created before this field existed —
+    // fall back to the old full-refund behavior for those legacy records
+    // only; a real 0 means an already-tracked request that never touched
+    // balance (fully LOP).
+    const refundDays = record.paid_days != null
+      ? record.paid_days
+      : (!record.is_lop ? countWorkingDays(record.date, record.end_date || record.date) : 0);
+    if (refundDays > 0) {
+      const empBalance = await User.findById(req.user.id).select('leave_balance').lean();
+      await User.findByIdAndUpdate(req.user.id, { $set: { leave_balance: clampLeaveBalance((empBalance?.leave_balance ?? 0) + refundDays) } });
     }
 
     const emp = await User.findById(req.user.id).select('name').lean();
@@ -1631,10 +1659,16 @@ router.put('/:id/reject', authenticate, authorize('manager', 'admin'), [
     if (record.face_verification_status === 'manager_review') update.face_verification_status = 'manager_rejected';
     await AttendanceRecord.findByIdAndUpdate(record._id, { $set: update });
 
-    // Restore leave balance if balance was deducted at application time
-    if (record.leave_type && !record.is_lop) {
-      const days = countWorkingDays(record.date, record.end_date || record.date);
-      await User.findByIdAndUpdate(record.emp_id, { $inc: { leave_balance: days } });
+    // Restore whatever was actually deducted at application time — see the
+    // matching comment in DELETE /:id/cancel-leave for the legacy-record fallback.
+    if (record.leave_type) {
+      const refundDays = record.paid_days != null
+        ? record.paid_days
+        : (!record.is_lop ? countWorkingDays(record.date, record.end_date || record.date) : 0);
+      if (refundDays > 0) {
+        const empBalance = await User.findById(record.emp_id).select('leave_balance').lean();
+        await User.findByIdAndUpdate(record.emp_id, { $set: { leave_balance: clampLeaveBalance((empBalance?.leave_balance ?? 0) + refundDays) } });
+      }
     }
 
     const isFaceReject = record.face_verification_status === 'manager_review';

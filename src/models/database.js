@@ -63,7 +63,11 @@ photo_update_count:      { type: Number, default: 0    },  // how many updates u
   reporting_officer_name:        { type: String, default: null },
   reporting_officer_designation: { type: String, default: null },
   // ── Leave management ─────────────────────────────────────────────────
-  leave_balance:       { type: Number,  default: 0 },
+  // Half-day steps only (0, 0.5, 1, ... 24) — enforced in application code via
+  // clampLeaveBalance() in attendance.js/users.js since most writes here use
+  // findByIdAndUpdate/bulkWrite, which skip Mongoose validators by default;
+  // min/max still documents the intended range and guards any .save() path.
+  leave_balance:       { type: Number,  default: 0, min: 0, max: 24 },
   auto_leave_enabled:  { type: Boolean, default: true },
   last_accrual_date:   { type: String,  default: null }, // YYYY-MM-DD of last accrual run
   is_permitted:        { type: Boolean, default: false },
@@ -146,7 +150,9 @@ checkout_face_verification_status: {
 },
 checkout_face_confidence: { type: Number, default: null },
   is_missed_checkout:       { type: Boolean, default: false },
-  is_lop:                   { type: Boolean, default: false }, // Loss of Pay — balance was insufficient
+  is_lop:                   { type: Boolean, default: false }, // true when any part of this leave is LOP (lop_days > 0)
+  paid_days:                { type: Number,  default: 0 }, // days actually deducted from leave_balance at application time
+  lop_days:                 { type: Number,  default: 0 }, // days beyond available balance — Loss of Pay, never deducted
   // 15–20 min and is surfaced to employee / manager / super_admin / hr.
   late_checkout_reason:         { type: String, default: null },
   late_checkout_requested_at:   { type: Date,   default: null },

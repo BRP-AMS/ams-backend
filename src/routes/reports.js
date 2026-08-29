@@ -292,26 +292,28 @@ router.get('/export',
     // A multi-day leave (duty_type:'Leave' with end_date set) is stored as ONE record whose
     // `date` field is only the start day — index it at every day in [date, end_date], not just
     // the start, or every day after the first silently reads as Absent in the matrix below.
-    const recIdx = {};
-    const isLeaveRecord = r => r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim());
-    for (const r of rawRecs) {
-      const eid = String(r.emp_id);
-      if (!recIdx[eid]) recIdx[eid] = {};
-      const spanDates = (isLeaveRecord(r) && r.end_date && r.end_date > r.date)
-        ? expandDates(r.date, r.end_date)
-        : [r.date];
-      for (const d of spanDates) {
-        const existing = recIdx[eid][d];
-        const existingIsRejectedLeave =
-          existing &&
-          (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
-          (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
-        // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
-        if (!existing || existingIsRejectedLeave) {
-          recIdx[eid][d] = r;
-        }
-      }
+   const recIdx = {};
+for (const r of rawRecs) {
+  const eid = String(r.emp_id);
+  if (!recIdx[eid]) recIdx[eid] = {};
+
+  const isMultiDayLeave =
+    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim())) &&
+    r.end_date && r.end_date > r.date;
+
+  const spanDates = isMultiDayLeave ? expandDates(r.date, r.end_date) : [r.date];
+
+  spanDates.forEach(d => {
+    const existing = recIdx[eid][d];
+    const existingIsRejectedLeave =
+      existing &&
+      (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
+      (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+    if (!existing || existingIsRejectedLeave) {
+      recIdx[eid][d] = r;
     }
+  });
+}
 
     // ── Build cell matrix ──────────────────────────────────────────────────────
     const todayReport = todayIST();
@@ -1480,12 +1482,24 @@ router.get('/daily-log-export',
     const recFilter = { date:{$gte:startDate,$lte:endDate}, emp_id: emp._id };
     if (status && !['All','Today Check-in'].includes(status)) recFilter.status = status;
 
-    let recs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
-    if (status === 'Today Check-in') {
-      recs = recs.filter(r =>
-        r.checkin_time || r.checkinTime || r.check_in_time || r.checkIn
-      );
-    }
+   let recs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
+if (status === 'Today Check-in') {
+  recs = recs.filter(r =>
+    r.checkin_time || r.checkinTime || r.check_in_time || r.checkIn
+  );
+}
+const expandedRecs = [];
+for (const r of recs) {
+  const isMultiDayLeave =
+    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim())) &&
+    r.end_date && r.end_date > r.date;
+  if (!isMultiDayLeave) { expandedRecs.push(r); continue; }
+  expandDates(r.date, r.end_date).forEach(d => {
+    if (d < startDate || d > endDate) return; // stay within the requested window
+    expandedRecs.push({ ...r, date: d });
+  });
+}
+recs = expandedRecs.sort((a, b) => a.date.localeCompare(b.date));
 
     // ── Safe time parsing: handles ISO datetime, plain "HH:mm", epoch, or Date ──
     const parseDateTime = (dateStr, timeVal) => {

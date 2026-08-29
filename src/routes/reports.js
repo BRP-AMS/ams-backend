@@ -290,19 +290,27 @@ router.get('/export',
 
     // Build index — prefer real check-in records over rejected leave records for the same date
     const recIdx = {};
-    for (const r of rawRecs) {
-      const eid = String(r.emp_id);
-      if (!recIdx[eid]) recIdx[eid] = {};
-      const existing = recIdx[eid][r.date];
-      const existingIsRejectedLeave =
-        existing &&
-        (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
-        (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
-      // Replace if no existing record, or if existing is a rejected leave (prefer real check-in)
-      if (!existing || existingIsRejectedLeave) {
-        recIdx[eid][r.date] = r;
-      }
+for (const r of rawRecs) {
+  const eid = String(r.emp_id);
+  if (!recIdx[eid]) recIdx[eid] = {};
+
+  const isMultiDayLeave =
+    (r.duty_type === 'Leave' || (r.leave_type && String(r.leave_type).trim())) &&
+    r.end_date && r.end_date > r.date;
+
+  const spanDates = isMultiDayLeave ? expandDates(r.date, r.end_date) : [r.date];
+
+  spanDates.forEach(d => {
+    const existing = recIdx[eid][d];
+    const existingIsRejectedLeave =
+      existing &&
+      (existing.duty_type === 'Leave' || (existing.leave_type && String(existing.leave_type).trim())) &&
+      (existing.leave_status === 'Rejected' || existing.status === 'Rejected');
+    if (!existing || existingIsRejectedLeave) {
+      recIdx[eid][d] = r;
     }
+  });
+}
 
     // ── Build cell matrix ──────────────────────────────────────────────────────
     const todayReport = todayIST();

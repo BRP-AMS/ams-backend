@@ -287,7 +287,7 @@ router.get('/leave-balances', authenticate, authorize('manager', 'admin', 'hr', 
 
 // ── GET /api/users/leave-balance-template — download Excel template ──
 // Must also be BEFORE /:id, same reasoning as above.
-router.get('/leave-balance-template', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
+router.get('/leave-balance-template', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const query = req.user.role === 'manager'
       ? { manager_id: req.user.id }
@@ -1292,8 +1292,8 @@ function formatUser(u) {
   };
 }
 
-// ── PATCH /api/users/:id/leave-balance — adjust leave balance (admin/hr only; manager is view-only) ──
-router.patch('/:id/leave-balance', authenticate, authorize('admin', 'hr', 'super_admin'), async (req, res) => {
+// ── PATCH /api/users/:id/leave-balance — adjust leave balance (manager scoped to own team) ──
+router.patch('/:id/leave-balance', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), async (req, res) => {
   try {
     const { delta, reason, set } = req.body; // delta = +/-N, or set = exact value
     const query = req.user.role === 'manager'
@@ -1383,7 +1383,7 @@ router.post('/bulk-leave-balance', authenticate, authorize('admin', 'hr', 'super
 });
 
 // ── POST /api/users/bulk-leave-balance-excel — import Excel to set balances ──
-router.post('/bulk-leave-balance-excel', authenticate, authorize('admin', 'hr', 'super_admin'), uploadMem.single('file'), async (req, res) => {
+router.post('/bulk-leave-balance-excel', authenticate, authorize('manager', 'admin', 'hr', 'super_admin'), uploadMem.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 

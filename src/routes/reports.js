@@ -1563,7 +1563,14 @@ router.get('/daily-log-export',
 
     const workingDays    = rows.filter(r => r.dutyType==='Office Duty' || r.dutyType==='On Duty').length;
     const holidays        = recs.filter(r => (r.duty_type||'').toLowerCase()==='holiday').length;
-    const leaves            = recs.filter(r => r.duty_type==='Leave' || (r.leave_type && String(r.leave_type).trim())).length;
+    // Only count leave that's actually confirmed — a Pending or Rejected
+    // leave application isn't a "day off", it just looked like one until
+    // this filter was added (matches the Approved-gated logic everywhere
+    // else in this file, e.g. toCode()).
+    const leaves            = recs.filter(r =>
+      (r.duty_type==='Leave' || (r.leave_type && String(r.leave_type).trim())) &&
+      (r.leave_status || r.status) === 'Approved'
+    ).length;
     const missedCheckout  = rows.filter(r => r.missedCheckout).length;
     const absent            = recs.filter(r => (r.duty_type||'').toLowerCase()==='absent' ||
                               (r.status==='Rejected' && !(r.checkin_time||r.checkinTime||r.check_in_time||r.checkIn))).length;

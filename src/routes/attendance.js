@@ -222,6 +222,38 @@ const notify = async (userId, title, message, type = 'info', recordId = null, li
 const recordDateLabel = (record) =>
   (record.end_date && record.end_date > record.date) ? `${record.date} to ${record.end_date}` : record.date;
 
+// Finds the AttendanceRecord (if any) that already "covers" a given date
+// for this employee — either its own `date` field equals that day, or the
+// day falls inside a multi-day record's [date, end_date] span. A plain
+// `findOne({emp_id, date})` only catches an exact same-day match and misses
+// every day after a multi-day leave's first day, letting an employee check
+// in (or an admin apply/mark a conflicting record) on a day they already
+// have an approved/pending leave covering.
+const findRecordCoveringDate = (empId, dateStr) =>
+  AttendanceRecord.findOne({
+    emp_id: empId,
+    $or: [
+      { date: dateStr },
+      { date: { $lte: dateStr }, end_date: { $gte: dateStr } },
+    ],
+  }).lean();
+
+// Same idea, but for checking a NEW [startDate, endDate] request against
+// existing records — used when the thing being created is itself a range
+// (a multi-day leave application), where checking only the new request's
+// start day would miss an existing record that conflicts with day 2+ of
+// the new range. Two ranges [a1,a2] and [b1,b2] overlap iff a1<=b2 && b1<=a2;
+// an existing single-day record (end_date null) is treated as [date,date].
+const findOverlappingRecord = (empId, startDate, endDate) =>
+  AttendanceRecord.findOne({
+    emp_id: empId,
+    date: { $lte: endDate },
+    $or: [
+      { end_date: { $gte: startDate } },
+      { end_date: null, date: { $gte: startDate } },
+    ],
+  }).lean();
+
 // ── Shared tail for admin attendance-correction endpoints (regularize,
 // manual-checkout, …): notify the employee, write the audit log, respond. ──
 const finishAdminCorrection = async (req, res, record, { notifyTitle, notifyMsg, auditAction, auditNewValue, auditOldValue, successMsg }) => {
@@ -675,7 +707,7 @@ if (prevRecord && !prevRecord.checkout_time) {
   }
 }
 
-    const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date: today }).lean();
+    const existing = await findRecordCoveringDate(req.user.id, today);
     let existingRejectedLeaveId = null;
     if (existing) {
       const isRejectedLeave =
@@ -1226,8 +1258,8 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
     const currentUser = await User.findById(req.user.id).select('manager_id name leave_balance auto_leave_enabled').lean();
     const managerId   = currentUser?.manager_id;
 
-    const existing = await AttendanceRecord.findOne({ emp_id: req.user.id, date }).lean();
-    if (existing) return res.status(409).json({ success: false, message: `A record already exists for ${date}.` });
+    const existing = await findOverlappingRecord(req.user.id, date, finalEndDate);
+    if (existing) return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} that overlaps this request.` });
 
     const isMultiDay = finalEndDate !== date;
     const dayCount   = countWorkingDays(date, finalEndDate);
@@ -1313,8 +1345,8 @@ router.post('/manager-apply-leave', authenticate, authorize('manager', 'admin'),
       return res.status(403).json({ success: false, message: 'Not your team member' });
     }
 
-    const existing = await AttendanceRecord.findOne({ emp_id: empId, date }).lean();
-    if (existing) return res.status(409).json({ success: false, message: `${emp.name} already has a record for ${date}.` });
+    const existing = await findOverlappingRecord(empId, date, finalEndDate);
+    if (existing) return res.status(409).json({ success: false, message: `${emp.name} already has a record for ${recordDateLabel(existing)} that overlaps this request.` });
 
     const isMultiDay = finalEndDate !== date;
     const dayCount   = countWorkingDays(date, finalEndDate);
@@ -1699,9 +1731,9 @@ router.post('/mark-present', authenticate, authorize('admin'), [
     const employee = await User.findById(empId).select('manager_id name').lean();
     if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
-    const existing = await AttendanceRecord.findOne({ emp_id: empId, date }).lean();
+    const existing = await findRecordCoveringDate(empId, date);
     if (existing) {
-      return res.status(409).json({ success: false, message: 'A record already exists for this day — use Regularize or Check Out instead.' });
+      return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} covering this day — use Regularize or Check Out instead.` });
     }
 
     const timeRe = /^\d{2}:\d{2}$/;

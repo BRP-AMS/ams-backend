@@ -189,16 +189,15 @@ const workingDayIndexInRange = (startISO, targetISO) => {
  */
 // ── reports.js  ·  toCode() ───────────────────────────────────────────────
 // UPDATED LOGIC (see also excel/PDF summary + legend below, which mirror this):
-//   • Pending leave  → '' (blank). No code is shown until the manager takes
-//     action — applies to every leave type (Half Day, Emergency, Casual, ...).
-//     Still counted separately in the summary as "Leave Applied / Pending".
-//   • Approved leave → 'L' for its paid days, 'LOP' for any days beyond what
-//     balance covered (see paid_days/lop_days, set at application time —
-//     POST /apply-leave's partial-LOP logic). A day's L-vs-LOP split is by
-//     position in the range: the first paid_days working days are 'L', the
-//     rest are 'LOP' — matches how the deduction itself was applied.
-//   • Rejected leave with no re-check-in → same L/LOP split as Approved
-//     (counted against the employee either way).
+//   • Pending, Approved, or Rejected-with-no-checkin leave → 'L' for its paid
+//     days, 'LOP' for any days beyond what balance covered. The paid-vs-LOP
+//     split (paid_days/lop_days) is decided at APPLICATION time — POST
+//     /apply-leave deducts balance and marks the shortfall as LOP the
+//     moment the request is filed, before a manager ever acts on it — so a
+//     still-Pending leave already has this split and shows it immediately
+//     instead of sitting blank until approved. A day's L-vs-LOP split
+//     within the leave is by position in the range: the first paid_days
+//     working days are 'L', the rest are 'LOP'.
 //   • Rejected leave WITH a re-check-in → falls through to normal attendance
 //     (the employee actually came in after the rejection).
 const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
@@ -209,11 +208,8 @@ const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
 
-    // Pending — no manager decision yet → blank cell (all leave types).
-    if (ls === 'Pending') return '';
-
-    const isResolvedLeave = ls === 'Approved' || (ls === 'Rejected' && !(rec.checkin_time || rec.checkinTime));
-    if (isResolvedLeave) {
+    const showsAsLeave = ls === 'Pending' || ls === 'Approved' || (ls === 'Rejected' && !(rec.checkin_time || rec.checkinTime));
+    if (showsAsLeave) {
       // paid_days is undefined (not 0) on records from before partial-LOP
       // support existed — treat those as fully paid rather than guessing.
       if (rec.lop_days > 0 && rec.paid_days != null && iso) {
@@ -493,13 +489,15 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         });
-        // NEW: a blank cell with no code (that isn't a weekend/holiday/pre-join
-        // day) is a leave application still awaiting the manager's decision.
+        // A leave application shows L/LOP immediately (based on balance at
+        // application time), even while still Pending manager approval — a
+        // blank cell (not WO/H) now only means an unapproved On Duty Away
+        // check-in, a future date, or a day before the employee joined.
         const legendNoteRow = legendRow + 1;
         ws.getRow(legendNoteRow).height = 12;
         mc(ws, legendNoteRow, 5, legendNoteRow, LAST);
         Object.assign(ws.getCell(legendNoteRow, 5), {
-          value: 'Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.',
+          value: 'Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. Leave applications show L/LOP right away — pending manager approval doesn\'t delay it.',
           font: { size: 8, italic: true, color: { argb: 'FF64748B' }, name: 'Calibri' },
           alignment: { horizontal: 'left', vertical: 'center' },
         });
@@ -963,7 +961,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       // clear row below the legend so it never collides with legend labels.
       y+=16;
       doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
-         .text('Blank cell (not WO/H) = Leave Applied — awaiting manager approval. Once approved it shows as L.', ML, y, { width: tW });
+         .text('Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. Leave applications show L/LOP right away — pending manager approval doesn\'t delay it.', ML, y, { width: tW });
       y+=18;
 
       // Summary

@@ -216,12 +216,9 @@ const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
     if (isResolvedLeave) {
       // paid_days is undefined (not 0) on records from before partial-LOP
       // support existed — treat those as fully paid rather than guessing.
-      // Cell code is 'LP' (not 'LOP') to fit the narrow day columns, same
-      // width class as 'OD'/'WO' — the legend and summary column still say
-      // "LOP" in full wherever there's room for it.
       if (rec.lop_days > 0 && rec.paid_days != null && iso) {
         const dayIdx = workingDayIndexInRange(rec.date, iso);
-        return dayIdx >= rec.paid_days ? 'LP' : 'L';
+        return dayIdx >= rec.paid_days ? 'LOP' : 'L';
       }
       return 'L';
     }
@@ -410,7 +407,7 @@ for (const r of rawRecs) {
 const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const FILL_LOP  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF991B1B'}}; // darker than plain L/A red — matches the LOP summary column's color
       const codeFill = (code, rf) => {
-        if (code==='LP')            return FILL_LOP;
+        if (code==='LOP')           return FILL_LOP;
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         if (code==='H')             return FILL_HOL;
@@ -471,7 +468,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
 
             c.value = code;
-            c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A'||code==='LP')?'FFFFFFFF':'FF000000'}};
+            c.font = {bold:!!code,size:code==='LOP'?7:9,name:'Calibri',color:{argb:(code==='L'||code==='A'||code==='LOP')?'FFFFFFFF':'FF000000'}};
           });
         });
 
@@ -483,7 +480,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
          {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
          {code:'L',label:'Leave (paid)',isRed:true},
-         {code:'LP',label:'LOP — Leave without Pay',isLop:true},
+         {code:'LOP',label:'Leave without Pay',isLop:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ];
@@ -570,7 +567,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   }, 0);
   sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
   sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
-  sumRow('No of LOP (LP)', `=COUNTIF(${fDC}${er}:${lDC}${er},"LP")`);
+  sumRow('No of LOP', `=COUNTIF(${fDC}${er}:${lDC}${er},"LOP")`);
   sumRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs));
   sumRow('No of Emergency Leaves', sumDays(emergencyRecs));
   sumRow('No of Casual Leaves', sumDays(casualRecs));
@@ -645,14 +642,14 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
 
-            // LOP now has its own grid cell code ('LP', see toCode()) for a
+            // LOP now has its own grid cell code ('LOP', see toCode()) for a
             // partially-paid leave's unpaid days — counted the same way as
             // every other column here, and guaranteed not to overlap with
             // Leaves ('L') or Pending (blank) since each day gets exactly
             // one code.
             const empIdStr = String(emp._id);
             const clop = ws.getCell(r, 6);
-            clop.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LP")` };
+            clop.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LOP")` };
             clop.fill = rf; clop.border = CBDR;
             clop.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF991B1B' } };
             clop.alignment = { horizontal: 'center', vertical: 'center' };
@@ -685,7 +682,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             cpend.protection = { locked: true };
 
             // Total = every column in this table — now safe to include LOP
-            // again, since 'LP' is its own grid cell code (see toCode()),
+            // again, since 'LOP' is its own grid cell code (see toCode()),
             // disjoint from 'L'/blank/etc. Each day maps to exactly one
             // column, so this always equals the period's day count.
             const ctot = ws.getCell(r, 10);
@@ -903,12 +900,14 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             let pres=0;
             chunkCells.forEach((code,i)=>{
               const x=xD+i*dW;
-              const isLP=code==='LP'; // darker than plain L/A — matches the LOP summary column's color
+              const isLOP=code==='LOP'; // darker than plain L/A — matches the LOP summary column's color
               const isRed=code==='L'||code==='A';
-              const cellBg=isLP?'#991B1B':isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+              const cellBg=isLOP?'#991B1B':isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
               doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
               if(code){
-                doc.fillColor((isRed||isLP)?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+                // 'LOP' is 3 characters — a smaller size than the other
+                // (1-2 char) codes so it still fits the same narrow column.
+                doc.fillColor((isRed||isLOP)?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(isLOP?4.5:6).font('Helvetica-Bold')
                    .text(code,x+1,y+8,{width:dW-2,align:'center'});
               }
               if(code==='P'||code==='OD') pres++;
@@ -953,13 +952,13 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
        {code:'L',label:'Leave (paid)',red:true},
-       {code:'LP',label:'LOP — Leave without Pay',lop:true},
+       {code:'LOP',label:'Leave without Pay',lop:true},
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
       ].forEach(({code,label,red,lop})=>{
-        const bw=14,lw=115;
+        const bw=code==='LOP'?22:14,lw=115;
         doc.rect(lx,y,bw,10).fillAndStroke(lop?'#991B1B':red?'#FF4444':'#FFFFFF','#999');
-        doc.fillColor((red||lop)?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+        doc.fillColor((red||lop)?'#FFFFFF':'#000000').fontSize(lop?5.5:6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
         lx+=bw+lw+10;
       });
@@ -1028,7 +1027,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
 
   pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
   pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
-  pdfRow('No of LOP (LP)',                 cells.filter(c => c==='LP').length);
+  pdfRow('No of LOP',                      cells.filter(c => c==='LOP').length);
   pdfRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs), 'row', 26);
   pdfRow('No of Emergency Leaves',                 sumDays(emergencyRecs));
   pdfRow('No of Casual Leaves',                    sumDays(casualRecs));
@@ -1122,10 +1121,10 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
     // these days were invisible to every other column, so Total previously
     // fell short of the period's day count whenever an employee had one.
     const pend = cells.filter(c => c==='').length;
-    // LOP now has its own grid cell code ('LP', see toCode()), counted the
+    // LOP now has its own grid cell code ('LOP', see toCode()), counted the
     // same way as every other column here — disjoint from Leaves ('L') and
     // Pending (blank), so Total below always equals the period's day count.
-    const lop = cells.filter(c => c==='LP').length;
+    const lop = cells.filter(c => c==='LOP').length;
     const empIdStr = String(emp._id);
     const total = pres + lv + abs + lop + wo + hol + pend; // every column in this table
 

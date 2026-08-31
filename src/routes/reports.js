@@ -62,15 +62,18 @@ const isLocationUnresolved = addr => {
   if (/^-?\d+\.\d+,\s*-?\d+\.\d+$/.test(s)) return true; // "12.97160, 77.59460"
   return false;
 };
-const locationFetchingDates = (recs, empIdStr) =>
-  [...new Set(
+const locationFetchingDates = (recs, empIdStr) => {
+  const today = todayIST();
+  return [...new Set(
     recs.filter(r =>
       String(r.emp_id) === empIdStr &&
       r.checkin_time &&
+      r.date < today &&   // ← skip today; employee may still be mid-shift
       ['Office Duty', 'On Duty', 'On Duty Away'].includes(r.duty_type) &&
       isLocationUnresolved(r.location_address)
     ).map(r => r.date)
   )].sort();
+};
 // ── IST helpers ───────────────────────────────────────────────────────────────
 const IST      = 'Asia/Kolkata';
 const todayIST = () => new Date().toLocaleDateString('en-CA', { timeZone: IST });

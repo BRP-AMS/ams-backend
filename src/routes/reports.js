@@ -591,22 +591,29 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   }
         } else {
           // ── Table header row ────────────────────────────────────────────────
+          // Column order: Employee, Present, Absent, Week Off, Holidays,
+          // Pending, Leaves, LOP, Total Paid WD, Total Month days, [Location].
           r++; ws.getRow(r).height = 17;
           ws.getColumn(2).width = 32; ws.getColumn(3).width = 14; // Employee Name — was clipping longer names
           ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
           ws.getColumn(6).width = 12; ws.getColumn(7).width = 12;
           ws.getColumn(8).width = 12; ws.getColumn(9).width = 12;
-          ws.getColumn(10).width = 12;
-          if (role !== 'employee') ws.getColumn(11).width = 70; // Location Pending dates list — wide enough for a long comma-separated date list to wrap onto just 1-2 lines instead of many
+          ws.getColumn(10).width = 16; ws.getColumn(11).width = 16;
+          if (role !== 'employee') ws.getColumn(12).width = 70; // Location Pending dates list — wide enough for a long comma-separated date list to wrap onto just 1-2 lines instead of many
 
-          const headerCols = [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C'], ['LOP','FF991B1B'], ['Week Off','FF2563EB'], ['Holidays','FFD97706'], ['Pending','FF64748B'], ['Total','FF1F3864']];
+          const headerCols = [
+            ['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Absent','FFB91C1C'],
+            ['Week Off','FF2563EB'], ['Holidays','FFD97706'], ['Pending','FF64748B'],
+            ['No of Leaves','FFB45309'], ['LOP','FF991B1B'],
+            ['Total Paid WD (P+WO+H+L)','FF1F3864'], ['Total Month Days (P+A+WO+H+Pending+L+LOP)','FF1F3864'],
+          ];
           if (role !== 'employee') headerCols.push(['📍 Location Fetching','FF0369A1']);
 
           headerCols.forEach(([hdr, argb], i) => {
             const c = ws.getCell(r, 2 + i);
             c.value = hdr; c.fill = FILL_SUBH; c.border = CBDR;
             c.font = { bold: true, size: 10, color: { argb }, name: 'Calibri' };
-            c.alignment = { horizontal: 'center', vertical: 'center' };
+            c.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
           });
 
           // ── One row per employee ────────────────────────────────────────────
@@ -628,41 +635,21 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             cp.alignment = { horizontal: 'center', vertical: 'center' };
             cp.protection = { locked: true };
 
-            const cl = ws.getCell(r, 4);
-            cl.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"L")` };
-            cl.fill = rf; cl.border = CBDR;
-            cl.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB45309' } };
-            cl.alignment = { horizontal: 'center', vertical: 'center' };
-            cl.protection = { locked: true };
-
-            const ca = ws.getCell(r, 5);
+            const ca = ws.getCell(r, 4);
             ca.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"A")` };
             ca.fill = rf; ca.border = CBDR;
             ca.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB91C1C' } };
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
 
-            // LOP now has its own grid cell code ('LOP', see toCode()) for a
-            // partially-paid leave's unpaid days — counted the same way as
-            // every other column here, and guaranteed not to overlap with
-            // Leaves ('L') or Pending (blank) since each day gets exactly
-            // one code.
-            const empIdStr = String(emp._id);
-            const clop = ws.getCell(r, 6);
-            clop.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LOP")` };
-            clop.fill = rf; clop.border = CBDR;
-            clop.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF991B1B' } };
-            clop.alignment = { horizontal: 'center', vertical: 'center' };
-            clop.protection = { locked: true };
-
-            const cwo = ws.getCell(r, 7);
+            const cwo = ws.getCell(r, 5);
             cwo.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"WO")` };
             cwo.fill = rf; cwo.border = CBDR;
             cwo.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF2563EB' } };
             cwo.alignment = { horizontal: 'center', vertical: 'center' };
             cwo.protection = { locked: true };
 
-            const chol = ws.getCell(r, 8);
+            const chol = ws.getCell(r, 6);
             chol.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"H")` };
             chol.fill = rf; chol.border = CBDR;
             chol.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFD97706' } };
@@ -671,21 +658,48 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
 
             // Pending — a day the matrix leaves blank (not P/OD/L/A/WO/H):
             // a leave (or On Duty Away) applied but not yet approved/rejected
-            // by the manager (see toCode()'s Pending branch). These days were
-            // previously invisible to every column here, so Total fell short
-            // of the month's day count whenever an employee had one pending.
-            const cpend = ws.getCell(r, 9);
+            // by the manager (see toCode()'s Pending branch).
+            const empIdStr = String(emp._id);
+            const cpend = ws.getCell(r, 7);
             cpend.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"")` };
             cpend.fill = rf; cpend.border = CBDR;
             cpend.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF64748B' } };
             cpend.alignment = { horizontal: 'center', vertical: 'center' };
             cpend.protection = { locked: true };
 
-            // Total = every column in this table — now safe to include LOP
-            // again, since 'LOP' is its own grid cell code (see toCode()),
-            // disjoint from 'L'/blank/etc. Each day maps to exactly one
-            // column, so this always equals the period's day count.
-            const ctot = ws.getCell(r, 10);
+            const cl = ws.getCell(r, 8);
+            cl.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"L")` };
+            cl.fill = rf; cl.border = CBDR;
+            cl.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFB45309' } };
+            cl.alignment = { horizontal: 'center', vertical: 'center' };
+            cl.protection = { locked: true };
+
+            // LOP has its own grid cell code ('LOP', see toCode()) for a
+            // partially-paid leave's unpaid days — counted the same way as
+            // every other column here, and guaranteed not to overlap with
+            // Leaves ('L') or Pending (blank) since each day gets exactly
+            // one code.
+            const clop = ws.getCell(r, 9);
+            clop.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LOP")` };
+            clop.fill = rf; clop.border = CBDR;
+            clop.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF991B1B' } };
+            clop.alignment = { horizontal: 'center', vertical: 'center' };
+            clop.protection = { locked: true };
+
+            // Total Paid WD — days that count toward payroll as worked/paid:
+            // Present + Week Off + Holidays + (paid) Leaves. Excludes Absent,
+            // Pending, and LOP.
+            const cpwd = ws.getCell(r, 10);
+            cpwd.value = { formula: `C${rowNum}+E${rowNum}+F${rowNum}+H${rowNum}` };
+            cpwd.fill = rf; cpwd.border = CBDR;
+            cpwd.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
+            cpwd.alignment = { horizontal: 'center', vertical: 'center' };
+            cpwd.protection = { locked: true };
+
+            // Total Month Days = every column in this table — 'LOP' is its
+            // own disjoint grid cell code, so each day maps to exactly one
+            // column and this always equals the period's day count.
+            const ctot = ws.getCell(r, 11);
             ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}+I${rowNum}` };
             ctot.fill = rf; ctot.border = CBDR;
             ctot.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
@@ -695,7 +709,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             // 📍 Location Pending — dates list, staff-only column.
             if (role !== 'employee') {
               const locDates = locationFetchingDates(rawRecs, empIdStr);
-              const cloc = ws.getCell(r, 11);
+              const cloc = ws.getCell(r, 12);
               cloc.value = locDates.length ? `📍 ${locDates.join(', ')}` : '—';
               cloc.fill = rf; cloc.border = CBDR;
               cloc.font = { size: 8.5, italic: !!locDates.length, name: 'Calibri', color: { argb: locDates.length ? 'FF0369A1' : 'FF94A3B8' } };
@@ -704,7 +718,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           });
         }
 
-        outerBorder(ws, SR, 2, r, role !== 'employee' ? 11 : 10);
+        outerBorder(ws, SR, 2, r, role !== 'employee' ? 12 : 11);
         // ── Signatures ────────────────────────────────────────────────────────
         r+=3; ws.getRow(r).height=20;
 
@@ -1051,44 +1065,49 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   }
 } else {
   sy++;
+  // Column order: Employee, Present, Absent, Week Off, Holidays, Pending,
+  // Leaves, LOP, Total Paid WD, Total Month Days, [Location Fetching].
   // Wider than the summary-rows box (SW/SRH) above, and its own taller row
   // height (TROW) — Employee Name and Location Fetching both need real room:
   // a full name and a comma-separated list of pending-location dates were
   // both getting clipped by the old, narrower columns.
-  const TW   = role !== 'employee' ? SW * 3.4 : SW * 2.2;
-  const TROW = role !== 'employee' ? 26 : SRH; // taller only when Location Fetching's wrapped text needs it
-  const C0 = TW * (role !== 'employee' ? 0.20 : 0.24); // Employee
-  const C1 = TW * (role !== 'employee' ? 0.07 : 0.10); // Present
-  const C2 = TW * (role !== 'employee' ? 0.07 : 0.10); // Leaves
-  const C3 = TW * (role !== 'employee' ? 0.07 : 0.10); // Absent
-  const C4 = TW * (role !== 'employee' ? 0.07 : 0.10); // LOP
-  const C5 = TW * (role !== 'employee' ? 0.07 : 0.10); // Week Off
-  const C6 = TW * (role !== 'employee' ? 0.07 : 0.10); // Holidays
-  const C7 = TW * (role !== 'employee' ? 0.06 : 0.08); // Pending
-  const C8 = TW * (role !== 'employee' ? 0.08 : 0.08); // Total
-  const C9 = role !== 'employee' ? TW * 0.24 : 0;       // Location Pending dates
+  const TW   = role !== 'employee' ? SW * 3.6 : SW * 2.4;
+  const TROW = role !== 'employee' ? 28 : SRH; // taller — Location Fetching + the two-line Total headers both need it
+  const C0 = TW * (role !== 'employee' ? 0.15  : 0.22); // Employee
+  const C1 = TW * (role !== 'employee' ? 0.065 : 0.08); // Present
+  const C2 = TW * (role !== 'employee' ? 0.065 : 0.08); // Absent
+  const C3 = TW * (role !== 'employee' ? 0.065 : 0.08); // Week Off
+  const C4 = TW * (role !== 'employee' ? 0.065 : 0.08); // Holidays
+  const C5 = TW * (role !== 'employee' ? 0.06  : 0.08); // Pending
+  const C6 = TW * (role !== 'employee' ? 0.065 : 0.08); // Leaves
+  const C7 = TW * (role !== 'employee' ? 0.06  : 0.08); // LOP
+  const C8 = TW * (role !== 'employee' ? 0.09  : 0.11); // Total Paid WD
+  const C9 = TW * (role !== 'employee' ? 0.09  : 0.11); // Total Month Days
+  const C10= role !== 'employee' ? TW * 0.225 : 0;       // Location Pending dates
 
   const drawSummaryHeader = (yy) => {
-    doc.rect(SX,                  yy, C0, TROW).fillAndStroke('#E8EDF4','#000');
-    doc.rect(SX+C0,                yy, C1, TROW).fillAndStroke('#D1FAE5','#000');
-    doc.rect(SX+C0+C1,             yy, C2, TROW).fillAndStroke('#FEF3C7','#000');
-    doc.rect(SX+C0+C1+C2,          yy, C3, TROW).fillAndStroke('#FEE2E2','#000');
-    doc.rect(SX+C0+C1+C2+C3,       yy, C4, TROW).fillAndStroke('#FEE2E2','#000');
-    doc.rect(SX+C0+C1+C2+C3+C4,    yy, C5, TROW).fillAndStroke('#DBEAFE','#000');
-    doc.rect(SX+C0+C1+C2+C3+C4+C5, yy, C6, TROW).fillAndStroke('#FEF3C7','#000');
-    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6, yy, C7, TROW).fillAndStroke('#F1F5F9','#000');
+    doc.rect(SX,                     yy, C0, TROW).fillAndStroke('#E8EDF4','#000');
+    doc.rect(SX+C0,                   yy, C1, TROW).fillAndStroke('#D1FAE5','#000');
+    doc.rect(SX+C0+C1,                yy, C2, TROW).fillAndStroke('#FEE2E2','#000');
+    doc.rect(SX+C0+C1+C2,             yy, C3, TROW).fillAndStroke('#DBEAFE','#000');
+    doc.rect(SX+C0+C1+C2+C3,          yy, C4, TROW).fillAndStroke('#FEF3C7','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4,       yy, C5, TROW).fillAndStroke('#F1F5F9','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5,    yy, C6, TROW).fillAndStroke('#FEF3C7','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6, yy, C7, TROW).fillAndStroke('#FEE2E2','#000');
     doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7, yy, C8, TROW).fillAndStroke('#E8EDF4','#000');
-    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8, yy, C9, TROW).fillAndStroke('#E0F2FE','#000');
-    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    yy+4, {width:C0-8});
-    doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   yy+4, {width:C1,align:'center'});
-    doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,yy+4, {width:C2,align:'center'});
-    doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,yy+4,{width:C3,align:'center'});
-    doc.fillColor('#991B1B').fontSize(8).font('Helvetica-Bold').text('LOP',        SX+C0+C1+C2+C3,yy+4,{width:C4,align:'center'});
-    doc.fillColor('#2563EB').fontSize(8).font('Helvetica-Bold').text('Week Off',   SX+C0+C1+C2+C3+C4,yy+4,{width:C5,align:'center'});
-    doc.fillColor('#D97706').fontSize(8).font('Helvetica-Bold').text('Holidays',   SX+C0+C1+C2+C3+C4+C5,yy+4,{width:C6,align:'center'});
-    doc.fillColor('#64748B').fontSize(8).font('Helvetica-Bold').text('Pending',    SX+C0+C1+C2+C3+C4+C5+C6,yy+4,{width:C7,align:'center'});
-    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Total',      SX+C0+C1+C2+C3+C4+C5+C6+C7,yy+4,{width:C8,align:'center'});
-    if (role !== 'employee') doc.fillColor('#0369A1').fontSize(8).font('Helvetica-Bold').text('Location Fetching', SX+C0+C1+C2+C3+C4+C5+C6+C7+C8, yy+4, {width:C9,align:'center'});
+    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8, yy, C9, TROW).fillAndStroke('#E8EDF4','#000');
+    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+C9, yy, C10, TROW).fillAndStroke('#E0F2FE','#000');
+    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    yy+(TROW-9)/2, {width:C0-8});
+    doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   yy+(TROW-9)/2, {width:C1,align:'center'});
+    doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1,yy+(TROW-9)/2,{width:C2,align:'center'});
+    doc.fillColor('#2563EB').fontSize(8).font('Helvetica-Bold').text('Week Off',   SX+C0+C1+C2,yy+(TROW-9)/2,{width:C3,align:'center'});
+    doc.fillColor('#D97706').fontSize(8).font('Helvetica-Bold').text('Holidays',   SX+C0+C1+C2+C3,yy+(TROW-9)/2,{width:C4,align:'center'});
+    doc.fillColor('#64748B').fontSize(8).font('Helvetica-Bold').text('Pending',    SX+C0+C1+C2+C3+C4,yy+(TROW-9)/2,{width:C5,align:'center'});
+    doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1+C2+C3+C4+C5,yy+(TROW-9)/2,{width:C6,align:'center'});
+    doc.fillColor('#991B1B').fontSize(8).font('Helvetica-Bold').text('LOP',        SX+C0+C1+C2+C3+C4+C5+C6,yy+(TROW-9)/2,{width:C7,align:'center'});
+    doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text('Total Paid WD', SX+C0+C1+C2+C3+C4+C5+C6+C7+2, yy+(TROW-9)/2, {width:C8-4,align:'center'});
+    doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text('Total Month Days', SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+2, yy+(TROW-9)/2, {width:C9-4,align:'center'});
+    if (role !== 'employee') doc.fillColor('#0369A1').fontSize(8).font('Helvetica-Bold').text('Location Fetching', SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+C9, yy+(TROW-9)/2, {width:C10,align:'center'});
     return yy + TROW;
   };
 
@@ -1100,46 +1119,47 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       sy = drawSummaryHeader(40);
     }
     const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-    doc.rect(SX,                  sy, C0, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0,                sy, C1, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1,             sy, C2, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2,          sy, C3, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2+C3,       sy, C4, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2+C3+C4,    sy, C5, TROW).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2+C3+C4+C5, sy, C6, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX,                     sy, C0, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0,                   sy, C1, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1,                sy, C2, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2,             sy, C3, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3,          sy, C4, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4,       sy, C5, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5,    sy, C6, TROW).fillAndStroke(bg,'#CCCCCC');
     doc.rect(SX+C0+C1+C2+C3+C4+C5+C6, sy, C7, TROW).fillAndStroke(bg,'#CCCCCC');
     doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7, sy, C8, TROW).fillAndStroke(bg,'#CCCCCC');
-    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8, sy, C9, TROW).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8, sy, C9, TROW).fillAndStroke(bg,'#CCCCCC');
+    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+C9, sy, C10, TROW).fillAndStroke(bg,'#CCCCCC');
 
     const pres = cells.filter(c => c==='P'||c==='OD').length;
-    const lv   = cells.filter(c => c==='L').length;
     const abs  = cells.filter(c => c==='A').length;
     const wo   = cells.filter(c => c==='WO').length;
     const hol  = cells.filter(c => c==='H').length;
     // Pending — a day the matrix leaves blank: a leave (or On Duty Away)
-    // applied but not yet approved/rejected. See toCode()'s Pending branch —
-    // these days were invisible to every other column, so Total previously
-    // fell short of the period's day count whenever an employee had one.
+    // applied but not yet approved/rejected. See toCode()'s Pending branch.
     const pend = cells.filter(c => c==='').length;
-    // LOP now has its own grid cell code ('LOP', see toCode()), counted the
+    const lv   = cells.filter(c => c==='L').length;
+    // LOP has its own grid cell code ('LOP', see toCode()), counted the
     // same way as every other column here — disjoint from Leaves ('L') and
-    // Pending (blank), so Total below always equals the period's day count.
-    const lop = cells.filter(c => c==='LOP').length;
+    // Pending (blank), so the totals below always add up cleanly.
+    const lop  = cells.filter(c => c==='LOP').length;
     const empIdStr = String(emp._id);
-    const total = pres + lv + abs + lop + wo + hol + pend; // every column in this table
+    const paidWD    = pres + wo + hol + lv;              // Present + Week Off + Holidays + Leaves
+    const monthDays = pres + abs + wo + hol + pend + lv + lop; // every column in this table
 
     // Employee name gets the taller row height too, so a name that wraps to
     // a second line (like "Ajaya Narasimha Reddy Siriyapureddy") isn't cut
     // off — no ellipsis/lineBreak:false here, unlike before.
     doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,      SX+4,   sy+3,{width:C0-8,height:TROW-4});
     doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres),  SX+C0,  sy+3,{width:C1,align:'center'});
-    doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),    SX+C0+C1,sy+3,{width:C2,align:'center'});
-    doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),   SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
-    doc.fillColor('#991B1B').fontSize(9  ).font('Helvetica-Bold').text(String(lop),   SX+C0+C1+C2+C3,sy+3,{width:C4,align:'center'});
-    doc.fillColor('#2563EB').fontSize(9  ).font('Helvetica-Bold').text(String(wo),    SX+C0+C1+C2+C3+C4,sy+3,{width:C5,align:'center'});
-    doc.fillColor('#D97706').fontSize(9  ).font('Helvetica-Bold').text(String(hol),   SX+C0+C1+C2+C3+C4+C5,sy+3,{width:C6,align:'center'});
-    doc.fillColor('#64748B').fontSize(9  ).font('Helvetica-Bold').text(String(pend),  SX+C0+C1+C2+C3+C4+C5+C6,sy+3,{width:C7,align:'center'});
-    doc.fillColor('#1F3864').fontSize(9  ).font('Helvetica-Bold').text(String(total), SX+C0+C1+C2+C3+C4+C5+C6+C7,sy+3,{width:C8,align:'center'});
+    doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),   SX+C0+C1,sy+3,{width:C2,align:'center'});
+    doc.fillColor('#2563EB').fontSize(9  ).font('Helvetica-Bold').text(String(wo),    SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
+    doc.fillColor('#D97706').fontSize(9  ).font('Helvetica-Bold').text(String(hol),   SX+C0+C1+C2+C3,sy+3,{width:C4,align:'center'});
+    doc.fillColor('#64748B').fontSize(9  ).font('Helvetica-Bold').text(String(pend),  SX+C0+C1+C2+C3+C4,sy+3,{width:C5,align:'center'});
+    doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),    SX+C0+C1+C2+C3+C4+C5,sy+3,{width:C6,align:'center'});
+    doc.fillColor('#991B1B').fontSize(9  ).font('Helvetica-Bold').text(String(lop),   SX+C0+C1+C2+C3+C4+C5+C6,sy+3,{width:C7,align:'center'});
+    doc.fillColor('#1F3864').fontSize(9  ).font('Helvetica-Bold').text(String(paidWD),    SX+C0+C1+C2+C3+C4+C5+C6+C7,sy+3,{width:C8,align:'center'});
+    doc.fillColor('#1F3864').fontSize(9  ).font('Helvetica-Bold').text(String(monthDays), SX+C0+C1+C2+C3+C4+C5+C6+C7+C8,sy+3,{width:C9,align:'center'});
 
     if (role !== 'employee') {
       const locDates = locationFetchingDates(rawRecs, empIdStr);
@@ -1147,10 +1167,15 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       // plus taller row gives real room for a handful of dates; ellipsis
       // only kicks in if the list is still too long for even that.
       doc.fillColor(locDates.length ? '#0369A1' : '#94A3B8').fontSize(6.5).font(locDates.length ? 'Helvetica-Oblique' : 'Helvetica')
-         .text(locDates.length ? locDates.join(', ') : '—', SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+3, sy+3, {width:C9-6, height:TROW-4, ellipsis:true});
+         .text(locDates.length ? locDates.join(', ') : '—', SX+C0+C1+C2+C3+C4+C5+C6+C7+C8+C9+3, sy+3, {width:C10-6, height:TROW-4, ellipsis:true});
     }
     sy += TROW;
   });
+  // Formulas didn't fit in the header cells above — spelled out here instead.
+  sy += 3;
+  doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
+     .text('Total Paid WD = Present + Week Off + Holidays + Leaves.  Total Month Days = Present + Absent + Week Off + Holidays + Pending + Leaves + LOP.', SX, sy, { width: TW });
+  sy += 12;
 }
 
       // Signatures (employee download only)

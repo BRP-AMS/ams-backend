@@ -711,8 +711,8 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         return y+46;
       };
 
+      const HRH = 32;   // taller header row to fit day-num + weekday + month
       const drawColHdr=(y,chunkDates,totalLabel)=>{
-        const HRH = 32;   // taller header row to fit day-num + weekday + month
         [[xC,CC,'Emp code'],[xN,CN,'Employee Name'],[xDes,CD,'Designation']].forEach(([x,w,l])=>{
           doc.rect(x,y,w,HRH).fillAndStroke('#FFF','#AAA');
           doc.fillColor('#3366FF').fontSize(7).font('Helvetica-Bold')
@@ -739,45 +739,60 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const chunks=[];
       for(let i=0;i<dates.length;i+=CHUNK) chunks.push(dates.slice(i,i+CHUNK));
 
-      let y=drawTitle(ML);
-      chunks.forEach((chunkDates,ci)=>{
-        // Each day-chunk (block of CHUNK days) always starts on its own fresh
-        // page — once one chunk's employees run out (possibly spanning
-        // several pages on its own if there are many), the next chunk's
-        // employee list restarts from the top of a new page rather than
-        // continuing partway down whatever page the previous chunk ended on.
-        if(ci>0){addPage();y=drawTitle(28);}
-        y=drawColHdr(y,chunkDates,'Subtotal');
-        matrix.forEach(({emp,cells},idx)=>{
-          if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
-          const bg=idx%2===0?'#F9F9F9':'#FFF';
-          doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
-          // Vertical dividers between Emp code / Name / Designation — the
-          // header row already has these per-column, but the data rows only
-          // draw one wide background stripe with no internal separators.
-          doc.lineWidth(0.5).strokeColor('#DDD');
-          [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
-          doc.lineWidth(0.5);
-          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
-          doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
-          doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
-          const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
-          let pres=0;
-          chunkCells.forEach((code,i)=>{
-            const x=xD+i*dW;
-            const isRed=code==='L'||code==='A';
-            const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
-            doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
-            if(code){
-              doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
-                 .text(code,x+1,y+8,{width:dW-2,align:'center'});
-            }
-            if(code==='P'||code==='OD') pres++;
+      // Group employees into fixed-size page batches, sized to exactly how
+      // many rows fit under one title+header on a page (title is always 46pt
+      // per drawTitle(), header is HRH). Batching by employee FIRST and
+      // day-chunk SECOND (rather than the other way around) means one
+      // employee batch's entire month — every day-chunk — completes across
+      // consecutive pages before the next batch of employees begins, instead
+      // of every employee's first day-chunk being scattered across a run of
+      // pages, then the SAME employees' second day-chunk showing up much
+      // later after every other employee's first chunk has already printed.
+      const TITLE_H = 46;
+      const rowsPerPage = Math.max(1, Math.floor((PH-60-(ML+TITLE_H+HRH))/RH));
+      const employeeGroups=[];
+      for(let i=0;i<matrix.length;i+=rowsPerPage) employeeGroups.push(matrix.slice(i,i+rowsPerPage));
+
+      let y;
+      let firstPage=true;
+      employeeGroups.forEach(empGroup=>{
+        chunks.forEach((chunkDates,ci)=>{
+          if(firstPage){y=drawTitle(ML);firstPage=false;}
+          else{addPage();y=drawTitle(28);}
+          y=drawColHdr(y,chunkDates,'Subtotal');
+          empGroup.forEach(({emp,cells},idx)=>{
+            // Safety net only — rowsPerPage is sized to always fit, so this
+            // should never actually fire.
+            if(y+RH>PH-60){addPage();y=drawTitle(28);y=drawColHdr(y,chunkDates,'Subtotal');}
+            const bg=idx%2===0?'#F9F9F9':'#FFF';
+            doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
+            // Vertical dividers between Emp code / Name / Designation — the
+            // header row already has these per-column, but the data rows only
+            // draw one wide background stripe with no internal separators.
+            doc.lineWidth(0.5).strokeColor('#DDD');
+            [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
+            doc.lineWidth(0.5);
+            doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
+            doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
+            doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
+            const chunkCells=cells.slice(ci*CHUNK,ci*CHUNK+chunkDates.length);
+            let pres=0;
+            chunkCells.forEach((code,i)=>{
+              const x=xD+i*dW;
+              const isRed=code==='L'||code==='A';
+              const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+              doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
+              if(code){
+                doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+                   .text(code,x+1,y+8,{width:dW-2,align:'center'});
+              }
+              if(code==='P'||code==='OD') pres++;
+            });
+            for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fillAndStroke('#F5F5F5','#CCC');
+            doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
+            doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+7,{width:CT-4,align:'center'});
+            y+=RH;
           });
-          for(let i=chunkCells.length;i<CHUNK;i++) doc.rect(xD+i*dW,y,dW,RH).fillAndStroke('#F5F5F5','#CCC');
-          doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
-          doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(pres),xT+2,y+7,{width:CT-4,align:'center'});
-          y+=RH;
         });
       });
 

@@ -815,8 +815,23 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       let firstPage=true;
       employeeGroups.forEach(empGroup=>{
         chunks.forEach((chunkDates,ci)=>{
-          if(firstPage){y=drawTitle(ML);firstPage=false;}
-          else{addPage();y=drawTitle(28);}
+          if(firstPage){
+            y=drawTitle(ML);firstPage=false;
+          }else if(ci===0){
+            // Start of a new employee batch — always a fresh page, so one
+            // batch's chunks never trail onto a page a previous batch left
+            // partly filled (this is what fixes batches landing on
+            // out-of-order pages).
+            addPage();y=drawTitle(28);
+          }else if(y+HRH+empGroup.length*RH>PH-60){
+            // Moving to the next chunk WITHIN the same batch — only break if
+            // it won't actually fit. A full batch (sized to fill a page for
+            // one chunk) will always fail this and get its own page per
+            // chunk, same as before; a small batch (e.g. a single employee's
+            // own report) keeps every chunk on the same page instead of
+            // wasting a nearly-blank page per chunk.
+            addPage();y=drawTitle(28);
+          }
           y=drawColHdr(y,chunkDates,'Subtotal');
           empGroup.forEach(({emp,cells},idx)=>{
             // Safety net only — rowsPerPage is sized to always fit, so this

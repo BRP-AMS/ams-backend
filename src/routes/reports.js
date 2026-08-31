@@ -165,6 +165,25 @@ const dayAbbr   = iso => new Date(iso+'T00:00:00+05:30').toLocaleDateString('en-
 const ordinal   = n   => { const s=['th','st','nd','rd'],v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
 const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-1)%26)+s;c=Math.floor((c-1)/26);} return s; };
 
+// 0-based position of targetISO among the WORKING days (not WO/H) starting
+// from startISO, exclusive of targetISO itself. Used to split a partially-
+// paid leave's date range into its paid ('L') and unpaid ('LOP') days —
+// paid_days/lop_days on the record are working-day counts (see
+// leaveDayUnits() in attendance.js), and the matrix only ever calls toCode()
+// for working days to begin with (WO/H are assigned before toCode() runs),
+// so this index lines up with that count exactly.
+const workingDayIndexInRange = (startISO, targetISO) => {
+  let idx = 0;
+  let cur = new Date(startISO + 'T00:00:00+05:30');
+  const tgt = new Date(targetISO + 'T00:00:00+05:30');
+  while (cur < tgt) {
+    const iso = cur.toLocaleDateString('en-CA', { timeZone: IST });
+    if (!isNonWorkingDay(iso) && !isHoliday(iso)) idx++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return idx;
+};
+
 /**
  * toCode — determines cell code for one attendance record
  */
@@ -173,14 +192,16 @@ const colLetter = n   => { let s='',c=n; while(c>0){s=String.fromCharCode(65+(c-
 //   • Pending leave  → '' (blank). No code is shown until the manager takes
 //     action — applies to every leave type (Half Day, Emergency, Casual, ...).
 //     Still counted separately in the summary as "Leave Applied / Pending".
-//   • Approved leave → ALWAYS 'L'. This is unconditional now — a Half Day
-//     (or any other type) that was later checked in used to fall through to
-//     P/OD; it no longer does. Any approved leave record renders as 'L'.
-//   • Rejected leave with no re-check-in → 'L' (LOP — counted against the
-//     employee, same visual as a normal approved leave).
+//   • Approved leave → 'L' for its paid days, 'LOP' for any days beyond what
+//     balance covered (see paid_days/lop_days, set at application time —
+//     POST /apply-leave's partial-LOP logic). A day's L-vs-LOP split is by
+//     position in the range: the first paid_days working days are 'L', the
+//     rest are 'LOP' — matches how the deduction itself was applied.
+//   • Rejected leave with no re-check-in → same L/LOP split as Approved
+//     (counted against the employee either way).
 //   • Rejected leave WITH a re-check-in → falls through to normal attendance
 //     (the employee actually came in after the rejection).
-const toCode = (rec, assignedBlock, assignedDistrict) => {
+const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
   if (!rec) return 'A';
 
   // ── Leave records ──────────────────────────────────────────────────────────
@@ -191,14 +212,20 @@ const toCode = (rec, assignedBlock, assignedDistrict) => {
     // Pending — no manager decision yet → blank cell (all leave types).
     if (ls === 'Pending') return '';
 
-    // Approved — always 'L', regardless of leave type or a later check-in.
-    if (ls === 'Approved') return 'L';
-
-    if (ls === 'Rejected') {
-      const hasCheckin = rec.checkin_time || rec.checkinTime;
-      if (!hasCheckin) return 'L';   // rejected, no re-checkin = LOP, shown as 'L'
-      // Has a real check-in after rejection → falls through to normal attendance
+    const isResolvedLeave = ls === 'Approved' || (ls === 'Rejected' && !(rec.checkin_time || rec.checkinTime));
+    if (isResolvedLeave) {
+      // paid_days is undefined (not 0) on records from before partial-LOP
+      // support existed — treat those as fully paid rather than guessing.
+      // Cell code is 'LP' (not 'LOP') to fit the narrow day columns, same
+      // width class as 'OD'/'WO' — the legend and summary column still say
+      // "LOP" in full wherever there's room for it.
+      if (rec.lop_days > 0 && rec.paid_days != null && iso) {
+        const dayIdx = workingDayIndexInRange(rec.date, iso);
+        return dayIdx >= rec.paid_days ? 'LP' : 'L';
+      }
+      return 'L';
     }
+    // Rejected WITH a re-check-in → falls through to normal attendance below.
   }
 
   // ── Regular attendance ─────────────────────────────────────────────────────
@@ -360,7 +387,7 @@ for (const r of rawRecs) {
           if (iso > todayReport)              return '';   // future — hasn't happened yet
           if (joinDate && iso < joinDate)     return '';   // pre-join → blank
           const rec = recIdx[String(emp._id)]?.[iso];
-          return toCode(rec, ab, ad);
+          return toCode(rec, ab, ad, iso);
         }),
       };
     });
@@ -381,7 +408,9 @@ for (const r of rawRecs) {
       const FILL_ALT  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFF7F7F7'}};
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
+      const FILL_LOP  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF991B1B'}}; // darker than plain L/A red — matches the LOP summary column's color
       const codeFill = (code, rf) => {
+        if (code==='LP')            return FILL_LOP;
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         if (code==='H')             return FILL_HOL;
@@ -442,7 +471,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             c.fill=codeFill(code,rf); c.protection={locked:true};
 
             c.value = code;
-            c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A')?'FFFFFFFF':'FF000000'}};
+            c.font = {bold:!!code,size:9,name:'Calibri',color:{argb:(code==='L'||code==='A'||code==='LP')?'FFFFFFFF':'FF000000'}};
           });
         });
 
@@ -453,16 +482,17 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
          {code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
          {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
-         {code:'L',label:'Leave / LOP',isRed:true},
+         {code:'L',label:'Leave (paid)',isRed:true},
+         {code:'LP',label:'LOP — Leave without Pay',isLop:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ];
-        legendItems.forEach(({code,label,isRed,isAmber},i)=>{
+        legendItems.forEach(({code,label,isRed,isAmber,isLop},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
           cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          cc.value=code; cc.fill=isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
-          cc.font={bold:true,size:8,name:'Calibri',color:{argb:isRed?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
+          cc.value=code; cc.fill=isLop?FILL_LOP:isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
+          cc.font={bold:true,size:8,name:'Calibri',color:{argb:(isRed||isLop)?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         });
@@ -540,13 +570,13 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   }, 0);
   sumRow('No of Present / worked (P+OD)', `=COUNTIF(${fDC}${er}:${lDC}${er},"P")+COUNTIF(${fDC}${er}:${lDC}${er},"OD")`);
   sumRow('No of Leaves (L)', `=COUNTIF(${fDC}${er}:${lDC}${er},"L")`);
+  sumRow('No of LOP (LP)', `=COUNTIF(${fDC}${er}:${lDC}${er},"LP")`);
   sumRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs));
   sumRow('No of Emergency Leaves', sumDays(emergencyRecs));
   sumRow('No of Casual Leaves', sumDays(casualRecs));
   sumRow('Total Effective Leaves', effectiveLeaves);
   sumRow('No of Absent (A)', `=COUNTIF(${fDC}${er}:${lDC}${er},"A")`);
   sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
-    sumRow('No of Leave Applied / Pending (LA)', pendingRecs.length);
   // 📍 Location Pending — manager/admin/hr/super_admin visibility only,
   if (role !== 'employee') {
     const locDates = locationFetchingDates(rawRecs, empIdStr);
@@ -615,28 +645,15 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
 
-            // LOP is a breakdown WITHIN the Leaves column, not extra days —
-            // toCode() marks every Approved (or Rejected-with-no-checkin)
-            // leave day as 'L' regardless of whether it was paid or LOP, so
-            // those days are already inside Leaves' COUNTIF above. Only sum
-            // lop_days for records actually resolved to 'L' (matching
-            // toCode() exactly) — a still-Pending record's lop_days is just
-            // a projection and those days are already counted as Pending
-            // instead, so including it here would double-count them (this
-            // is what made Total exceed the period's day count before).
+            // LOP now has its own grid cell code ('LP', see toCode()) for a
+            // partially-paid leave's unpaid days — counted the same way as
+            // every other column here, and guaranteed not to overlap with
+            // Leaves ('L') or Pending (blank) since each day gets exactly
+            // one code.
             const empIdStr = String(emp._id);
-            const lopDays = rawRecs
-              .filter(rr => {
-                if (String(rr.emp_id) !== empIdStr) return false;
-                if (rr.duty_type !== 'Leave' && !(rr.leave_type && String(rr.leave_type).trim())) return false;
-                const ls = rr.leave_status || rr.status || 'Pending';
-                if (ls === 'Approved') return true;
-                if (ls === 'Rejected') return !(rr.checkin_time || rr.checkinTime);
-                return false;
-              })
-              .reduce((s, rr) => s + (rr.lop_days || 0), 0);
             const clop = ws.getCell(r, 6);
-            clop.value = lopDays; clop.fill = rf; clop.border = CBDR;
+            clop.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"LP")` };
+            clop.fill = rf; clop.border = CBDR;
             clop.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF991B1B' } };
             clop.alignment = { horizontal: 'center', vertical: 'center' };
             clop.protection = { locked: true };
@@ -667,12 +684,12 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             cpend.alignment = { horizontal: 'center', vertical: 'center' };
             cpend.protection = { locked: true };
 
-            // Total = Present + Leaves + Absent + Week Off + Holidays +
-            // Pending — every day in the period exactly once. LOP is
-            // deliberately excluded: it's a count WITHIN Leaves (which
-            // column F already covers), not additional days.
+            // Total = every column in this table — now safe to include LOP
+            // again, since 'LP' is its own grid cell code (see toCode()),
+            // disjoint from 'L'/blank/etc. Each day maps to exactly one
+            // column, so this always equals the period's day count.
             const ctot = ws.getCell(r, 10);
-            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+G${rowNum}+H${rowNum}+I${rowNum}` };
+            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}+I${rowNum}` };
             ctot.fill = rf; ctot.border = CBDR;
             ctot.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
             ctot.alignment = { horizontal: 'center', vertical: 'center' };
@@ -886,11 +903,12 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             let pres=0;
             chunkCells.forEach((code,i)=>{
               const x=xD+i*dW;
+              const isLP=code==='LP'; // darker than plain L/A — matches the LOP summary column's color
               const isRed=code==='L'||code==='A';
-              const cellBg=isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+              const cellBg=isLP?'#991B1B':isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
               doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
               if(code){
-                doc.fillColor(isRed?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
+                doc.fillColor((isRed||isLP)?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(6).font('Helvetica-Bold')
                    .text(code,x+1,y+8,{width:dW-2,align:'center'});
               }
               if(code==='P'||code==='OD') pres++;
@@ -934,13 +952,14 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
-       {code:'L',label:'Leave / LOP',red:true},
+       {code:'L',label:'Leave (paid)',red:true},
+       {code:'LP',label:'LOP — Leave without Pay',lop:true},
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
-      ].forEach(({code,label,red})=>{
+      ].forEach(({code,label,red,lop})=>{
         const bw=14,lw=115;
-        doc.rect(lx,y,bw,10).fillAndStroke(red?'#FF4444':'#FFFFFF','#999');
-        doc.fillColor(red?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+        doc.rect(lx,y,bw,10).fillAndStroke(lop?'#991B1B':red?'#FF4444':'#FFFFFF','#999');
+        doc.fillColor((red||lop)?'#FFFFFF':'#000000').fontSize(6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
         lx+=bw+lw+10;
       });
@@ -1009,6 +1028,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
 
   pdfRow('No of Present / worked (P+OD)', cells.filter(c => c==='P'||c==='OD').length);
   pdfRow('No of Leaves (L)',               cells.filter(c => c==='L').length);
+  pdfRow('No of LOP (LP)',                 cells.filter(c => c==='LP').length);
   pdfRow('No of Half Day Leaves (each = 0.5 day)', sumDays(halfDayRecs), 'row', 26);
   pdfRow('No of Emergency Leaves',                 sumDays(emergencyRecs));
   pdfRow('No of Casual Leaves',                    sumDays(casualRecs));
@@ -1102,26 +1122,12 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
     // these days were invisible to every other column, so Total previously
     // fell short of the period's day count whenever an employee had one.
     const pend = cells.filter(c => c==='').length;
-    // LOP is a breakdown WITHIN the Leaves column, not extra days — see the
-    // matching comment in the Excel branch above for why (toCode() marks
-    // every Approved/Rejected-no-checkin leave day 'L' regardless of paid
-    // vs LOP, so those days are already in `lv`; only count lop_days for
-    // records resolved that way, or it double-counts against Leaves/Pending
-    // and pushes Total past the period's actual day count).
+    // LOP now has its own grid cell code ('LP', see toCode()), counted the
+    // same way as every other column here — disjoint from Leaves ('L') and
+    // Pending (blank), so Total below always equals the period's day count.
+    const lop = cells.filter(c => c==='LP').length;
     const empIdStr = String(emp._id);
-    const lop = rawRecs
-      .filter(rr => {
-        if (String(rr.emp_id) !== empIdStr) return false;
-        if (rr.duty_type !== 'Leave' && !(rr.leave_type && String(rr.leave_type).trim())) return false;
-        const ls = rr.leave_status || rr.status || 'Pending';
-        if (ls === 'Approved') return true;
-        if (ls === 'Rejected') return !(rr.checkin_time || rr.checkinTime);
-        return false;
-      })
-      .reduce((s, rr) => s + (rr.lop_days || 0), 0);
-    // Total = Present + Leaves + Absent + Week Off + Holidays + Pending —
-    // LOP deliberately excluded (see above).
-    const total = pres + lv + abs + wo + hol + pend;
+    const total = pres + lv + abs + lop + wo + hol + pend; // every column in this table
 
     // Employee name gets the taller row height too, so a name that wraps to
     // a second line (like "Ajaya Narasimha Reddy Siriyapureddy") isn't cut

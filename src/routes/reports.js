@@ -189,15 +189,15 @@ const workingDayIndexInRange = (startISO, targetISO) => {
  */
 // ── reports.js  ·  toCode() ───────────────────────────────────────────────
 // UPDATED LOGIC (see also excel/PDF summary + legend below, which mirror this):
-//   • Pending, Approved, or Rejected-with-no-checkin leave → 'L' for its paid
-//     days, 'LOP' for any days beyond what balance covered. The paid-vs-LOP
-//     split (paid_days/lop_days) is decided at APPLICATION time — POST
-//     /apply-leave deducts balance and marks the shortfall as LOP the
-//     moment the request is filed, before a manager ever acts on it — so a
-//     still-Pending leave already has this split and shows it immediately
-//     instead of sitting blank until approved. A day's L-vs-LOP split
-//     within the leave is by position in the range: the first paid_days
-//     working days are 'L', the rest are 'LOP'.
+//   • Pending leave → 'LA' (Leave Applied), regardless of balance — the
+//     manager hasn't decided yet, so it's neither counted as Leave nor LOP.
+//   • Approved leave → 'L' for its paid days, 'LOP' for any days beyond what
+//     balance covered (paid_days/lop_days, set at application time — POST
+//     /apply-leave's balance-check logic). A day's L-vs-LOP split within the
+//     leave is by position in the range: the first paid_days working days
+//     are 'L', the rest are 'LOP'.
+//   • Rejected leave with no re-check-in → 'LOP' throughout (never became a
+//     real leave, so none of it counts as paid).
 //   • Rejected leave WITH a re-check-in → falls through to normal attendance
 //     (the employee actually came in after the rejection).
 const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
@@ -208,8 +208,9 @@ const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
   if (isLeave) {
     const ls = rec.leave_status || rec.status || 'Pending';
 
-    const showsAsLeave = ls === 'Pending' || ls === 'Approved' || (ls === 'Rejected' && !(rec.checkin_time || rec.checkinTime));
-    if (showsAsLeave) {
+    if (ls === 'Pending') return 'LA';
+
+    if (ls === 'Approved') {
       // paid_days is undefined (not 0) on records from before partial-LOP
       // support existed — treat those as fully paid rather than guessing.
       if (rec.lop_days > 0 && rec.paid_days != null && iso) {
@@ -218,6 +219,8 @@ const toCode = (rec, assignedBlock, assignedDistrict, iso) => {
       }
       return 'L';
     }
+
+    if (ls === 'Rejected' && !(rec.checkin_time || rec.checkinTime)) return 'LOP';
     // Rejected WITH a re-check-in → falls through to normal attendance below.
   }
 
@@ -402,8 +405,10 @@ for (const r of rawRecs) {
       const FILL_SUBH = {type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF4'}};
 const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       const FILL_LOP  = {type:'pattern',pattern:'solid',fgColor:{argb:'FF991B1B'}}; // darker than plain L/A red — matches the LOP summary column's color
+      const FILL_LA   = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFDE68A'}}; // amber — "awaiting decision", distinct from paid L / unpaid LOP
       const codeFill = (code, rf) => {
         if (code==='LOP')           return FILL_LOP;
+        if (code==='LA')            return FILL_LA;
         if (code==='L'||code==='A') return FILL_RED;
         if (code==='WO')            return FILL_WO;
         if (code==='H')             return FILL_HOL;
@@ -475,29 +480,30 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
          {code:'P',label:'Present (assigned location)',isRed:false},
          {code:'OD',label:'On Duty (other Tripura location)',isRed:false},
          {code:'H',label:'Public Holiday',isRed:false,isAmber:true},
+         {code:'LA',label:'Leave Applied (awaiting approval)',isLa:true},
          {code:'L',label:'Leave (paid)',isRed:true},
          {code:'LOP',label:'Leave without Pay',isLop:true},
          {code:'A',label:'Absent',isRed:true},
          {code:'WO',label:'Week Off',isRed:false},
         ];
-        legendItems.forEach(({code,label,isRed,isAmber,isLop},i)=>{
+        legendItems.forEach(({code,label,isRed,isAmber,isLop,isLa},i)=>{
           const cc=ws.getCell(legendRow,5+i*2);
           cc.border=CBDR;
           cc.alignment={horizontal:'center',vertical:'center'};
-          cc.value=code; cc.fill=isLop?FILL_LOP:isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
-          cc.font={bold:true,size:8,name:'Calibri',color:{argb:(isRed||isLop)?'FFFFFFFF':isAmber?'FFD97706':'FF000000'}};
+          cc.value=code; cc.fill=isLop?FILL_LOP:isLa?FILL_LA:isRed?FILL_RED:isAmber?FILL_AMB:FILL_WHT;
+          cc.font={bold:true,size:8,name:'Calibri',color:{argb:(isRed||isLop)?'FFFFFFFF':isAmber?'FFD97706':isLa?'FF92400E':'FF000000'}};
           ws.getCell(legendRow,5+i*2+1).value=label;
           ws.getCell(legendRow,5+i*2+1).font={size:8,name:'Calibri',italic:true};
         });
-        // A leave application shows L/LOP immediately (based on balance at
-        // application time), even while still Pending manager approval — a
-        // blank cell (not WO/H) now only means an unapproved On Duty Away
-        // check-in, a future date, or a day before the employee joined.
+        // A leave application shows LA until the manager decides — L if
+        // approved, LOP if rejected. A blank cell (not WO/H) now only means
+        // an unapproved On Duty Away check-in, a future date, or a day
+        // before the employee joined.
         const legendNoteRow = legendRow + 1;
         ws.getRow(legendNoteRow).height = 12;
         mc(ws, legendNoteRow, 5, legendNoteRow, LAST);
         Object.assign(ws.getCell(legendNoteRow, 5), {
-          value: 'Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. Leave applications show L/LOP right away — pending manager approval doesn\'t delay it.',
+          value: 'Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. A leave application shows LA until the manager decides — L if approved, LOP if rejected.',
           font: { size: 8, italic: true, color: { argb: 'FF64748B' }, name: 'Calibri' },
           alignment: { horizontal: 'left', vertical: 'center' },
         });
@@ -602,7 +608,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             ['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Absent','FFB91C1C'],
             ['Week Off','FF2563EB'], ['Holidays','FFD97706'],
             ['No of Leaves','FFB45309'], ['LOP','FF991B1B'],
-            ['Total Month Days (P+A+WO+H+Pending+L+LOP)','FF1F3864'],
+            ['Total Month Days (P+A+WO+H+LA+L+LOP)','FF1F3864'],
           ];
           if (role !== 'employee') headerCols.push(['📍 Location Fetching','FF0369A1']);
 
@@ -675,13 +681,13 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             clop.protection = { locked: true };
 
             // Total Month Days = every column in this table, PLUS a Pending
-            // day (blank cell — a leave/On Duty Away still awaiting manager
-            // approval, see toCode()) counted inline here since Pending
-            // isn't shown as its own column. Each day maps to exactly one
-            // of P/OD/A/WO/H/L/LOP/blank, so this always equals the
-            // period's day count.
+            // leave ('LA') and a blank cell (unapproved On Duty Away, a
+            // future date, or before joining — see toCode()), both counted
+            // inline here since neither is shown as its own column. Each
+            // day maps to exactly one of P/OD/A/WO/H/L/LOP/LA/blank, so this
+            // always equals the period's day count.
             const ctot = ws.getCell(r, 9);
-            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}+COUNTIF(${fDC}${er}:${lDC}${er},"")` };
+            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}+COUNTIF(${fDC}${er}:${lDC}${er},"LA")+COUNTIF(${fDC}${er}:${lDC}${er},"")` };
             ctot.fill = rf; ctot.border = CBDR;
             ctot.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
             ctot.alignment = { horizontal: 'center', vertical: 'center' };
@@ -896,13 +902,14 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             chunkCells.forEach((code,i)=>{
               const x=xD+i*dW;
               const isLOP=code==='LOP'; // darker than plain L/A — matches the LOP summary column's color
+              const isLA=code==='LA'; // amber — "awaiting decision", distinct from paid L / unpaid LOP
               const isRed=code==='L'||code==='A';
-              const cellBg=isLOP?'#991B1B':isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
+              const cellBg=isLOP?'#991B1B':isLA?'#FDE68A':isRed?'#FF4444':code==='WO'?'#BDD7EE':code==='H'?'#FFF3CD':bg;
               doc.rect(x,y,dW,RH).fillAndStroke(cellBg,'#CCC');
               if(code){
-                // 'LOP' is 3 characters — a smaller size than the other
-                // (1-2 char) codes so it still fits the same narrow column.
-                doc.fillColor((isRed||isLOP)?'#FFFFFF':code==='H'?'#D97706':'#000000').fontSize(isLOP?4.5:6).font('Helvetica-Bold')
+                // 'LOP'/'LA' are 2-3 characters — a smaller size than the
+                // other (1-2 char) codes so they still fit the narrow column.
+                doc.fillColor((isRed||isLOP)?'#FFFFFF':isLA?'#92400E':code==='H'?'#D97706':'#000000').fontSize(isLOP?4.5:isLA?5:6).font('Helvetica-Bold')
                    .text(code,x+1,y+8,{width:dW-2,align:'center'});
               }
               if(code==='P'||code==='OD') pres++;
@@ -946,14 +953,15 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       let lx=ML;
       [{code:'P',label:'Present (assigned location)',red:false},
        {code:'OD',label:'On Duty (other Tripura location)',red:false},
+       {code:'LA',label:'Leave Applied (awaiting approval)',la:true},
        {code:'L',label:'Leave (paid)',red:true},
        {code:'LOP',label:'Leave without Pay',lop:true},
        {code:'A',label:'Absent',red:true},
        {code:'WO',label:'Week Off',red:false},
-      ].forEach(({code,label,red,lop})=>{
-        const bw=code==='LOP'?22:14,lw=115;
-        doc.rect(lx,y,bw,10).fillAndStroke(lop?'#991B1B':red?'#FF4444':'#FFFFFF','#999');
-        doc.fillColor((red||lop)?'#FFFFFF':'#000000').fontSize(lop?5.5:6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
+      ].forEach(({code,label,red,lop,la})=>{
+        const bw=code==='LOP'?22:code==='LA'?18:14,lw=115;
+        doc.rect(lx,y,bw,10).fillAndStroke(lop?'#991B1B':la?'#FDE68A':red?'#FF4444':'#FFFFFF','#999');
+        doc.fillColor((red||lop)?'#FFFFFF':la?'#92400E':'#000000').fontSize(lop?5.5:la?5.5:6).font('Helvetica-Bold').text(code,lx+1,y+2,{width:bw-2,align:'center'});
         doc.fillColor('#333').fontSize(7).font('Helvetica').text(label,lx+bw+2,y+1,{width:lw,lineBreak:false,ellipsis:true});
         lx+=bw+lw+10;
       });
@@ -961,7 +969,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       // clear row below the legend so it never collides with legend labels.
       y+=16;
       doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
-         .text('Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. Leave applications show L/LOP right away — pending manager approval doesn\'t delay it.', ML, y, { width: tW });
+         .text('Blank cell (not WO/H) = unapproved On Duty Away, a future date, or before joining. A leave application shows LA until the manager decides — L if approved, LOP if rejected.', ML, y, { width: tW });
       y+=18;
 
       // Summary
@@ -1111,14 +1119,16 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
     const lv   = cells.filter(c => c==='L').length;
     // LOP has its own grid cell code ('LOP', see toCode()), counted the
     // same way as every other column here — disjoint from Leaves ('L') and
-    // Pending (blank), so the total below always adds up cleanly.
+    // Pending ('LA'), so the total below always adds up cleanly.
     const lop  = cells.filter(c => c==='LOP').length;
-    // Pending isn't shown as its own column here, but a day the matrix
-    // leaves blank (a leave/On Duty Away still awaiting manager approval —
-    // see toCode()) still needs to count toward Total Month Days.
+    // Pending leave ('LA') and a genuinely blank cell (unapproved On Duty
+    // Away, a future date, or before joining — see toCode()) aren't shown
+    // as their own columns here, but both still need to count toward
+    // Total Month Days.
+    const la   = cells.filter(c => c==='LA').length;
     const pend = cells.filter(c => c==='').length;
     const empIdStr = String(emp._id);
-    const monthDays = pres + abs + wo + hol + lv + lop + pend; // every day in the period, exactly once
+    const monthDays = pres + abs + wo + hol + lv + lop + la + pend; // every day in the period, exactly once
 
     // Employee name gets the taller row height too, so a name that wraps to
     // a second line (like "Ajaya Narasimha Reddy Siriyapureddy") isn't cut
@@ -1145,7 +1155,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   // Formula didn't fit in the header cell above — spelled out here instead.
   sy += 3;
   doc.fillColor('#64748B').fontSize(6.5).font('Helvetica-Oblique')
-     .text('Total Month Days = Present + Absent + Week Off + Holidays + Pending + Leaves + LOP.', SX, sy, { width: TW });
+     .text('Total Month Days = Present + Absent + Week Off + Holidays + Leave Applied (LA) + Leaves + LOP.', SX, sy, { width: TW });
   sy += 12;
 }
 

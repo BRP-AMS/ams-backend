@@ -740,7 +740,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       return res.status(400).json({ success: false, message: 'Selfie is required for check-in.' });
     }
 
-    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path assigned_block assigned_district').lean();
+    const currentUserInfo = await User.findById(req.user.id).select('manager_id name email profile_photo_path assigned_block assigned_district checkin_geofence_exempt').lean();
 
     if (!currentUserInfo?.profile_photo_path) {
       return res.status(400).json({
@@ -771,12 +771,19 @@ if (prevRecord && !prevRecord.checkout_time) {
       return res.status(400).json({ success: false, message: 'A valid GPS location is required to check in.' });
     }
 
+    // checkin_geofence_exempt is an admin/super_admin-only per-employee
+    // override (see users.js PUT /:id) — for the few people who genuinely
+    // need to check in from anywhere, skips both location restrictions
+    // below entirely rather than weakening the block/district config that
+    // still applies to everyone else.
+    const geofenceExempt = currentUserInfo?.checkin_geofence_exempt === true;
+
     // Office Duty — hard-restricted to the employee's assigned block. A
     // missing assigned_block or missing block coordinates used to silently
     // skip this check (letting Office Duty check in from anywhere); now it
     // blocks the check-in instead, since "restricted to the office" is the
     // whole point of this duty type.
-    if (dutyType === 'Office Duty') {
+    if (dutyType === 'Office Duty' && !geofenceExempt) {
       if (!currentUserInfo?.assigned_block) {
         return res.status(403).json({ success: false, message: 'No block is assigned to your profile — contact admin before checking in as Office Duty.' });
       }
@@ -797,7 +804,7 @@ if (prevRecord && !prevRecord.checkout_time) {
     // ON_DUTY_DISTRICT_GEOFENCE_METERS). Skipped if no district is assigned
     // or the district has no blocks with coordinates yet, same "don't block
     // on missing admin setup" fallback as before for this duty type.
-    if (dutyType === 'On Duty' && currentUserInfo?.assigned_district) {
+    if (dutyType === 'On Duty' && !geofenceExempt && currentUserInfo?.assigned_district) {
       const districtBlocks = await CustomBlock.find({
         district: currentUserInfo.assigned_district,
         latitude: { $ne: null }, longitude: { $ne: null },

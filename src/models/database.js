@@ -71,6 +71,11 @@ photo_update_count:      { type: Number, default: 0    },  // how many updates u
   auto_leave_enabled:  { type: Boolean, default: true },
   last_accrual_date:   { type: String,  default: null }, // YYYY-MM-DD of last accrual run
   is_permitted:        { type: Boolean, default: false },
+  // Admin/super_admin-only override: skips the check-in location restriction
+  // (Office Duty's 200m-of-block, On Duty's district-wide check) entirely,
+  // for the few employees who genuinely need to check in from anywhere —
+  // e.g. no fixed base. Everyone else keeps the normal geofence.
+  checkin_geofence_exempt: { type: Boolean, default: false },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 userSchema.index({ manager_id: 1 });

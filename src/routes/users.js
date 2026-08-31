@@ -631,7 +631,7 @@ router.put('/:id', authenticate, async (req, res) => {
     if (req.user.role === 'admin' && ['admin', 'super_admin'].includes(user.role))
       return res.status(403).json({ success: false, message: 'Admins cannot modify admin or super admin accounts' });
 
-    const { name, email, empId, role, department, managerId, hrId, phone, isActive, assignedBlock, assignedDistrict, roleType, designation, photoUpdateQuota, joiningDate, officeName, reportingOfficerName, reportingOfficerDesignation } = req.body;
+    const { name, email, empId, role, department, managerId, hrId, phone, isActive, assignedBlock, assignedDistrict, roleType, designation, photoUpdateQuota, joiningDate, officeName, reportingOfficerName, reportingOfficerDesignation, checkinGeofenceExempt } = req.body;
 
     // Self-update: only allow safe personal fields, ignore admin-only fields
     if (!isAdminUser && isSelf) {
@@ -681,6 +681,7 @@ router.put('/:id', authenticate, async (req, res) => {
       office_name:                   officeName                   !== undefined ? (officeName                   || null) : user.office_name,
       reporting_officer_name:        reportingOfficerName        !== undefined ? (reportingOfficerName        || null) : user.reporting_officer_name,
       reporting_officer_designation: reportingOfficerDesignation !== undefined ? (reportingOfficerDesignation || null) : user.reporting_officer_designation,
+      checkin_geofence_exempt: checkinGeofenceExempt !== undefined ? !!checkinGeofenceExempt : !!user.checkin_geofence_exempt,
     };
 
     // If admin is granting a new photo quota, store it and reset the counter
@@ -1290,6 +1291,7 @@ function formatUser(u) {
     photoUpdateCount:       u.photo_update_count       ?? 0,
     loginLockedUntil:       u.login_locked_until       || null,
     failedLoginAttempts:    u.failed_login_attempts    ?? 0,
+    checkinGeofenceExempt:  !!u.checkin_geofence_exempt,
   };
 }
 

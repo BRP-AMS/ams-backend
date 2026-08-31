@@ -565,9 +565,10 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           ws.getColumn(2).width = 22; ws.getColumn(3).width = 14;
           ws.getColumn(4).width = 14; ws.getColumn(5).width = 14;
           ws.getColumn(6).width = 12; ws.getColumn(7).width = 12;
-          if (role !== 'employee') ws.getColumn(8).width = 34; // Location Pending dates list
+          ws.getColumn(8).width = 12; ws.getColumn(9).width = 12;
+          if (role !== 'employee') ws.getColumn(10).width = 34; // Location Pending dates list
 
-          const headerCols = [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C'], ['LOP','FF991B1B'], ['Total','FF1F3864']];
+          const headerCols = [['Employee Name','FF1F3864'], ['Present / Worked','FF047857'], ['No of Leaves','FFB45309'], ['No of Absent','FFB91C1C'], ['LOP','FF991B1B'], ['Week Off','FF2563EB'], ['Holidays','FFD97706'], ['Total','FF1F3864']];
           if (role !== 'employee') headerCols.push(['📍 Location Fetching','FF0369A1']);
 
           headerCols.forEach(([hdr, argb], i) => {
@@ -620,8 +621,24 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             clop.alignment = { horizontal: 'center', vertical: 'center' };
             clop.protection = { locked: true };
 
-            const ctot = ws.getCell(r, 7);
-            ctot.value = { formula: `C${rowNum}+D${rowNum}` };
+            const cwo = ws.getCell(r, 7);
+            cwo.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"WO")` };
+            cwo.fill = rf; cwo.border = CBDR;
+            cwo.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF2563EB' } };
+            cwo.alignment = { horizontal: 'center', vertical: 'center' };
+            cwo.protection = { locked: true };
+
+            const chol = ws.getCell(r, 8);
+            chol.value = { formula: `COUNTIF(${fDC}${er}:${lDC}${er},"H")` };
+            chol.fill = rf; chol.border = CBDR;
+            chol.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFD97706' } };
+            chol.alignment = { horizontal: 'center', vertical: 'center' };
+            chol.protection = { locked: true };
+
+            // Total = sum of every count column in this table (Present,
+            // Leaves, Absent, LOP, Week Off, Holidays).
+            const ctot = ws.getCell(r, 9);
+            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}` };
             ctot.fill = rf; ctot.border = CBDR;
             ctot.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
             ctot.alignment = { horizontal: 'center', vertical: 'center' };
@@ -630,7 +647,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             // 📍 Location Pending — dates list, staff-only column.
             if (role !== 'employee') {
               const locDates = locationFetchingDates(rawRecs, empIdStr);
-              const cloc = ws.getCell(r, 8);
+              const cloc = ws.getCell(r, 10);
               cloc.value = locDates.length ? `📍 ${locDates.join(', ')}` : '—';
               cloc.fill = rf; cloc.border = CBDR;
               cloc.font = { size: 8.5, italic: !!locDates.length, name: 'Calibri', color: { argb: locDates.length ? 'FF0369A1' : 'FF94A3B8' } };
@@ -639,7 +656,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
           });
         }
 
-        outerBorder(ws, SR, 2, r, role !== 'employee' ? 8 : 7);
+        outerBorder(ws, SR, 2, r, role !== 'employee' ? 10 : 9);
         // ── Signatures ────────────────────────────────────────────────────────
         r+=3; ws.getRow(r).height=20;
 
@@ -966,30 +983,36 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
   }
 } else {
   sy++;
-  const TW = role !== 'employee' ? SW * 2.1 : SW * 1.5;
-  const C0 = TW * (role !== 'employee' ? 0.20 : 0.30);
-  const C1 = TW * (role !== 'employee' ? 0.10 : 0.14);
-  const C2 = TW * (role !== 'employee' ? 0.10 : 0.14);
-  const C3 = TW * (role !== 'employee' ? 0.10 : 0.14);
-  const C4 = TW * (role !== 'employee' ? 0.10 : 0.14);
-  const C5 = TW * (role !== 'employee' ? 0.10 : 0.14);
-  const C6 = role !== 'employee' ? TW * 0.30 : 0; // Location Pending dates
+  const TW = role !== 'employee' ? SW * 2.6 : SW * 1.8;
+  const C0 = TW * (role !== 'employee' ? 0.16 : 0.22); // Employee
+  const C1 = TW * (role !== 'employee' ? 0.08 : 0.10); // Present
+  const C2 = TW * (role !== 'employee' ? 0.08 : 0.10); // Leaves
+  const C3 = TW * (role !== 'employee' ? 0.08 : 0.10); // Absent
+  const C4 = TW * (role !== 'employee' ? 0.08 : 0.10); // LOP
+  const C5 = TW * (role !== 'employee' ? 0.08 : 0.10); // Week Off
+  const C6 = TW * (role !== 'employee' ? 0.08 : 0.10); // Holidays
+  const C7 = TW * (role !== 'employee' ? 0.10 : 0.18); // Total
+  const C8 = role !== 'employee' ? TW * 0.26 : 0;       // Location Pending dates
 
   const drawSummaryHeader = (yy) => {
-    doc.rect(SX,              yy, C0, SRH).fillAndStroke('#E8EDF4','#000');
-    doc.rect(SX+C0,           yy, C1, SRH).fillAndStroke('#D1FAE5','#000');
-    doc.rect(SX+C0+C1,        yy, C2, SRH).fillAndStroke('#FEF3C7','#000');
-    doc.rect(SX+C0+C1+C2,     yy, C3, SRH).fillAndStroke('#FEE2E2','#000');
-    doc.rect(SX+C0+C1+C2+C3,  yy, C4, SRH).fillAndStroke('#FEE2E2','#000');
-    doc.rect(SX+C0+C1+C2+C3+C4, yy, C5, SRH).fillAndStroke('#E8EDF4','#000');
-    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5, yy, C6, SRH).fillAndStroke('#E0F2FE','#000');
+    doc.rect(SX,                  yy, C0, SRH).fillAndStroke('#E8EDF4','#000');
+    doc.rect(SX+C0,                yy, C1, SRH).fillAndStroke('#D1FAE5','#000');
+    doc.rect(SX+C0+C1,             yy, C2, SRH).fillAndStroke('#FEF3C7','#000');
+    doc.rect(SX+C0+C1+C2,          yy, C3, SRH).fillAndStroke('#FEE2E2','#000');
+    doc.rect(SX+C0+C1+C2+C3,       yy, C4, SRH).fillAndStroke('#FEE2E2','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4,    yy, C5, SRH).fillAndStroke('#DBEAFE','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5, yy, C6, SRH).fillAndStroke('#FEF3C7','#000');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6, yy, C7, SRH).fillAndStroke('#E8EDF4','#000');
+    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7, yy, C8, SRH).fillAndStroke('#E0F2FE','#000');
     doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Employee',   SX+4,    yy+4, {width:C0-8});
     doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('Present',    SX+C0,   yy+4, {width:C1,align:'center'});
     doc.fillColor('#B45309').fontSize(8).font('Helvetica-Bold').text('Leaves',     SX+C0+C1,yy+4, {width:C2,align:'center'});
     doc.fillColor('#B91C1C').fontSize(8).font('Helvetica-Bold').text('Absent',     SX+C0+C1+C2,yy+4,{width:C3,align:'center'});
     doc.fillColor('#991B1B').fontSize(8).font('Helvetica-Bold').text('LOP',        SX+C0+C1+C2+C3,yy+4,{width:C4,align:'center'});
-    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Total',      SX+C0+C1+C2+C3+C4,yy+4,{width:C5,align:'center'});
-    if (role !== 'employee') doc.fillColor('#0369A1').fontSize(8).font('Helvetica-Bold').text('Location Fetching', SX+C0+C1+C2+C3+C4+C5, yy+4, {width:C6,align:'center'});
+    doc.fillColor('#2563EB').fontSize(8).font('Helvetica-Bold').text('Week Off',   SX+C0+C1+C2+C3+C4,yy+4,{width:C5,align:'center'});
+    doc.fillColor('#D97706').fontSize(8).font('Helvetica-Bold').text('Holidays',   SX+C0+C1+C2+C3+C4+C5,yy+4,{width:C6,align:'center'});
+    doc.fillColor('#1F3864').fontSize(8).font('Helvetica-Bold').text('Total',      SX+C0+C1+C2+C3+C4+C5+C6,yy+4,{width:C7,align:'center'});
+    if (role !== 'employee') doc.fillColor('#0369A1').fontSize(8).font('Helvetica-Bold').text('Location Fetching', SX+C0+C1+C2+C3+C4+C5+C6+C7, yy+4, {width:C8,align:'center'});
     return yy + SRH;
   };
 
@@ -1001,34 +1024,40 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       sy = drawSummaryHeader(40);
     }
     const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
-    doc.rect(SX,              sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0,           sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1,        sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2,     sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2+C3,  sy, C4, SRH).fillAndStroke(bg,'#CCCCCC');
-    doc.rect(SX+C0+C1+C2+C3+C4, sy, C5, SRH).fillAndStroke(bg,'#CCCCCC');
-    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5, sy, C6, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX,                  sy, C0, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0,                sy, C1, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1,             sy, C2, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2,          sy, C3, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3,       sy, C4, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4,    sy, C5, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5, sy, C6, SRH).fillAndStroke(bg,'#CCCCCC');
+    doc.rect(SX+C0+C1+C2+C3+C4+C5+C6, sy, C7, SRH).fillAndStroke(bg,'#CCCCCC');
+    if (role !== 'employee') doc.rect(SX+C0+C1+C2+C3+C4+C5+C6+C7, sy, C8, SRH).fillAndStroke(bg,'#CCCCCC');
 
     const pres = cells.filter(c => c==='P'||c==='OD').length;
     const lv   = cells.filter(c => c==='L').length;
     const abs  = cells.filter(c => c==='A').length;
+    const wo   = cells.filter(c => c==='WO').length;
+    const hol  = cells.filter(c => c==='H').length;
     const empIdStr = String(emp._id);
     const lop = rawRecs
       .filter(rr => String(rr.emp_id) === empIdStr && (rr.duty_type === 'Leave' || (rr.leave_type && String(rr.leave_type).trim())))
       .reduce((s, rr) => s + (rr.lop_days || 0), 0);
-    const total = pres + lv;
+    const total = pres + lv + abs + lop + wo + hol; // sum of every column in this table
 
     doc.fillColor('#1F3864').fontSize(8.5).font('Helvetica-Bold').text(emp.name,      SX+4,   sy+3,{width:C0-8,lineBreak:false,ellipsis:true});
     doc.fillColor('#047857').fontSize(9  ).font('Helvetica-Bold').text(String(pres),  SX+C0,  sy+3,{width:C1,align:'center'});
     doc.fillColor('#B45309').fontSize(9  ).font('Helvetica-Bold').text(String(lv),    SX+C0+C1,sy+3,{width:C2,align:'center'});
     doc.fillColor('#B91C1C').fontSize(9  ).font('Helvetica-Bold').text(String(abs),   SX+C0+C1+C2,sy+3,{width:C3,align:'center'});
     doc.fillColor('#991B1B').fontSize(9  ).font('Helvetica-Bold').text(String(lop),   SX+C0+C1+C2+C3,sy+3,{width:C4,align:'center'});
-    doc.fillColor('#1F3864').fontSize(9  ).font('Helvetica-Bold').text(String(total), SX+C0+C1+C2+C3+C4,sy+3,{width:C5,align:'center'});
+    doc.fillColor('#2563EB').fontSize(9  ).font('Helvetica-Bold').text(String(wo),    SX+C0+C1+C2+C3+C4,sy+3,{width:C5,align:'center'});
+    doc.fillColor('#D97706').fontSize(9  ).font('Helvetica-Bold').text(String(hol),   SX+C0+C1+C2+C3+C4+C5,sy+3,{width:C6,align:'center'});
+    doc.fillColor('#1F3864').fontSize(9  ).font('Helvetica-Bold').text(String(total), SX+C0+C1+C2+C3+C4+C5+C6,sy+3,{width:C7,align:'center'});
 
     if (role !== 'employee') {
       const locDates = locationFetchingDates(rawRecs, empIdStr);
       doc.fillColor(locDates.length ? '#0369A1' : '#94A3B8').fontSize(6.5).font(locDates.length ? 'Helvetica-Oblique' : 'Helvetica')
-         .text(locDates.length ? locDates.join(', ') : '—', SX+C0+C1+C2+C3+C4+C5+3, sy+3, {width:C6-6, lineBreak:false, ellipsis:true});
+         .text(locDates.length ? locDates.join(', ') : '—', SX+C0+C1+C2+C3+C4+C5+C6+C7+3, sy+3, {width:C8-6, lineBreak:false, ellipsis:true});
     }
     sy += SRH;
   });

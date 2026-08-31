@@ -790,7 +790,7 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
 
       const PW=doc.page.width,PH=doc.page.height,ML=28;
       const CC=52,CN=130,CD=64,CT=40;
-      const CHUNK=16; // days per row — long ranges wrap to a new row instead of squeezing every day into one line
+      const CHUNK=31; // days per row — a full month fits on one line; longer ranges still wrap to a new row/page beyond that
       const dW=Math.max(11,(PW-56-CC-CN-CD-CT)/CHUNK);
       const RH=24; // tall enough for a two-line employee name to wrap without spilling into the row below
       const xC=ML,xN=ML+CC,xDes=xN+CN,xD=xDes+CD,xT=xD+CHUNK*dW,tW=xT+CT-ML;

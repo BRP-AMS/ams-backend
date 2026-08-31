@@ -615,9 +615,25 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             ca.alignment = { horizontal: 'center', vertical: 'center' };
             ca.protection = { locked: true };
 
+            // LOP is a breakdown WITHIN the Leaves column, not extra days —
+            // toCode() marks every Approved (or Rejected-with-no-checkin)
+            // leave day as 'L' regardless of whether it was paid or LOP, so
+            // those days are already inside Leaves' COUNTIF above. Only sum
+            // lop_days for records actually resolved to 'L' (matching
+            // toCode() exactly) — a still-Pending record's lop_days is just
+            // a projection and those days are already counted as Pending
+            // instead, so including it here would double-count them (this
+            // is what made Total exceed the period's day count before).
             const empIdStr = String(emp._id);
             const lopDays = rawRecs
-              .filter(rr => String(rr.emp_id) === empIdStr && (rr.duty_type === 'Leave' || (rr.leave_type && String(rr.leave_type).trim())))
+              .filter(rr => {
+                if (String(rr.emp_id) !== empIdStr) return false;
+                if (rr.duty_type !== 'Leave' && !(rr.leave_type && String(rr.leave_type).trim())) return false;
+                const ls = rr.leave_status || rr.status || 'Pending';
+                if (ls === 'Approved') return true;
+                if (ls === 'Rejected') return !(rr.checkin_time || rr.checkinTime);
+                return false;
+              })
               .reduce((s, rr) => s + (rr.lop_days || 0), 0);
             const clop = ws.getCell(r, 6);
             clop.value = lopDays; clop.fill = rf; clop.border = CBDR;
@@ -651,10 +667,12 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
             cpend.alignment = { horizontal: 'center', vertical: 'center' };
             cpend.protection = { locked: true };
 
-            // Total = sum of every count column in this table (Present,
-            // Leaves, Absent, LOP, Week Off, Holidays, Pending).
+            // Total = Present + Leaves + Absent + Week Off + Holidays +
+            // Pending — every day in the period exactly once. LOP is
+            // deliberately excluded: it's a count WITHIN Leaves (which
+            // column F already covers), not additional days.
             const ctot = ws.getCell(r, 10);
-            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+F${rowNum}+G${rowNum}+H${rowNum}+I${rowNum}` };
+            ctot.value = { formula: `C${rowNum}+D${rowNum}+E${rowNum}+G${rowNum}+H${rowNum}+I${rowNum}` };
             ctot.fill = rf; ctot.border = CBDR;
             ctot.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF1F3864' } };
             ctot.alignment = { horizontal: 'center', vertical: 'center' };
@@ -1084,11 +1102,26 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
     // these days were invisible to every other column, so Total previously
     // fell short of the period's day count whenever an employee had one.
     const pend = cells.filter(c => c==='').length;
+    // LOP is a breakdown WITHIN the Leaves column, not extra days — see the
+    // matching comment in the Excel branch above for why (toCode() marks
+    // every Approved/Rejected-no-checkin leave day 'L' regardless of paid
+    // vs LOP, so those days are already in `lv`; only count lop_days for
+    // records resolved that way, or it double-counts against Leaves/Pending
+    // and pushes Total past the period's actual day count).
     const empIdStr = String(emp._id);
     const lop = rawRecs
-      .filter(rr => String(rr.emp_id) === empIdStr && (rr.duty_type === 'Leave' || (rr.leave_type && String(rr.leave_type).trim())))
+      .filter(rr => {
+        if (String(rr.emp_id) !== empIdStr) return false;
+        if (rr.duty_type !== 'Leave' && !(rr.leave_type && String(rr.leave_type).trim())) return false;
+        const ls = rr.leave_status || rr.status || 'Pending';
+        if (ls === 'Approved') return true;
+        if (ls === 'Rejected') return !(rr.checkin_time || rr.checkinTime);
+        return false;
+      })
       .reduce((s, rr) => s + (rr.lop_days || 0), 0);
-    const total = pres + lv + abs + lop + wo + hol + pend; // sum of every column in this table
+    // Total = Present + Leaves + Absent + Week Off + Holidays + Pending —
+    // LOP deliberately excluded (see above).
+    const total = pres + lv + abs + wo + hol + pend;
 
     // Employee name gets the taller row height too, so a name that wraps to
     // a second line (like "Ajaya Narasimha Reddy Siriyapureddy") isn't cut

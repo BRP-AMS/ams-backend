@@ -270,6 +270,49 @@ const findOverlappingRecord = (empId, startDate, endDate) =>
     ],
   }).lean();
 
+// A leave that was rejected and the employee never actually checked in —
+// functionally "didn't happen", so unlike a Pending/Approved leave or real
+// attendance, it's safe to let another action (checkin, admin mark-present)
+// claim that specific day instead of blocking on it.
+const isRejectedNoCheckinLeave = (rec) =>
+  !!rec && (rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim())) &&
+  (rec.leave_status === 'Rejected' || rec.status === 'Rejected') &&
+  !(rec.checkin_time || rec.checkinTime);
+
+// Frees a single `date` out of a covering record's [date, end_date] span
+// WITHOUT touching `date` itself — the caller creates/updates its own
+// record for that day separately. Only ever called on a rejected-no-
+// checkin leave (see isRejectedNoCheckinLeave); a single-day record is
+// simply deleted (nothing left to preserve), an edge day shrinks the range
+// forward/backward, and a day strictly inside the range splits the record
+// in two so both the days before and after `date` keep their rejected-
+// leave history instead of silently losing it.
+const carveOutDate = async (record, date) => {
+  const isSingleDay = !record.end_date || record.end_date <= record.date;
+  if (isSingleDay) {
+    await AttendanceRecord.findByIdAndDelete(record._id);
+    return;
+  }
+  if (date === record.date) {
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: { date: addDays(date, 1) } });
+    return;
+  }
+  if (date === record.end_date) {
+    await AttendanceRecord.findByIdAndUpdate(record._id, { $set: { end_date: addDays(date, -1) } });
+    return;
+  }
+  // date is strictly inside the range — split into a "before" piece (kept
+  // on the original record) and an "after" piece (a new cloned record).
+  const afterStart = addDays(date, 1);
+  const afterEnd = record.end_date;
+  await AttendanceRecord.findByIdAndUpdate(record._id, { $set: { end_date: addDays(date, -1) } });
+  const clone = { ...record };
+  delete clone._id;
+  clone.date = afterStart;
+  clone.end_date = afterEnd;
+  await AttendanceRecord.create({ _id: uuidv4(), ...clone });
+};
+
 // ── Shared tail for admin attendance-correction endpoints (regularize,
 // manual-checkout, …): notify the employee, write the audit log, respond. ──
 const finishAdminCorrection = async (req, res, record, { notifyTitle, notifyMsg, auditAction, auditNewValue, auditOldValue, successMsg }) => {
@@ -724,16 +767,17 @@ if (prevRecord && !prevRecord.checkout_time) {
 }
 
     const existing = await findRecordCoveringDate(req.user.id, today);
-    let existingRejectedLeaveId = null;
     if (existing) {
-      const isRejectedLeave =
-        (existing.duty_type === 'Leave' || (existing.leave_type && existing.leave_type.trim())) &&
-        (existing.leave_status === 'Rejected' || existing.status === 'Rejected') &&
-        !existing.checkin_time;
-      if (!isRejectedLeave) {
+      // A rejected leave the employee never checked in for didn't actually
+      // happen — free up just today (splitting the record if it's a multi-
+      // day range, e.g. a rejected 4-day leave where today is day 3) so the
+      // employee can still check in, without losing the rejected-leave
+      // history on the OTHER days of that range.
+      if (isRejectedNoCheckinLeave(existing)) {
+        await carveOutDate(existing, today);
+      } else {
         return res.status(409).json({ success: false, message: 'Attendance already recorded for today' });
       }
-      existingRejectedLeaveId = existing._id;
     }
 
     if (!req.file) {
@@ -862,12 +906,7 @@ if (prevRecord && !prevRecord.checkout_time) {
       face_retake_reason: null,
     };
 
-    if (existingRejectedLeaveId) {
-      await AttendanceRecord.findByIdAndUpdate(existingRejectedLeaveId, { $set: checkinFields });
-      id = existingRejectedLeaveId;
-    } else {
-      await AttendanceRecord.create({ _id: id, ...checkinFields });
-    }
+    await AttendanceRecord.create({ _id: id, ...checkinFields });
 
     await AuditLog.create({ _id: uuidv4(), user_id: req.user.id, action: 'CHECKIN', entity_type: 'attendance', entity_id: id });
     const record = await AttendanceRecord.findById(id).lean();
@@ -1854,7 +1893,14 @@ router.post('/mark-present', authenticate, authorize('admin'), [
 
     const existing = await findRecordCoveringDate(empId, date);
     if (existing) {
-      return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} covering this day — use Regularize or Check Out instead.` });
+      // A rejected leave the employee never checked in for didn't actually
+      // happen — free up just this day (splitting the record if it's a
+      // multi-day range) instead of blocking the admin from correcting it.
+      if (isRejectedNoCheckinLeave(existing)) {
+        await carveOutDate(existing, date);
+      } else {
+        return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} covering this day — use Regularize or Check Out instead.` });
+      }
     }
 
     const timeRe = /^\d{2}:\d{2}$/;

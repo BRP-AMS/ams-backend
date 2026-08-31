@@ -922,30 +922,6 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
         });
       });
 
-      // ── Grand Total block — one row per employee, full-period total ─────────
-      if(y+RH*2>PH-60){addPage();y=28;}
-      y+=6;
-      doc.rect(ML,y,tW,16).fillAndStroke('#1F3864','#1F3864');
-      doc.fillColor('#FFFFFF').fontSize(8).font('Helvetica-Bold').text('GRAND TOTAL — Full Period',ML,y+4,{width:tW,align:'center'});
-      y+=16;
-      matrix.forEach(({emp,cells},idx)=>{
-        if(y+RH>PH-60){addPage();y=28;}
-        const bg=idx%2===0?'#F9F9F9':'#FFF';
-        doc.rect(ML,y,tW,RH).fillAndStroke(bg,'#CCC');
-        doc.lineWidth(0.5).strokeColor('#DDD');
-        [xN,xDes,xD].forEach(x=>doc.moveTo(x,y).lineTo(x,y+RH).stroke());
-        doc.lineWidth(0.5);
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(emp.emp_id||'',xC+2,y+7,{width:CC-4,align:'center'});
-        doc.font('Helvetica-Bold').fontSize(7).text(emp.name,xN+2,y+3,{width:CN-4,height:RH-4});
-        doc.font('Helvetica-Bold').fontSize(6.5).text(truncateToWidth(emp.role_type||emp.designation||'',CD-4,'Helvetica-Bold',6.5),xDes+2,y+8,{width:CD-4,align:'center',lineBreak:false});
-        const totalPres=cells.filter(c=>c==='P'||c==='OD').length;
-        doc.rect(xD,y,CHUNK*dW,RH).fillAndStroke('#EEF2FF','#CCC');
-        doc.fillColor('#1F3864').fontSize(7).font('Helvetica-Bold').text(`${totalDays} days total`,xD,y+7,{width:CHUNK*dW,align:'center'});
-        doc.rect(xT,y,CT,RH).fillAndStroke('#FFF','#AAA');
-        doc.fillColor('#000').fontSize(7).font('Helvetica-Bold').text(String(totalPres),xT+2,y+7,{width:CT-4,align:'center'});
-        y+=RH;
-      });
-
       // Legend — separated from the table with its own rule line + gap
       y+=10; if(y+20>PH-80){addPage();y=40;}
       doc.moveTo(ML,y-4).lineTo(ML+tW,y-4).lineWidth(0.75).strokeColor('#CBD5E1').stroke();

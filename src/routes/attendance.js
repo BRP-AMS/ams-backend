@@ -1937,6 +1937,101 @@ router.post('/mark-present', authenticate, authorize('admin'), [
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/convert-to-leave
+// Corrects a day (or range) that already has an attendance record — e.g. an
+// admin's earlier "Mark Present" that turns out to have been a miscommuni-
+// cation — into an approved leave instead, over a date range at once.
+// Unlike POST /mark-present or POST /manager-apply-leave (which both require
+// the day to be free), this specifically targets days that ALREADY have a
+// non-leave record. Applies the same balance-based partial-LOP split as
+// every other leave-approval path, day by day as it walks the range so each
+// day's paid/LOP split reflects the balance remaining after the previous
+// day's deduction.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/convert-to-leave', authenticate, authorize('admin'), [
+  body('empId').trim().notEmpty().withMessage('Employee is required'),
+  body('startDate').isDate().withMessage('Valid start date required'),
+  body('endDate').optional().isDate(),
+  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('reason').trim().notEmpty().withMessage('A reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { empId, startDate, leaveType, reason } = req.body;
+    const endDate = req.body.endDate || startDate;
+    const today = istDateStr();
+    if (endDate < startDate) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
+    if (endDate > today) return res.status(400).json({ success: false, message: 'Cannot convert a future date' });
+
+    const employee = await User.findById(empId).select('manager_id name leave_balance auto_leave_enabled').lean();
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    let balance = employee.leave_balance ?? 0;
+    const autoEnabled = employee.auto_leave_enabled !== false;
+
+    const convertedDates = [];
+    const skipped = [];
+    let cur = startDate;
+    while (cur <= endDate) {
+      const rec = await findRecordCoveringDate(empId, cur);
+      if (!rec) { skipped.push(`${cur} (no record)`); cur = addDays(cur, 1); continue; }
+      const isAlreadyLeave = rec.duty_type === 'Leave' || (rec.leave_type && String(rec.leave_type).trim());
+      if (isAlreadyLeave) { skipped.push(`${cur} (already a leave)`); cur = addDays(cur, 1); continue; }
+      const isMultiDay = rec.end_date && rec.end_date > rec.date;
+      if (isMultiDay) { skipped.push(`${cur} (part of a multi-day record — convert that day individually)`); cur = addDays(cur, 1); continue; }
+
+      const dayUnits = leaveDayUnits(leaveType, cur, cur);
+      const paidDays = autoEnabled ? Math.min(balance, dayUnits) : 0;
+      const lopDays  = roundHalfDay(dayUnits - paidDays);
+      balance = clampLeaveBalance(balance - paidDays);
+
+      await AttendanceRecord.findByIdAndUpdate(rec._id, {
+        $set: {
+          duty_type: 'Leave', leave_type: leaveType, leave_reason: reason,
+          leave_status: 'Approved', status: 'Approved',
+          is_lop: lopDays > 0, paid_days: paidDays, lop_days: lopDays,
+          admin_remark: `Converted from attendance to ${leaveType} by Admin: ${reason}`,
+          actioned_by: req.user.id, actioned_at: new Date(),
+        },
+      });
+      convertedDates.push(cur);
+      cur = addDays(cur, 1);
+    }
+
+    if (convertedDates.length === 0) {
+      return res.status(400).json({ success: false, message: `Nothing to convert — ${skipped.join('; ') || 'no records found in that range'}.` });
+    }
+
+    if (autoEnabled) {
+      await User.findByIdAndUpdate(empId, { $set: { leave_balance: balance } });
+    }
+
+    const dateRangeLabel = convertedDates.length > 1 ? `${convertedDates[0]} to ${convertedDates[convertedDates.length - 1]}` : convertedDates[0];
+    await notify(empId, `Attendance Corrected to ${leaveType}`,
+      `Your attendance for ${dateRangeLabel} was corrected to ${leaveType} by Admin: ${reason}`,
+      'info', null, '/employee/history');
+    const empUser = await User.findById(empId).select('email name').lean();
+    if (empUser?.email) {
+      sendMail(empUser.email, `[AMS] Attendance Corrected to ${leaveType}`,
+        `<p>Hi ${empUser.name},</p><p>Your attendance for <strong>${dateRangeLabel}</strong> was corrected to <strong>${leaveType}</strong> by an administrator.</p><p><strong>Reason:</strong> ${reason}</p>`
+      ).catch(err => console.error('[ConvertToLeave] Employee email failed:', err.message));
+    }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_CONVERT_TO_LEAVE',
+      entity_type: 'attendance', new_value: `${leaveType} for ${dateRangeLabel} (${convertedDates.length} day${convertedDates.length !== 1 ? 's' : ''})`,
+    });
+
+    res.json({
+      success: true,
+      message: `Converted ${convertedDates.length} day(s) to ${leaveType}${skipped.length ? ` — skipped: ${skipped.join('; ')}` : ''}`,
+      data: { converted: convertedDates.length, convertedDates, skipped },
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/hr-override
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {

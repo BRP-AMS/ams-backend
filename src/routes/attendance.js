@@ -1106,8 +1106,18 @@ router.put('/:id/checkout', authenticate, authorize('employee'), upload.single('
     const record = await AttendanceRecord.findOne({ _id: req.params.id, emp_id: req.user.id }).lean();
     if (!record)               return res.status(404).json({ success: false, message: 'Record not found' });
     if (record.checkout_time)  return res.status(409).json({ success: false, message: 'Already checked out' });
-    // Allow checkout from Draft (normal) OR Pending-without-checkout (face verify escalated to manager but employee still needs to checkout)
-    if (!['Draft', 'Pending'].includes(record.status)) return res.status(400).json({ success: false, message: 'Cannot checkout — record already processed' });
+    // No status guard here on purpose. An "On Duty Away" check-in without a
+    // pre-approved ODA request is filed status:'Pending' immediately at
+    // check-in (see odaPending in /checkin) so the manager can review the
+    // away-duty justification independently of the day's checkout. Once the
+    // manager approves/rejects that justification the record flips straight
+    // to Approved/Rejected — even though checkout_time is still null (the
+    // same can happen via a face-verification manager review, or an HR
+    // override applied to a still-open Draft record). A status check here
+    // used to permanently block those employees from ever checking out for
+    // the day. checkout_time===null (just confirmed above) is the only
+    // invariant that matters — the block below always recomputes `status`
+    // from hours worked, so it's safe to proceed from any prior status.
 // ── Face verification on checkout selfie ────────────────────────────────
 // ── Face verification on checkout selfie — runs in background below ────
 if (!req.file) {

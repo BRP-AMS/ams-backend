@@ -477,7 +477,7 @@ router.post('/propose', authenticate, async (req, res) => {
 // GET /api/msme/proposals — list proposals (admin / super_admin only)
 // Query params: status, managerId, empId, page, limit
 // ─────────────────────────────────────────────────────────────────────────────
-router.get('/proposals', authenticate, authorize(['admin', 'super_admin', 'hr']), async (req, res) => {
+router.get('/proposals', authenticate, authorize('admin', 'super_admin', 'hr'), async (req, res) => {
   try {
     const { status, managerId, empId, page = 1, limit = 100 } = req.query;
 
@@ -534,7 +534,7 @@ router.get('/proposals', authenticate, authorize(['admin', 'super_admin', 'hr'])
 // PUT /api/msme/proposals/:id/approve — approve proposal
 // Body (optional): udyam_number, sector, notes — creates master MSME entry
 // ─────────────────────────────────────────────────────────────────────────────
-router.put('/proposals/:id/approve', authenticate, authorize(['admin', 'super_admin']), async (req, res) => {
+router.put('/proposals/:id/approve', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
     const proposal = await MsmeProposal.findById(req.params.id);
     if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
@@ -575,7 +575,7 @@ router.put('/proposals/:id/approve', authenticate, authorize(['admin', 'super_ad
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/msme/proposals/:id/reject — reject proposal with remark
 // ─────────────────────────────────────────────────────────────────────────────
-router.put('/proposals/:id/reject', authenticate, authorize(['admin', 'super_admin']), async (req, res) => {
+router.put('/proposals/:id/reject', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
     const proposal = await MsmeProposal.findById(req.params.id);
     if (!proposal) return res.status(404).json({ error: 'Proposal not found' });

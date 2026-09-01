@@ -518,8 +518,13 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
       ],
     };
     const [records, approvedLeaves, pendingLeaves] = await Promise.all([
+      // duty_type != 'Leave' — a record converted to leave (see PUT
+      // /convert-to-leave) keeps its original checkin_time/checkout_time
+      // for audit history, so without this exclusion it would still match
+      // here and show as "Checked Out" instead of falling through to the
+      // approvedLeaves/pendingLeaves queries below where it now belongs.
       AttendanceRecord.find(
-        { date: today, checkin_time: { $ne: null }, ...empFilter },
+        { date: today, checkin_time: { $ne: null }, duty_type: { $ne: 'Leave' }, ...empFilter },
         'emp_id checkin_time checkout_time status attendance_type leave_type is_missed_checkout'
       ).lean(),
       AttendanceRecord.find(

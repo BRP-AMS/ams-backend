@@ -359,6 +359,103 @@ cron.schedule('10 0 1 * *', async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CRON 6 — 10:05 AM IST, working days only: "Not checked-in yet" alert email
+// to managers (their own team) and admin-level roles (whole org).
+//
+// An employee counts as "not checked in" if they have no attendance record
+// for today with checkin_time set, AND they aren't on an admin-approved
+// leave covering today (same leaveFilter shape as GET /today-checkin-status
+// in attendance.js, for consistency). Skips Sundays/holidays. Sends nothing
+// when a manager's/the org's list is empty — no "all clear" noise mail.
+// ─────────────────────────────────────────────────────────────────────────────
+cron.schedule('5 10 * * *', async () => {
+  console.log('[NotCheckedIn Alert] Cron triggered');
+  try {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    if (await isNonWorkingDayForReminders(todayIST)) return console.log('[NotCheckedIn Alert] Skipped — non-working day');
+
+    const employees = await User.find({ role: 'employee', is_active: { $ne: 0 } })
+      .select('_id emp_id name manager_id assigned_block assigned_district').lean();
+    if (!employees.length) return console.log('[NotCheckedIn Alert] No active employees.');
+
+    const checkedInIds = new Set(
+      (await AttendanceRecord.find({ date: todayIST, checkin_time: { $ne: null } }).select('emp_id').lean())
+        .map(r => String(r.emp_id))
+    );
+    const leaveFilter = {
+      duty_type: 'Leave', leave_status: 'Approved',
+      $or: [{ date: todayIST, end_date: null }, { date: { $lte: todayIST }, end_date: { $gte: todayIST } }],
+    };
+    const onLeaveIds = new Set(
+      (await AttendanceRecord.find(leaveFilter).select('emp_id').lean()).map(r => String(r.emp_id))
+    );
+
+    const notCheckedIn = employees.filter(e => !checkedInIds.has(String(e._id)) && !onLeaveIds.has(String(e._id)));
+    console.log(`[NotCheckedIn Alert] ${notCheckedIn.length} of ${employees.length} employee(s) not checked in as of 10:05 AM.`);
+    if (!notCheckedIn.length) return;
+
+    const dateLabel = new Date(todayIST + 'T00:00:00+05:30')
+      .toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
+    const rowsHtml = list => `
+      <table style="border-collapse:collapse;width:100%;font-size:14px;">
+        <tr style="background:#F1F5F9;text-align:left;">
+          <th style="padding:6px 10px;border:1px solid #E2E8F0;">Name</th>
+          <th style="padding:6px 10px;border:1px solid #E2E8F0;">Emp ID</th>
+          <th style="padding:6px 10px;border:1px solid #E2E8F0;">Block</th>
+        </tr>
+        ${list.map(e => `
+          <tr>
+            <td style="padding:6px 10px;border:1px solid #E2E8F0;">${e.name}</td>
+            <td style="padding:6px 10px;border:1px solid #E2E8F0;">${e.emp_id || '—'}</td>
+            <td style="padding:6px 10px;border:1px solid #E2E8F0;">${e.assigned_block || '—'}</td>
+          </tr>`).join('')}
+      </table>`;
+
+    // ── Per-manager emails — each manager's own team only ──────────────────
+    const byManager = new Map();
+    for (const e of notCheckedIn) {
+      if (!e.manager_id) continue;
+      if (!byManager.has(e.manager_id)) byManager.set(e.manager_id, []);
+      byManager.get(e.manager_id).push(e);
+    }
+    let managerEmailsSent = 0;
+    for (const [managerId, team] of byManager) {
+      const manager = await User.findById(managerId).select('name email').lean();
+      if (!manager?.email) continue;
+      await sendMail(
+        manager.email, `[AMS] ${team.length} Not Checked In Today — ${dateLabel}`,
+        `<p>Hi ${manager.name || 'there'},</p>
+         <p><strong>${team.length}</strong> of your team member(s) had not checked in as of 10:05 AM on ${dateLabel}:</p>
+         ${rowsHtml(team)}`
+      ).catch(err => console.error('[NotCheckedIn Alert] Manager email failed:', manager.email, err.message));
+      managerEmailsSent++;
+    }
+
+    // ── Org-wide email to admin-level roles ─────────────────────────────────
+    const overseers = await User.find({ role: { $in: ['admin', 'super_admin', 'hr'] }, is_active: { $ne: 0 } })
+      .select('name email').lean();
+    let adminEmailsSent = 0;
+    for (const o of overseers) {
+      if (!o.email) continue;
+      await sendMail(
+        o.email, `[AMS] ${notCheckedIn.length} Not Checked In Today — ${dateLabel}`,
+        `<p>Hi ${o.name || 'there'},</p>
+         <p><strong>${notCheckedIn.length}</strong> of ${employees.length} employee(s) had not checked in as of 10:05 AM on ${dateLabel}:</p>
+         ${rowsHtml(notCheckedIn)}`
+      ).catch(err => console.error('[NotCheckedIn Alert] Admin email failed:', o.email, err.message));
+      adminEmailsSent++;
+    }
+
+    console.log(`[NotCheckedIn Alert] Sent ${managerEmailsSent} manager email(s), ${adminEmailsSent} admin-level email(s).`);
+  } catch (err) {
+    console.error('[NotCheckedIn Alert] Error:', err.message);
+  }
+}, {
+  timezone: 'Asia/Kolkata',
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NOTE: The old CRON 3 ("system auto check-out after 8 hours") has been

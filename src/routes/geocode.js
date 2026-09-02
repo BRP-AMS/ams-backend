@@ -22,6 +22,27 @@ const _geoCache  = new Map();         // key → payload
 const _inflight  = new Map();         // key → Promise (deduplicates concurrent requests for same spot)
 const _cacheKey  = (lat, lng) => `${lat.toFixed(2)},${lng.toFixed(2)}`;
 
+// Purge cached reverse-geocode results near a point — call this after an
+// admin corrects a block's stored coordinates (see PUT/POST /api/blocks),
+// so the very next check-in near that spot re-geocodes fresh instead of
+// returning whatever was cached under the old/nearby grid cell(s) — the
+// cache otherwise never expires on its own. Clears a 5x5 grid of ~1km cells
+// (~5.5km square) centered on the point, to cover normal GPS drift and the
+// 2-decimal cache-key rounding.
+async function purgeNear(lat, lng) {
+  if (typeof lat !== 'number' || typeof lng !== 'number' || Number.isNaN(lat) || Number.isNaN(lng)) return;
+  const keys = [];
+  for (let dLat = -2; dLat <= 2; dLat++) {
+    for (let dLng = -2; dLng <= 2; dLng++) {
+      keys.push(_cacheKey(lat + dLat * 0.01, lng + dLng * 0.01));
+    }
+  }
+  for (const k of keys) _geoCache.delete(k);
+  try {
+    await GeoCache.deleteMany({ key: { $in: keys } });
+  } catch { /* best-effort — in-memory purge above already covers this instance */ }
+}
+
 // GET /api/geocode?lat=17.43&lng=78.37
 router.get('/', async (req, res) => {
   const lat = parseFloat(req.query.lat);
@@ -146,4 +167,5 @@ router.get('/search', async (req, res) => {
   }
 });
 
+router.purgeNear = purgeNear;
 module.exports = router;

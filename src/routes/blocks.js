@@ -2,6 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const { CustomBlock } = require('../models/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { purgeNear } = require('./geocode');
 
 // Base list used ONLY for seeding on first run
 const BASE_DISTRICT_BLOCKS = {
@@ -66,6 +67,7 @@ router.post('/', authenticate, authorize('admin', 'super_admin'), async (req, re
       district, block_name: trimmed, added_by: req.user._id || req.user.id,
       latitude: Number.isFinite(lat) ? lat : null, longitude: Number.isFinite(lng) ? lng : null,
     });
+    if (Number.isFinite(lat) && Number.isFinite(lng)) purgeNear(lat, lng).catch(() => {});
     res.status(201).json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: true, latitude: block.latitude, longitude: block.longitude } });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ success: false, message: 'Block already exists' });
@@ -112,8 +114,16 @@ router.put('/:id', authenticate, authorize('admin', 'super_admin'), async (req, 
     }
     if (!Object.keys(update).length) return res.status(400).json({ success: false, message: 'Nothing to update' });
 
+    const before = await CustomBlock.findById(req.params.id).select('latitude longitude').lean();
     const block = await CustomBlock.findByIdAndUpdate(req.params.id, { $set: update }, { new: true });
     if (!block) return res.status(404).json({ success: false, message: 'Block not found' });
+    // Coordinates changed — purge cached location names near both the old
+    // and new point so upcoming check-ins near here re-geocode fresh instead
+    // of returning whatever was cached before this correction.
+    if ('latitude' in update || 'longitude' in update) {
+      if (Number.isFinite(before?.latitude) && Number.isFinite(before?.longitude)) purgeNear(before.latitude, before.longitude).catch(() => {});
+      if (Number.isFinite(block.latitude) && Number.isFinite(block.longitude)) purgeNear(block.latitude, block.longitude).catch(() => {});
+    }
     res.json({ success: true, block: { _id: block._id, name: block.block_name, district: block.district, isCustom: !!block.added_by, latitude: block.latitude ?? null, longitude: block.longitude ?? null } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -197,6 +207,7 @@ router.post('/bulk-coordinates', authenticate, authorize('admin', 'super_admin')
         blockId: match._id, matchedName: match.block_name, matchedDistrict: match.district,
         districtMismatch,
         alreadySet: match.latitude != null,
+        prevLat: match.latitude ?? null, prevLng: match.longitude ?? null,
       };
     });
 
@@ -205,6 +216,13 @@ router.post('/bulk-coordinates', authenticate, authorize('admin', 'super_admin')
       await Promise.all(toWrite.map(r =>
         CustomBlock.findByIdAndUpdate(r.blockId, { $set: { latitude: r.lat, longitude: r.lng } })
       ));
+      // Purge cached location names near each block's old & new coordinates
+      // so upcoming check-ins re-geocode fresh instead of returning what
+      // was cached before this import.
+      for (const r of toWrite) {
+        if (Number.isFinite(r.prevLat) && Number.isFinite(r.prevLng)) purgeNear(r.prevLat, r.prevLng).catch(() => {});
+        purgeNear(r.lat, r.lng).catch(() => {});
+      }
     }
 
     const summary = {

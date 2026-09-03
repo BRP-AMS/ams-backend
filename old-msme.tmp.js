@@ -32,7 +32,7 @@ const DISTRICT_BLOCKS = {
     'Ambassa','Ganganagar','Salema','Durgachowmuhani','Dumburnagar','Raishyabari','Manu','Chawmanu',
     'Ambassa Municipal Council','Kamalpur Nagar Panchayat',
   ],
-  'Sipahijala': [
+  'Sepahijala': [
     'Bishalgarh','Boxanagar','Charilam','Jampuijala','Nalchar','Mohanbhog','Kathalia',
     'Bishalgarh Municipal Council','Melaghar Municipal Council','Sonamura Nagar Panchayat',
   ],
@@ -111,7 +111,7 @@ function normalizeDistrict(excelDistrict) {
     'DHALAI':         'Dhalai',
     'GOMATI':         'Gomati',
     'KHOWAI':         'Khowai',
-    'Sipahijala':     'Sipahijala',
+    'Sepahijala':     'Sepahijala',
     'UNAKOTI':        'Unakoti',
   };
   return map[(excelDistrict || '').toUpperCase().trim()] || excelDistrict;

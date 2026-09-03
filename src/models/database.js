@@ -283,6 +283,8 @@ const msmePropSchema = new mongoose.Schema({
   block_name:   { type: String, default: null },
   latitude:     { type: Number, default: null },
   longitude:    { type: Number, default: null },
+  udyam_number: { type: String, default: null }, // filled by the proposing employee, optional
+  sector:       { type: String, default: null }, // filled by the proposing employee, optional
   proposed_by:  { type: String, default: null }, // emp_id
   status:       { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
 }, { timestamps: true, collection: 'msme_proposals' });

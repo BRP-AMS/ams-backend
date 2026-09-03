@@ -15,7 +15,7 @@ const DISTRICT_MAP = {
   'DHALAI':        'Dhalai',
   'GOMATI':        'Gomati',
   'KHOWAI':        'Khowai',
-  'Sipahijala':    'Sipahijala',
+  'Sepahijala':    'Sepahijala',
   'UNAKOTI':       'Unakoti',
 };
 

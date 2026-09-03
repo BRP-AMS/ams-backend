@@ -32,7 +32,7 @@ const DISTRICT_BLOCKS = {
     'Ambassa','Ganganagar','Salema','Durgachowmuhani','Dumburnagar','Raishyabari','Manu','Chawmanu',
     'Ambassa Municipal Council','Kamalpur Nagar Panchayat',
   ],
-  'Sipahijala': [
+  'Sepahijala': [
     'Bishalgarh','Boxanagar','Charilam','Jampuijala','Nalchar','Mohanbhog','Kathalia',
     'Bishalgarh Municipal Council','Melaghar Municipal Council','Sonamura Nagar Panchayat',
   ],
@@ -115,7 +115,7 @@ function normalizeDistrict(excelDistrict) {
     'DHALAI':         'Dhalai',
     'GOMATI':         'Gomati',
     'KHOWAI':         'Khowai',
-    'Sipahijala':     'Sipahijala',
+    'Sepahijala':     'Sepahijala',
     'UNAKOTI':        'Unakoti',
   };
   return map[(excelDistrict || '').toUpperCase().trim()] || excelDistrict;
@@ -451,20 +451,22 @@ router.post('/seed', authenticate, authorize('super_admin'), async (req, res) =>
 // POST /api/msme/propose — any authenticated employee submits a new MSME for admin review
 router.post('/propose', authenticate, async (req, res) => {
   try {
-    const { msme_name, address, city, pincode, state, district, block_name, latitude, longitude } = req.body;
+    const { msme_name, address, city, pincode, state, district, block_name, latitude, longitude, udyam_number, sector } = req.body;
     if (!msme_name?.trim()) return res.status(400).json({ error: 'Business name is required' });
     const proposal = new MsmeProposal({
-      _id:         uuidv4(),
-      msme_name:   msme_name.trim(),
-      address:     address   || null,
-      city:        city      || null,
-      pincode:     pincode   || null,
-      state:       state     || null,
-      district:    district  || null,
-      block_name:  block_name || null,
-      latitude:    latitude  ? parseFloat(latitude)  : null,
-      longitude:   longitude ? parseFloat(longitude) : null,
-      proposed_by: req.user?.emp_id || req.user?.id || null,
+      _id:          uuidv4(),
+      msme_name:    msme_name.trim(),
+      address:      address   || null,
+      city:         city      || null,
+      pincode:      pincode   || null,
+      state:        state     || null,
+      district:     district  || null,
+      block_name:   block_name || null,
+      latitude:     latitude  ? parseFloat(latitude)  : null,
+      longitude:    longitude ? parseFloat(longitude) : null,
+      udyam_number: udyam_number?.trim() || null,
+      sector:       sector    || null,
+      proposed_by:  req.user?.emp_id || req.user?.id || null,
     });
     await proposal.save();
     res.json({ success: true, message: 'MSME submitted for admin review', id: proposal._id });
@@ -532,7 +534,8 @@ router.get('/proposals', authenticate, authorize('admin', 'super_admin', 'hr'), 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/msme/proposals/:id/approve — approve proposal
-// Body (optional): udyam_number, sector, notes — creates master MSME entry
+// Body (optional): udyam_number, sector, notes — override the values the
+// employee filled on the proposal form; creates master MSME entry
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/proposals/:id/approve', authenticate, authorize('admin', 'super_admin'), async (req, res) => {
   try {
@@ -541,16 +544,20 @@ router.put('/proposals/:id/approve', authenticate, authorize('admin', 'super_adm
     if (proposal.status !== 'pending') return res.status(400).json({ error: 'Proposal already actioned' });
 
     const { udyam_number, sector, notes } = req.body;
+    // Prefer what the employee filled in on the proposal form; admin's body
+    // fields (if sent) only override for a last-minute correction.
+    const finalUdyam  = udyam_number?.trim() || proposal.udyam_number || null;
+    const finalSector = sector || proposal.sector || null;
 
-    // If udyam_number provided, add to master list
-    if (udyam_number?.trim()) {
-      const exists = await MsmeMaster.findOne({ udyam_number: udyam_number.trim() });
+    // If udyam_number is known, add to master list
+    if (finalUdyam) {
+      const exists = await MsmeMaster.findOne({ udyam_number: finalUdyam });
       if (!exists) {
         await MsmeMaster.create({
           _id:          uuidv4(),
           msme_name:    proposal.msme_name,
-          udyam_number: udyam_number.trim(),
-          sector:       sector || null,
+          udyam_number: finalUdyam,
+          sector:       finalSector,
           block_name:   proposal.block_name || 'Unknown',
           district:     proposal.district   || 'Unknown',
           address:      proposal.address    || null,

@@ -115,7 +115,7 @@ function normalizeDistrict(excelDistrict) {
     'DHALAI':         'Dhalai',
     'GOMATI':         'Gomati',
     'KHOWAI':         'Khowai',
-    'Sipahijala':     'Sipahijala',
+    'SIPAHIJALA':     'Sipahijala',
     'UNAKOTI':        'Unakoti',
   };
   return map[(excelDistrict || '').toUpperCase().trim()] || excelDistrict;

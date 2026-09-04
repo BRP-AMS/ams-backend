@@ -63,7 +63,7 @@ photo_update_count:      { type: Number, default: 0    },  // how many updates u
   reporting_officer_name:        { type: String, default: null },
   reporting_officer_designation: { type: String, default: null },
   // ── Leave management ─────────────────────────────────────────────────
-  // Half-day steps only (0, 0.5, 1, ... 24) — enforced in application code via
+  // Whole days only (0, 1, 2, ... 24) — enforced in application code via
   // clampLeaveBalance() in attendance.js/users.js since most writes here use
   // findByIdAndUpdate/bulkWrite, which skip Mongoose validators by default;
   // min/max still documents the intended range and guards any .save() path.

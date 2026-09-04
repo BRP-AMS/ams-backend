@@ -150,13 +150,11 @@ const countWorkingDays = (startISO, endISO) => {
   }
   return count || 1;
 };
-// Leave-balance cost of a request, in days — countWorkingDays() always
-// returns whole numbers, but Half Day leave costs exactly half a day
-// regardless of how many calendar days it spans (it's always a single day
-// in practice). Used for balance deduction/refund only, never for the
-// attendance-matrix display, which still shows Half Day as its own code.
-const leaveDayUnits = (leaveType, startISO, endISO) =>
-  leaveType === 'Half Day' ? 0.5 : countWorkingDays(startISO, endISO);
+// Leave-balance cost of a request, in days. 'Half Day' has been removed as a
+// leave type — every leave now costs a full working day, so this is just
+// countWorkingDays(); kept as a named wrapper since callers already read as
+// "day cost of this leave request".
+const leaveDayUnits = (leaveType, startISO, endISO) => countWorkingDays(startISO, endISO);
 const addDays = (isoDate, n) => {
   const d = new Date(isoDate + 'T00:00:00+05:30');
   d.setDate(d.getDate() + n);
@@ -529,7 +527,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
       ).lean(),
       AttendanceRecord.find(
         { duty_type: 'Leave', leave_status: 'Approved', ...leaveFilter, ...empFilter },
-        'emp_id leave_type'
+        'emp_id leave_type paid_days is_lop'
       ).lean(),
       AttendanceRecord.find(
         { duty_type: 'Leave', leave_status: 'Pending', ...leaveFilter, ...empFilter },
@@ -553,7 +551,7 @@ router.get('/today-checkin-status', authenticate, authorize('admin', 'hr', 'supe
     });
     approvedLeaves.forEach(r => {
       const uid = String(r.emp_id);
-      if (!statusMap[uid]) statusMap[uid] = { onLeave: true, leaveType: r.leave_type || 'Leave' };
+      if (!statusMap[uid]) statusMap[uid] = { onLeave: true, leaveType: r.leave_type || 'Leave', recordId: r._id, paidDays: r.paid_days ?? 0, isLop: !!r.is_lop };
     });
     pendingLeaves.forEach(r => {
       const uid = String(r.emp_id);
@@ -1221,17 +1219,11 @@ const checkoutFaceResult = { match: true, confidence: 0 };
 
     // ── Determine leave type ────────────────────────────────────────────
     // >= 7 hours → full day, needs manager review
-    // >= 4 hours → half day leave attached, manager review
-    // <  4 hours → emergency leave, manager review
+    // <  7 hours → Emergency Leave, needs manager review ('Half Day' removed
+    //   as a leave type — every leave is now a full day; hoursElapsed/the
+    //   4-hour minimum-checkout lock above are untouched)
     // (No auto-approve shortcut — every checkout requires manager review.)
-    let leaveType = null;
-    if (hoursElapsed >= 7) {
-      leaveType = null;               // Full day — no leave (whether auto-approved or pending)
-    } else if (hoursElapsed >= 4) {
-      leaveType = 'Half Day';
-    } else {
-      leaveType = 'Emergency Leave';
-    }
+    let leaveType = hoursElapsed >= 7 ? null : 'Emergency Leave';
 
    const { latitude, longitude, locationAddress, capturedAt, lateReason, leaveReason } = req.body;
 
@@ -1332,9 +1324,7 @@ if (leaveType && !String(leaveReason || '').trim()) {
           );
         } else if (record.manager_id) {
           const emp = await User.findById(req.user.id).select('name').lean();
-          const hoursLabel = hoursElapsed >= 4
-            ? `Half Day (${workedHours.toFixed(1)} hrs)`
-            : `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
+          const hoursLabel = `Emergency Leave (${workedHours.toFixed(1)} hrs)`;
           await notify(
             record.manager_id,
             'New Attendance Pending',
@@ -1378,7 +1368,7 @@ if (leaveType && !String(leaveReason || '').trim()) {
 router.post('/apply-leave', authenticate, authorize('employee'), [
   body('date').isDate().withMessage('Valid start date required'),
   body('endDate').optional().isDate(),
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -1395,7 +1385,6 @@ router.post('/apply-leave', authenticate, authorize('employee'), [
       'Urgent Leave': { minOffset: 0,   maxOffset: 3,  minMsg: 'Urgent Leave can only be applied starting today', maxMsg: 'Urgent Leave can only be applied up to 3 days ahead' },
       'Casual Leave': { minOffset: -30, maxOffset: 7,  minMsg: 'Casual Leave cannot be applied more than 30 days in the past', maxMsg: 'Casual Leave can only be applied up to 7 days in advance' },
       'Planned Leave':{ minOffset: 7,   maxOffset: 90, minMsg: 'Planned Leave must start at least 7 days from today', maxMsg: 'Planned Leave can only be planned up to 90 days in advance' },
-      'Half Day':     { minOffset: -30, maxOffset: 7,  minMsg: 'Leave cannot be applied more than 30 days in the past', maxMsg: 'Leave can only be applied up to 7 days in advance' },
       'Emergency Leave':{ minOffset: -30, maxOffset: 7, minMsg: 'Leave cannot be applied more than 30 days in the past', maxMsg: 'Leave can only be applied up to 7 days in advance' },
     };
     const win = allowedWindows[leaveType];
@@ -1485,7 +1474,7 @@ router.post('/manager-apply-leave', authenticate, authorize('manager', 'admin'),
   body('empId').trim().notEmpty().withMessage('Employee is required'),
   body('date').isDate().withMessage('Valid start date required'),
   body('endDate').optional().isDate(),
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -1506,13 +1495,16 @@ router.post('/manager-apply-leave', authenticate, authorize('manager', 'admin'),
 
     const isMultiDay = finalEndDate !== date;
     const dayCount   = countWorkingDays(date, finalEndDate); // for display/messaging only
-    const dayUnits   = leaveDayUnits(leaveType, date, finalEndDate); // for balance math — Half Day = 0.5
+    const dayUnits   = leaveDayUnits(leaveType, date, finalEndDate);
     const id = uuidv4();
 
-    // Partial LOP — see apply-leave above for the rationale.
+    // forceLop: admin/manager explicitly marks this LOP regardless of
+    // balance (the optional "LOP" checkbox) — otherwise partial LOP applies
+    // automatically once balance runs out. See apply-leave for the rationale.
+    const forceLop = req.body.forceLop === true || req.body.forceLop === 'true';
     const balance = emp.leave_balance ?? 0;
     const autoEnabled = emp.auto_leave_enabled !== false;
-    const paidDays = autoEnabled ? Math.min(balance, dayUnits) : 0;
+    const paidDays = forceLop ? 0 : (autoEnabled ? Math.min(balance, dayUnits) : 0);
     const lopDays  = roundHalfDay(dayUnits - paidDays);
     const isLOP    = lopDays > 0;
     const leaveNote = !isLOP ? '' : paidDays > 0
@@ -1887,9 +1879,10 @@ router.put('/:id/manual-checkout', authenticate, authorize('admin'), [
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/attendance/mark-present
 // Admin-only — for a day with NO attendance record at all (employee never
-// checked in, e.g. during a server outage). Creates a Regular/Approved
-// record on the employee's behalf. Distinct from /regularize, which only
-// fixes an *existing* Partial/Irregular/Emergency/Half-Day record.
+// checked in, e.g. during a server outage), OR a single-day Leave record
+// being corrected back to present (refunds any balance it had deducted).
+// Creates a Regular/Approved record on the employee's behalf. Distinct from
+// /regularize, which only fixes an *existing* Partial/Irregular/Emergency record.
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/mark-present', authenticate, authorize('admin'), [
   body('empId').trim().notEmpty().withMessage('Employee is required'),
@@ -1908,11 +1901,24 @@ router.post('/mark-present', authenticate, authorize('admin'), [
 
     const existing = await findRecordCoveringDate(empId, date);
     if (existing) {
+      const isSingleDayLeave = existing.duty_type === 'Leave' && !(existing.end_date && existing.end_date > existing.date);
       // A rejected leave the employee never checked in for didn't actually
       // happen — free up just this day (splitting the record if it's a
       // multi-day range) instead of blocking the admin from correcting it.
       if (isRejectedNoCheckinLeave(existing)) {
         await carveOutDate(existing, date);
+      } else if (isSingleDayLeave) {
+        // Correcting an already-marked leave day back to present — refund
+        // whatever balance was deducted for it, then free the day the same
+        // way carveOutDate does for a single-day record (delete; the
+        // create() below adds the fresh Present record in its place).
+        if (existing.paid_days > 0) {
+          const empBalance = await User.findById(empId).select('leave_balance').lean();
+          await User.findByIdAndUpdate(empId, { $set: { leave_balance: clampLeaveBalance((empBalance?.leave_balance ?? 0) + existing.paid_days) } });
+        }
+        await AttendanceRecord.findByIdAndDelete(existing._id);
+      } else if (existing.duty_type === 'Leave') {
+        return res.status(409).json({ success: false, message: `${recordDateLabel(existing)} is part of a multi-day leave — convert that day individually via Convert to Leave first, then mark it present.` });
       } else {
         return res.status(409).json({ success: false, message: `A record already exists for ${recordDateLabel(existing)} covering this day — use Regularize or Check Out instead.` });
       }
@@ -1958,7 +1964,7 @@ router.put('/convert-to-leave', authenticate, authorize('admin'), [
   body('empId').trim().notEmpty().withMessage('Employee is required'),
   body('startDate').isDate().withMessage('Valid start date required'),
   body('endDate').optional().isDate(),
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').trim().notEmpty().withMessage('A reason is required'),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -1967,6 +1973,7 @@ router.put('/convert-to-leave', authenticate, authorize('admin'), [
     const { empId, startDate, leaveType, reason } = req.body;
     const endDate = req.body.endDate || startDate;
     const today = istDateStr();
+    const forceLop = req.body.forceLop === true || req.body.forceLop === 'true';
     if (endDate < startDate) return res.status(400).json({ success: false, message: 'End date must be on or after start date' });
     if (endDate > today) return res.status(400).json({ success: false, message: 'Cannot convert a future date' });
 
@@ -1988,7 +1995,7 @@ router.put('/convert-to-leave', authenticate, authorize('admin'), [
       if (isMultiDay) { skipped.push(`${cur} (part of a multi-day record — convert that day individually)`); cur = addDays(cur, 1); continue; }
 
       const dayUnits = leaveDayUnits(leaveType, cur, cur);
-      const paidDays = autoEnabled ? Math.min(balance, dayUnits) : 0;
+      const paidDays = forceLop ? 0 : (autoEnabled ? Math.min(balance, dayUnits) : 0);
       const lopDays  = roundHalfDay(dayUnits - paidDays);
       balance = clampLeaveBalance(balance - paidDays);
 
@@ -2038,6 +2045,64 @@ router.put('/convert-to-leave', authenticate, authorize('admin'), [
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/convert-to-lop
+// Admin-only — a day that's ALREADY a Leave record (approved or pending) is
+// converted to LOP: refunds whatever balance it had deducted (paid_days),
+// then marks the full day as LOP. leave_type is left as-is so it's still
+// clear what kind of leave this was, just now unpaid.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/convert-to-lop', authenticate, authorize('admin'), [
+  body('reason').trim().notEmpty().withMessage('A reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { reason } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.duty_type !== 'Leave') return res.status(400).json({ success: false, message: 'This is not a leave record' });
+    if (record.is_lop && (record.paid_days ?? 0) === 0) {
+      return res.status(400).json({ success: false, message: 'This record is already fully LOP' });
+    }
+
+    const fullDays = countWorkingDays(record.date, record.end_date || record.date);
+    if (record.paid_days > 0) {
+      const employee = await User.findById(record.emp_id).select('leave_balance').lean();
+      await User.findByIdAndUpdate(record.emp_id, {
+        $set: { leave_balance: clampLeaveBalance((employee?.leave_balance ?? 0) + record.paid_days) },
+      });
+    }
+
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        is_lop: true, paid_days: 0, lop_days: fullDays,
+        admin_remark: `Converted to LOP by Admin: ${reason}`,
+        actioned_by: req.user.id, actioned_at: new Date(),
+      },
+    });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    await notify(record.emp_id, `${record.leave_type || 'Leave'} Converted to LOP`,
+      `Your ${record.leave_type || 'leave'} for ${recordDateLabel(updated)} was converted to Loss of Pay by Admin: ${reason}`,
+      'warning', record._id, '/employee/history');
+    const empUser = await User.findById(record.emp_id).select('email name').lean();
+    if (empUser?.email) {
+      sendMail(empUser.email, `[AMS] Leave Converted to LOP`,
+        `<p>Hi ${empUser.name},</p><p>Your <strong>${record.leave_type || 'leave'}</strong> for <strong>${recordDateLabel(updated)}</strong> was converted to <strong>Loss of Pay</strong> by an administrator.</p><p><strong>Reason:</strong> ${reason}</p>`
+      ).catch(err => console.error('[ConvertToLOP] Employee email failed:', err.message));
+    }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_CONVERT_TO_LOP',
+      entity_type: 'attendance', entity_id: record._id,
+      old_value: `paid_days: ${record.paid_days ?? 0}`, new_value: `LOP: ${fullDays}`,
+    });
+
+    res.json({ success: true, message: 'Converted to LOP', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/hr-override
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {
@@ -2076,7 +2141,7 @@ router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), asy
 // PUT /api/attendance/:id/leave-request
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/leave-request', authenticate, authorize('employee'), [
-  body('leaveType').isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('leaveType').isIn(['Casual Leave', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').notEmpty(),
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -2109,7 +2174,7 @@ router.put('/:id/leave-request', authenticate, authorize('employee'), [
 // PUT /api/attendance/:id/edit-leave  — employee edits a pending leave after submission
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/edit-leave', authenticate, authorize('employee'), [
-  body('leaveType').optional().isIn(['Casual Leave', 'Half Day', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
+  body('leaveType').optional().isIn(['Casual Leave', 'Emergency Leave', 'Urgent Leave', 'Planned Leave']),
   body('reason').optional().notEmpty(),
   body('endDate').optional().isDate(),
 ], async (req, res) => {

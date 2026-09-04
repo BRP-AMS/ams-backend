@@ -301,7 +301,7 @@ router.get('/leave-balance-template', authenticate, authorize('manager', 'admin'
     ws.columns = [
       { header: 'Employee Code (emp_id)', key: 'emp_id', width: 24 },
       { header: 'Name (read-only)', key: 'name', width: 28 },
-      { header: 'New Balance (0–24, steps of 0.5)', key: 'leave_balance', width: 28 },
+      { header: 'New Balance (0–24, whole days)', key: 'leave_balance', width: 28 },
       { header: 'Reason', key: 'reason', width: 32 },
     ];
     ws.getRow(1).font = { bold: true };

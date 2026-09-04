@@ -1233,7 +1233,7 @@ const checkoutFaceResult = { match: true, confidence: 0 };
       leaveType = 'Emergency Leave';
     }
 
-    const { latitude, longitude, locationAddress, capturedAt, lateReason } = req.body;
+   const { latitude, longitude, locationAddress, capturedAt, lateReason, leaveReason } = req.body;
 
     let checkoutTime = istTimeStr();
     let workedHours  = Math.round(hoursElapsed * 100) / 100;
@@ -1953,15 +1953,6 @@ router.post('/mark-present', authenticate, authorize('admin'), [
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/convert-to-leave
-// Corrects a day (or range) that already has an attendance record — e.g. an
-// admin's earlier "Mark Present" that turns out to have been a miscommuni-
-// cation — into an approved leave instead, over a date range at once.
-// Unlike POST /mark-present or POST /manager-apply-leave (which both require
-// the day to be free), this specifically targets days that ALREADY have a
-// non-leave record. Applies the same balance-based partial-LOP split as
-// every other leave-approval path, day by day as it walks the range so each
-// day's paid/LOP split reflects the balance remaining after the previous
-// day's deduction.
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/convert-to-leave', authenticate, authorize('admin'), [
   body('empId').trim().notEmpty().withMessage('Employee is required'),

@@ -284,8 +284,12 @@ router.get('/export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      // Specific employee selected in dropdown (any privileged role)
-      const specific = await User.findById(toObjId(empId))
+      // Specific employee selected in dropdown — a manager may only pull a
+      // report for their own reportee, never an arbitrary employee id.
+      const specificFilter = role === 'manager'
+        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
+        : { _id: toObjId(empId) };
+      const specific = await User.findOne(specificFilter)
         .select(EMP_SELECT).lean();
       if (specific) employees = [specific];
       else return res.status(404).json({success:false,message:'Selected employee not found'});
@@ -1205,7 +1209,10 @@ router.get('/leave-export',
       if (me) employees = [me];
 
     } else if (empId && String(empId).trim() !== '') {
-      const specific = await User.findById(toObjId(empId)).select('_id name emp_id').lean();
+      const specificFilter = role === 'manager'
+        ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
+        : { _id: toObjId(empId) };
+      const specific = await User.findOne(specificFilter).select('_id name emp_id').lean();
       if (specific) employees = [specific];
       else return res.status(404).json({ success: false, message: 'Selected employee not found' });
 
@@ -1705,7 +1712,10 @@ router.get('/daily-log-export',
     if (!targetEmpId)
       return res.status(400).json({success:false,message:'empId is required'});
 
-    const emp = await User.findById(toObjId(targetEmpId))
+    const empFilter = role === 'manager'
+      ? { _id: toObjId(targetEmpId), manager_id: toObjId(req.user.id) }
+      : { _id: toObjId(targetEmpId) };
+    const emp = await User.findOne(empFilter)
       .select('_id name emp_id assigned_block assigned_district role_type designation')
       .lean();
     if (!emp) return res.status(404).json({success:false,message:'Employee not found'});
@@ -2013,7 +2023,10 @@ const resolveLateCheckoutEmployees = async (req) => {
     const me = await User.findById(req.user.id).select(EMP_SELECT).lean();
     if (me) employees = [me];
   } else if (empId && String(empId).trim() !== '') {
-    const specific = await User.findById(toObjId(empId)).select(EMP_SELECT).lean();
+    const specificFilter = role === 'manager'
+      ? { _id: toObjId(empId), manager_id: toObjId(req.user.id) }
+      : { _id: toObjId(empId) };
+    const specific = await User.findOne(specificFilter).select(EMP_SELECT).lean();
     if (specific) employees = [specific];
   } else if (managerId && String(managerId).trim() !== '') {
     employees = await User.find({ manager_id: toObjId(managerId), is_active: { $ne: false } })

@@ -349,6 +349,7 @@ router.get('/me', authenticate, async (req, res) => {
       reportingOfficerName:        u.reporting_officer_name        || null,
       reportingOfficerDesignation: u.reporting_officer_designation || null,
       isActive:                    u.is_active,
+      leaveBalance:                u.leave_balance ?? 0,
     }});
   } catch (err) {
     console.error(err);

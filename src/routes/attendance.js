@@ -2103,6 +2103,68 @@ router.put('/:id/convert-to-lop', authenticate, authorize('admin'), [
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/attendance/:id/convert-lop-to-leave
+// Admin-only — reverse of convert-to-lop: a day that's currently LOP (fully
+// or partially) is re-costed against the employee's CURRENT balance, same
+// split logic as a fresh leave application (paid up to what's available,
+// remainder stays LOP).
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/convert-lop-to-leave', authenticate, authorize('admin'), [
+  body('reason').trim().notEmpty().withMessage('A reason is required'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+  try {
+    const { reason } = req.body;
+    const record = await AttendanceRecord.findById(req.params.id).lean();
+    if (!record) return res.status(404).json({ success: false, message: 'Record not found' });
+    if (record.duty_type !== 'Leave') return res.status(400).json({ success: false, message: 'This is not a leave record' });
+    if (!record.is_lop) return res.status(400).json({ success: false, message: 'This record is not LOP' });
+
+    const fullDays = countWorkingDays(record.date, record.end_date || record.date);
+    const employee = await User.findById(record.emp_id).select('leave_balance auto_leave_enabled').lean();
+    const balance = employee?.leave_balance ?? 0;
+    const autoEnabled = employee?.auto_leave_enabled !== false;
+    // Refund whatever this record currently has deducted first, so the
+    // re-split below always starts from the employee's TRUE available
+    // balance (not double-counting what this same record already took).
+    const trueBalance = clampLeaveBalance(balance + (record.paid_days ?? 0));
+    const newPaidDays = autoEnabled ? Math.min(trueBalance, fullDays) : 0;
+    const newLopDays  = roundHalfDay(fullDays - newPaidDays);
+
+    await User.findByIdAndUpdate(record.emp_id, {
+      $set: { leave_balance: clampLeaveBalance(trueBalance - newPaidDays) },
+    });
+    await AttendanceRecord.findByIdAndUpdate(record._id, {
+      $set: {
+        is_lop: newLopDays > 0, paid_days: newPaidDays, lop_days: newLopDays,
+        admin_remark: `Converted to Leave by Admin: ${reason}`,
+        actioned_by: req.user.id, actioned_at: new Date(),
+      },
+    });
+
+    const updated = await AttendanceRecord.findById(record._id).lean();
+    await notify(record.emp_id, `LOP Converted to ${record.leave_type || 'Leave'}`,
+      `Your Loss of Pay for ${recordDateLabel(updated)} was converted to ${record.leave_type || 'leave'} by Admin: ${reason}`,
+      'success', record._id, '/employee/history');
+    const empUser = await User.findById(record.emp_id).select('email name').lean();
+    if (empUser?.email) {
+      sendMail(empUser.email, `[AMS] LOP Converted to Leave`,
+        `<p>Hi ${empUser.name},</p><p>Your <strong>Loss of Pay</strong> for <strong>${recordDateLabel(updated)}</strong> was converted to <strong>${record.leave_type || 'leave'}</strong> by an administrator.</p><p><strong>Reason:</strong> ${reason}</p>`
+      ).catch(err => console.error('[ConvertLopToLeave] Employee email failed:', err.message));
+    }
+
+    await AuditLog.create({
+      _id: uuidv4(), user_id: req.user.id, action: 'ADMIN_CONVERT_LOP_TO_LEAVE',
+      entity_type: 'attendance', entity_id: record._id,
+      old_value: `LOP: ${record.lop_days ?? fullDays}`, new_value: `paid_days: ${newPaidDays}, lop_days: ${newLopDays}`,
+    });
+
+    res.json({ success: true, message: newLopDays > 0 ? `Converted — ${newPaidDays} day(s) paid, ${newLopDays} day(s) still LOP (insufficient balance)` : 'Converted to Leave', data: formatRecord(updated) });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/attendance/:id/hr-override
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/:id/hr-override', authenticate, authorize('hr', 'super_admin'), async (req, res) => {

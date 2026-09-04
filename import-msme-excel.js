@@ -49,7 +49,7 @@ const SHEET_DISTRICT_MAP = {
   'GOMATI':         'Gomati',
   'KHOWAI':         'Khowai',
   'NORTH TRIPURA':  'North Tripura',
-  'Sepahijala':     'Sepahijala',
+  'SIPAHIJALA':     'Sipahijala',
   'SOUTH TRIPURA':  'South Tripura',
   'UNAKOTI':        'Unakoti',
   'WEST TRIPURA':   'West Tripura',

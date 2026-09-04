@@ -2222,22 +2222,36 @@ router.get('/late-checkout-export',
            .text('No late check-out records found for the selected period and filters.', ML, y+5, { width:usableW, align:'center' });
         y += RH;
       } else {
-        rows.forEach((r,idx)=>{
-          if (y+RH > doc.page.height-40) {
-            doc.addPage({size:'A3',layout:'landscape',margins:{top:28,bottom:28,left:28,right:28}});
-            y = drawHeader(28);
-          }
-          const bg = idx%2===0 ? '#FFFFFF' : '#F7F7F7';
-          doc.rect(ML,y,usableW,RH).fill(bg).stroke('#DDDDDD');
-          let cx = ML;
-          [r.empName, r.empCode, r.checkinLocationTime, r.checkoutLocationTime, r.reason].forEach((v,i)=>{
-            doc.rect(cx,y,cw[i],RH).stroke('#DDDDDD');
-            doc.fillColor('#000000').fontSize(7).font('Helvetica')
-               .text(String(v||''), cx+3, y+4, { width:cw[i]-6, align:i<2?'center':'left' });
-            cx += cw[i];
-          });
-          y += RH;
-        });
+        rows.forEach((r, idx) => {
+  const cellValues = [r.empName, r.empCode, r.checkinLocationTime, r.checkoutLocationTime, r.reason];
+
+  // Measure how tall each cell's wrapped text will be, take the max
+  doc.fontSize(7).font('Helvetica');
+  let rowH = RH; // minimum height
+  colDefs.forEach((c, i) => {
+    const h = doc.heightOfString(String(cellValues[i] || ''), {
+      width: cw[i] - 6,
+      align: i < 2 ? 'center' : 'left',
+    });
+    rowH = Math.max(rowH, h + 8); // +8 padding (4 top + 4 bottom)
+  });
+
+  if (y + rowH > doc.page.height - 40) {
+    doc.addPage({ size: 'A3', layout: 'landscape', margins: { top: 28, bottom: 28, left: 28, right: 28 } });
+    y = drawHeader(28);
+  }
+
+  const bg = idx % 2 === 0 ? '#FFFFFF' : '#F7F7F7';
+  doc.rect(ML, y, usableW, rowH).fill(bg).stroke('#DDDDDD');
+  let cx = ML;
+  cellValues.forEach((v, i) => {
+    doc.rect(cx, y, cw[i], rowH).stroke('#DDDDDD');
+    doc.fillColor('#000000').fontSize(7).font('Helvetica')
+       .text(String(v || ''), cx + 3, y + 4, { width: cw[i] - 6, align: i < 2 ? 'center' : 'left' });
+    cx += cw[i];
+  });
+  y += rowH;
+});
       }
 
       doc.end();

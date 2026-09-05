@@ -84,7 +84,7 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
     const currentUser = await User.findById(req.user.id).select('emp_id name').lean();
     const folderPath  = employeeFolderPath(currentUser?.emp_id, req.user.id);
     const _empName    = (currentUser?.name || req.user.name || 'unknown').replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_-]/g,'');
-    const _empId      = (currentUser?.emp_id || req.user.id).replace(/[^a-zA-Z0-9_-]/g,'');
+    const _empId      = String(currentUser?.emp_id || req.user.id).replace(/[^a-zA-Z0-9_-]/g,'');
 
     const result = await uploadToCloudinary(req.file.buffer, {
       folder:          `${folderPath}/monthly_reports`,

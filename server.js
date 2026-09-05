@@ -133,10 +133,13 @@ const { connectionPromise, AttendanceRecord, User, Notification, RevokedToken, H
 const { v4: uuidv4 } = require('uuid');
 const { sendMail } = require('./src/utils/mailer');
 
-// Shared by the reminder crons below — skip Sundays and configured holidays.
+// Shared by the reminder crons below — skip Saturdays, Sundays, and
+// configured holidays. Saturday+Sunday matches the week-off rule used
+// everywhere else in the app (see isNonWorkingDay in reports.js) — this
+// used to only skip Sunday, so these crons incorrectly fired on Saturdays.
 const isNonWorkingDayForReminders = async (dateIST) => {
   const dow = new Date(dateIST + 'T00:00:00+05:30').getDay();
-  if (dow === 0) return true; // Sunday
+  if (dow === 0 || dow === 6) return true; // Sunday or Saturday
   const holiday = await Holiday.findOne({ date: dateIST }).lean();
   return !!holiday;
 };
@@ -373,6 +376,19 @@ cron.schedule('5 10 * * *', async () => {
   try {
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     if (await isNonWorkingDayForReminders(todayIST)) return console.log('[NotCheckedIn Alert] Skipped — non-working day');
+
+    // Idempotency guard — Render can briefly run two instances at once
+    // during a deploy (or restart), and each has its own in-process cron
+    // scheduler, so the same wall-clock minute can fire this job twice,
+    // sending every email twice. A unique _id per cron+day means only the
+    // first instance to insert wins; the second gets a duplicate-key error
+    // and skips, instead of resending everything.
+    try {
+      await User.db.collection('cron_runs').insertOne({ _id: `notCheckedInAlert_${todayIST}`, ranAt: new Date() });
+    } catch (err) {
+      if (err.code === 11000) return console.log('[NotCheckedIn Alert] Already sent today (by this or another instance) — skipping.');
+      throw err;
+    }
 
     const employees = await User.find({ role: 'employee', is_active: { $ne: 0 } })
       .select('_id emp_id name manager_id assigned_block assigned_district').lean();

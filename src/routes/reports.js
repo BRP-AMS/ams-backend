@@ -346,9 +346,19 @@ router.get('/export',
     // report was requested with a status filter other than 'All' — the cell
     // then had no record at all and fell back to 'A' (Absent), even though
     // the leave was genuinely pending/approved.
+    // A multi-day leave/OD record is stored once, dated at its START day —
+    // filtering purely on `date >= startDate` misses a leave that started
+    // before the requested range but still spans into it (e.g. a leave
+    // starting Aug 31 covering Sept 1-3, requested with startDate=Sept 1
+    // would otherwise vanish from the query and those days would wrongly
+    // read as Absent). Pull in anything whose span OVERLAPS the range.
     const recFilter = {
-      date:   {$gte:startDate,$lte:endDate},
       emp_id: {$in:employees.map(e=>e._id)},
+      date:   {$lte:endDate},
+      $or: [
+        { end_date: null, date: {$gte:startDate} },
+        { end_date: {$gte:startDate} },
+      ],
     };
     const rawRecs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
 
@@ -1827,7 +1837,18 @@ router.get('/daily-log-export',
     if (!startDate || !endDate)
       return res.status(400).json({success:false,message:'startDate and endDate are required'});
 
-    const recFilter = { date:{$gte:startDate,$lte:endDate}, emp_id: emp._id };
+    // Same overlap fix as the main /export route above — a multi-day leave
+    // dated at its START day would otherwise vanish from the query (and its
+    // in-range days wrongly read as Absent) whenever that start day falls
+    // before the requested window.
+    const recFilter = {
+      emp_id: emp._id,
+      date:   {$lte:endDate},
+      $or: [
+        { end_date: null, date: {$gte:startDate} },
+        { end_date: {$gte:startDate} },
+      ],
+    };
     if (status && !['All','Today Check-in'].includes(status)) recFilter.status = status;
 
    let recs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();

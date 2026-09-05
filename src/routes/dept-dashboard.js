@@ -75,14 +75,19 @@ async function fetchRecordMap(userIds, date) {
     AttendanceRecord
       .find({ emp_id: { $in: userIds }, date }, 'emp_id checkin_time checkout_time leave_type leave_status duty_type')
       .lean(),
-    // Multi-day approved leaves spanning today
+    // Multi-day approved leaves spanning today. A single-day leave
+    // (end_date: null) must match `date` exactly — without this, `date:
+    // {$lte: date}` + `end_date: null` matched ANY past single-day leave
+    // forever afterward, since there's no upper bound when end_date is
+    // null, permanently counting someone as "on leave" from their very
+    // first single-day leave onward.
     AttendanceRecord
       .find({
         emp_id:       { $in: userIds },
         duty_type:    'Leave',
         leave_status: 'Approved',
         date:         { $lte: date },
-        $or: [{ end_date: null }, { end_date: { $gte: date } }],
+        $or: [{ end_date: null, date }, { end_date: { $gte: date } }],
       }, 'emp_id leave_type leave_status duty_type')
       .lean(),
   ]);

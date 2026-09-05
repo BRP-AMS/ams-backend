@@ -21,6 +21,10 @@ const upload = multer({
 
 const UDYAM_RE = /^UDYAM-[A-Z]{2}-\d{2}-\d{7}$/;
 
+// NOTE: msme_name / block_name stay required because every form screen
+// (including the new Office Duty / Field Visit / Training Self ones)
+// always synthesizes a msme_name label and a block_name client-side —
+// see ActivityCapture.js handleSubmit().
 const activityValidators = [
   body('msme_name').trim().notEmpty().withMessage('MSME name required'),
   body('udyam_number').optional({ nullable: true, checkFalsy: true }).matches(UDYAM_RE).withMessage('Format: UDYAM-XX-00-0000000'),
@@ -35,6 +39,14 @@ const activityValidators = [
   body('district').optional().trim(),
   body('block_name').trim().notEmpty().withMessage('Block name required'),
   body('activity_date').isISO8601().toDate(),
+  // ── NEW classification fields ──
+  body('duty_type').optional({ nullable: true, checkFalsy: true }).isIn(['Office Duty', 'On Duty']).withMessage('Invalid duty type'),
+  body('form_type').optional({ nullable: true, checkFalsy: true })
+    .isIn(['msme_visit', 'training', 'training_self', 'govt_office', 'office_duty', 'field_visit'])
+    .withMessage('Invalid form type'),
+  body('tag').optional().trim(),
+  body('sub_tag').optional().trim(),
+  body('description').optional().trim(),
 ];
 
 const validate = (req, res, next) => {
@@ -72,6 +84,8 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       msme_name, udyam_number, district, block_name, latitude, longitude, location_address, activity_date,
       activity_type, sub_activity, msme_address, resolved_solution, end_results,
       remarks, sector, support_type,
+      // ── NEW classification fields ──
+      duty_type, form_type, tag, sub_tag, description,
     } = req.body;
     const id = uuidv4();
     await Activity.create({
@@ -90,6 +104,12 @@ router.post('/', authenticate, upload.array('documents', 10), activityValidators
       activity_date:     typeof activity_date === 'string' ? activity_date.slice(0, 10) : activity_date.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).replace(/\//g, '-'),
       remarks:           remarks           || null,
       resource_type: 'auto',
+      // ── NEW ──
+      duty_type:         duty_type   || null,
+      form_type:         form_type   || null,
+      tag:               tag         || null,
+      sub_tag:           sub_tag     || null,
+      description:       description || null,
     });
 
     if (req.files?.length) {
@@ -125,11 +145,12 @@ router.get('/', authenticate, [
   query('block').optional().trim(),
   query('sector').optional().trim(),
   query('support_type').optional().trim(),
+  query('form_type').optional().trim(),
   query('user_id').optional().trim(),
   query('manager_id').optional().trim(),
 ], validate, authorize('admin', 'manager', 'hr', 'employee'), async (req, res) => {
   try {
-    const { filter = 'monthly', startDate, endDate, block, sector, support_type, user_id, manager_id, limit = 100, offset = 0 } = req.query;
+    const { filter = 'monthly', startDate, endDate, block, sector, support_type, form_type, user_id, manager_id, limit = 100, offset = 0 } = req.query;
 
     const safeParam = /^[a-zA-Z0-9 \-\/]*$/;
     if (block && !safeParam.test(block))
@@ -162,6 +183,7 @@ router.get('/', authenticate, [
     if (block)        matchFilter.block_name   = block;
     if (sector)       matchFilter.sector       = sector;
     if (support_type) matchFilter.support_type = support_type;
+    if (form_type)    matchFilter.form_type    = form_type;
     if (user_id && ['admin', 'hr', 'super_admin'].includes(req.user.role)) matchFilter.user_id = user_id;
 
     let total;
@@ -302,10 +324,6 @@ router.get('/stats/block-wise', authenticate, authorize('admin', 'manager', 'hr'
 });
 
 // ── GET /api/activity/stats/my ────────────────────────────────────────
-// Returns activity stats for the logged-in user for a given date range.
-// Used by the profile page for current-month and all-time toggles.
-
-
 router.get('/stats/my', authenticate, [
   query('startDate').optional().isISO8601(),
   query('endDate').optional().isISO8601(),
@@ -329,7 +347,6 @@ router.get('/stats/my', authenticate, [
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
 
 // ── GET /api/activity/stats/compliance ───────────────────────────────
 router.get('/stats/compliance', authenticate, authorize('admin', 'manager', 'hr'), async (req, res) => {
@@ -406,7 +423,9 @@ if (startDate && endDate) {
       'Date':                  a.activity_date        || '',
       'Emp ID':                a.emp_id               || '',
       'Officer Name':          a.user_name            || '',
-      'MSME Name':             a.msme_name            || '',
+      'Duty Type':             a.duty_type            || '',
+      'Category':              a.form_type            || '',
+      'Name':             a.msme_name            || '',
       'Udyam No':              a.udyam_number         || '',
       'Activity Type':         a.activity_type        || a.sector        || '',
       'Sub Activity':          a.sub_activity         || a.support_type  || '',
@@ -414,7 +433,8 @@ if (startDate && endDate) {
       'District':              a.district             || '',
       'MSME Address':          a.msme_address         || '',
       'Resolution / Solution': a.resolved_solution    || '',
-      'End Results':           a.end_results          || '',
+      'End Results':           a.end_results || a.description || '',
+      'Description':           a.description          || '',
       'Remarks':               a.remarks              || '',
       'Attachments':           a.doc_count            || 0,
     }));
@@ -423,7 +443,7 @@ if (startDate && endDate) {
 
     // ── Main sheet ──
     const ws = wb.addWorksheet('Activities');
-    const mainWidths = [12,10,20,28,22,22,25,20,16,30,35,35,35,12];
+    const mainWidths = [12,10,20,12,14,28,22,22,25,20,16,30,35,35,30,35,12];
     if (excelRows.length > 0) {
       const headers = Object.keys(excelRows[0]);
       ws.addRow(headers);
@@ -466,6 +486,21 @@ if (startDate && endDate) {
       wsBlock.addRow(bHeaders);
       blockRows.forEach(r => wsBlock.addRow(bHeaders.map(h => r[h])));
       bHeaders.forEach((_, i) => { wsBlock.getColumn(i + 1).width = blockWidths[i] || 15; });
+    }
+
+    // ── NEW: Category summary sheet — one row per form_type/category ──
+    const categoryRows = await Activity.aggregate([
+      { $match: matchFilter },
+      { $group: { _id: '$form_type', total: { $sum: 1 } } },
+      { $project: { _id: 0, 'Category': { $ifNull: ['$_id', 'Uncategorised (legacy)'] }, 'Total Activities': '$total' } },
+      { $sort: { 'Total Activities': -1 } },
+    ]);
+    const wsCategory = wb.addWorksheet('Category Summary');
+    if (categoryRows.length > 0) {
+      const cHeaders = Object.keys(categoryRows[0]);
+      wsCategory.addRow(cHeaders);
+      categoryRows.forEach(r => wsCategory.addRow(cHeaders.map(h => r[h])));
+      cHeaders.forEach((_, i) => { wsCategory.getColumn(i + 1).width = 24; });
     }
 
     const buf = await wb.xlsx.writeBuffer();
@@ -557,11 +592,10 @@ if (startDate && endDate) {
     const BLUE   = '#1a6aa5', BLUE_H = '#155a8a', BLUE_ALT = '#e8f2fb';
     const BAND_BG = '#dbeafe', BAND_FG = '#1e3a8a';
     const WHITE  = '#ffffff', BORDER = '#c8dff0', TEXT_DARK = '#0f1e3d', TEXT_MED = '#4a5568';
+const cols  = [75, 60, 100, 180, 120, 120, 180, 180, 140];
+const heads = ['Date', 'Emp ID', 'Officer', 'Name', 'Activity Type', 'Sub Activity', 'Resolution / Solution', 'End Results', 'Remarks'];
 
-    const cols  = [70, 55, 85, 120, 110, 100, 100, 85, 130, 130, 130];
-    const heads = ['Date', 'Emp ID', 'Officer', 'MSME Name', 'Udyam No', 'Activity Type', 'Sub Activity', 'Block / ULB', 'Resolution / Solution', 'End Results', 'Remarks'];
-
-    const ROW_H = 22, HEAD_H = 28, BAND_H = 16;
+const ROW_H = 24, HEAD_H = 28, BAND_H = 16;
     const tableW = cols.reduce((s, c) => s + c, 0);
 
     const drawHeader = (yPos) => {
@@ -622,11 +656,11 @@ if (startDate && endDate) {
       }
       drawBandSeparator(y, label, bRows.length);
       y += BAND_H;
-
       bRows.forEach(r => {
         const longFields = [r.msme_name || '', r.resolved_solution || '', r.end_results || '', r.remarks || ''];
-        const needsExtraLine = longFields.some(f => f.length > 28);
-        const thisRowH = needsExtraLine ? ROW_H + 10 : ROW_H;
+        const maxLen = Math.max(0, ...longFields.map(f => f.length));
+        const extra = maxLen > 70 ? 30 : maxLen > 34 ? 14 : 0;
+        const thisRowH = ROW_H + extra;
 
         if (y + thisRowH > PAGE_H - 60) {
           doc.addPage({ size: 'A3', layout: 'landscape', margin: 0 });
@@ -639,12 +673,12 @@ if (startDate && endDate) {
 
         doc.rect(MARGIN, y, tableW, thisRowH).fill(altIdx % 2 === 0 ? WHITE : BLUE_ALT);
 
-        const vals = [
-          fmtDDMMYYYY(r.activity_date), r.emp_code || '', r.officer || '',
-          r.msme_name || '', r.udyam_number || '',
-          r.activity_type || r.sector || '', r.sub_activity || r.support_type || '',
-          r.block_name || '', r.resolved_solution || '', r.end_results || '', r.remarks || '—',
-        ];
+       const vals = [
+  fmtDDMMYYYY(r.activity_date), r.emp_code || '', r.officer || '',
+  r.msme_name || '',
+  r.activity_type || r.sector || '', r.sub_activity || r.support_type || '',
+  r.resolved_solution || '', r.end_results || r.description || '', r.remarks || '—',
+];
 
         let cx = MARGIN;
         doc.fillColor(TEXT_DARK);

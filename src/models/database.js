@@ -239,13 +239,31 @@ const activitySchema = new mongoose.Schema({
   resolved_solution: { type: String, default: null },
   end_results:       { type: String, default: null },
   resource_type:     { type: String, default: null }, // 'image' | 'raw'
+ 
+  // ── NEW: reliable activity classification (used by the monthly-category PDF) ──
+  // 'Office Duty' | 'On Duty' — top-level duty selector the employee picked
+  duty_type:         { type: String, enum: ['Office Duty', 'On Duty', null], default: null },
+  // which form screen produced this record — the single source of truth for
+  // categorisation. Extend this enum whenever a new form screen is added.
+  form_type:         {
+    type: String,
+    enum: ['msme_visit', 'training', 'training_self', 'govt_office', 'office_duty', 'field_visit', null],
+    default: null,
+  },
+  // Tag → Sub-tag cascade (Office Duty / Field Visit / Training Self forms)
+  tag:               { type: String, default: null },
+  sub_tag:           { type: String, default: null },
+  // Free-text description — required for "Others" sub-tags and all
+  // Training Self entries
+  description:       { type: String, default: null },
 }, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
-
+ 
 activitySchema.index({ user_id: 1 });
 activitySchema.index({ activity_date: 1 });
 activitySchema.index({ block_name: 1 });
 activitySchema.index({ sector: 1 });
 activitySchema.index({ activity_date: 1, block_name: 1 });
+activitySchema.index({ form_type: 1 });
 
 // MSME Master — pre-loaded list of registered MSMEs per block
 const msmeMasterSchema = new mongoose.Schema({

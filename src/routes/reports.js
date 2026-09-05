@@ -5,6 +5,7 @@ const express  = require('express');
 const router   = express.Router();
 const ExcelJS  = require('exceljs');
 const PDFDoc   = require('pdfkit');
+const { PDFDocument: MergePDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const mongoose = require('mongoose');
 const { AttendanceRecord, User, Holiday } = require('../models/database');
 const { fmt12h } = require('../utils/time');
@@ -867,14 +868,13 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       // of every employee's first day-chunk being scattered across a run of
       // pages, then the SAME employees' second day-chunk showing up much
       // later after every other employee's first chunk has already printed.
-      const renderSection = (matrix, initialFirstPage) => {
       const TITLE_H = 46;
       const rowsPerPage = Math.max(1, Math.floor((PH-60-(ML+TITLE_H+HRH))/RH));
       const employeeGroups=[];
       for(let i=0;i<matrix.length;i+=rowsPerPage) employeeGroups.push(matrix.slice(i,i+rowsPerPage));
 
       let y;
-      let firstPage=initialFirstPage;
+      let firstPage=true;
       employeeGroups.forEach(empGroup=>{
         chunks.forEach((chunkDates,ci)=>{
           if(firstPage){
@@ -1179,22 +1179,6 @@ if (role === 'employee') {
   doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Date:', roX, ry);
   doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW * 0.55, ry + 9).stroke('#999');
 }
-      };
-
-      renderSection(matrix, true);
-
-      // Individual per-employee report pages, appended in sequence ordered by
-      // employee ID — mirrors the Excel export's one-sheet-per-employee loop,
-      // giving every employee the same single-employee layout as their own
-      // individual download, all inside this one combined PDF.
-      if (matrix.length > 1) {
-        const sortedMatrix = [...matrix].sort((a, b) => {
-          const aId = parseInt(a.emp.emp_id, 10), bId = parseInt(b.emp.emp_id, 10);
-          if (!isNaN(aId) && !isNaN(bId)) return aId - bId;
-          return String(a.emp.emp_id || '').localeCompare(String(b.emp.emp_id || ''));
-        });
-        sortedMatrix.forEach(entry => renderSection([entry], false));
-      }
 
       doc.end();
       return;
@@ -1204,6 +1188,99 @@ if (role === 'employee') {
   } catch(err){
     console.error('[ReportsExport]',err);
     res.status(500).json({success:false,message:'Export failed',error:err.message});
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  GET /api/reports/signed-attendance-merge — combines every employee's
+//  manager-signed monthly report (individually re-uploaded via
+//  POST /api/attendance/upload-signed-report, see User.signed_reports) into
+//  ONE PDF, employees ordered by Employee ID, instead of downloading and
+//  assembling each one by hand.
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/signed-attendance-merge',
+  authenticate,
+  authorize('super_admin', 'admin', 'hr', 'manager'),
+  async (req, res) => {
+  try {
+    const { month, managerId } = req.query;
+    const role = req.user.role;
+    if (!month || !/^\d{4}-\d{2}$/.test(month))
+      return res.status(400).json({ success: false, message: 'Valid month (YYYY-MM) is required' });
+
+    const EMP_SELECT = '_id name emp_id signed_reports';
+    let employees = [];
+    if (managerId && String(managerId).trim() !== '') {
+      employees = await User.find({ manager_id: toObjId(managerId), is_active: { $ne: false } }).select(EMP_SELECT).lean();
+    } else if (role === 'manager') {
+      employees = await User.find({ manager_id: toObjId(req.user.id), is_active: { $ne: false } }).select(EMP_SELECT).lean();
+    } else {
+      employees = await User.find({ role: 'employee', is_active: { $ne: false } }).select(EMP_SELECT).lean();
+    }
+
+    // Numeric-safe ascending Employee ID order — plain string sort would put
+    // "1968" after "23423" (lexicographic), so parse to int where possible.
+    employees.sort((a, b) => {
+      const aId = parseInt(a.emp_id, 10), bId = parseInt(b.emp_id, 10);
+      if (!isNaN(aId) && !isNaN(bId)) return aId - bId;
+      return String(a.emp_id || '').localeCompare(String(b.emp_id || ''));
+    });
+
+    const withReport = employees
+      .map(emp => ({ emp, report: (emp.signed_reports || []).find(r => r.month === month) }))
+      .filter(x => x.report);
+
+    if (!withReport.length)
+      return res.status(404).json({ success: false, message: `No signed reports have been uploaded for ${month}` });
+
+    const merged = await MergePDFDocument.create();
+    const font   = await merged.embedFont(StandardFonts.HelveticaBold);
+    const missing = [];
+    const A4 = [595.28, 841.89];
+
+    for (const { emp, report } of withReport) {
+      try {
+        const resp = await fetch(report.path);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const bytes = Buffer.from(await resp.arrayBuffer());
+        const mime  = resp.headers.get('content-type') || '';
+
+        if (mime.includes('pdf') || /\.pdf($|\?)/i.test(report.path)) {
+          const src   = await MergePDFDocument.load(bytes, { ignoreEncryption: true });
+          const pages = await merged.copyPages(src, src.getPageIndices());
+          pages.forEach(p => merged.addPage(p));
+        } else {
+          // JPG/PNG scan — page around it so the merged file stays one
+          // consistent PDF instead of mixing raw image bytes into pages.
+          const image = mime.includes('png') ? await merged.embedPng(bytes) : await merged.embedJpg(bytes);
+          const page  = merged.addPage(A4);
+          const { width: pw, height: ph } = page.getSize();
+          const margin = 30, labelH = 24;
+          const maxW = pw - margin * 2, maxH = ph - margin * 2 - labelH;
+          const scale = Math.min(maxW / image.width, maxH / image.height, 1);
+          const w = image.width * scale, h = image.height * scale;
+          page.drawText(`${emp.emp_id || ''} — ${emp.name}`, { x: margin, y: ph - margin, size: 11, font, color: rgb(0.12, 0.22, 0.39) });
+          page.drawImage(image, { x: (pw - w) / 2, y: ph - labelH - margin - h, width: w, height: h });
+        }
+      } catch (e) {
+        missing.push(`${emp.emp_id || ''} ${emp.name} — ${e.message}`);
+      }
+    }
+
+    if (missing.length) {
+      const page = merged.addPage(A4);
+      page.drawText('Could not merge the following signed reports:', { x: 40, y: 800, size: 12, font, color: rgb(0.6, 0.1, 0.1) });
+      missing.forEach((line, i) => page.drawText(line, { x: 40, y: 775 - i * 16, size: 10, font }));
+    }
+
+    const outBytes = await merged.save();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Signed_Attendance_${month}.pdf"`);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(Buffer.from(outBytes));
+  } catch (err) {
+    console.error('[SignedAttendanceMerge]', err);
+    res.status(500).json({ success: false, message: 'Failed to merge signed reports', error: err.message });
   }
 });
 

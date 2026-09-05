@@ -419,31 +419,29 @@ if (startDate && endDate) {
       { $sort: { activity_date: -1 } },
     ]);
 
-    const excelRows = rows.map(a => ({
-      'Date':                  a.activity_date        || '',
-      'Emp ID':                a.emp_id               || '',
-      'Officer Name':          a.user_name            || '',
-      'Duty Type':             a.duty_type            || '',
-      'Category':              a.form_type            || '',
-      'Name':             a.msme_name            || '',
-      'Udyam No':              a.udyam_number         || '',
-      'Activity Type':         a.activity_type        || a.sector        || '',
-      'Sub Activity':          a.sub_activity         || a.support_type  || '',
-      'Block / ULB':           a.block_name           || '',
-      'District':              a.district             || '',
-      'MSME Address':          a.msme_address         || '',
-      'Resolution / Solution': a.resolved_solution    || '',
-      'End Results':           a.end_results || a.description || '',
-      'Description':           a.description          || '',
-      'Remarks':               a.remarks              || '',
-      'Attachments':           a.doc_count            || 0,
-    }));
+   const excelRows = rows.map(a => ({
+  'Date':                  a.activity_date        || '',
+  'Emp ID':                a.emp_id               || '',
+  'Officer Name':          a.user_name            || '',
+  'Duty Type':             a.duty_type            || '',
+  'Category':              a.form_type            || '',
+  'Name':                  a.msme_name            || '',
+  'Activity Type': a.activity_type || a.sector || '',
+  'Sub Activity':          a.sub_activity         || a.support_type  || '',
+  'District':              a.district             || '',
+  'MSME Address':          a.msme_address         || '',
+  'Resolution / Solution': a.resolved_solution    || '',
+  'End Results':           a.end_results || a.description || '',
+  'Description':           a.description          || '',
+  'Remarks':               a.remarks              || '',
+  'Attachments':           a.doc_count            || 0,
+}));
 
     const wb = new ExcelJS.Workbook();
 
     // ── Main sheet ──
     const ws = wb.addWorksheet('Activities');
-    const mainWidths = [12,10,20,12,14,28,22,22,25,20,16,30,35,35,30,35,12];
+    const mainWidths = [12,10,20,12,14,28,22,25,16,30,35,35,30,35,12];
     if (excelRows.length > 0) {
       const headers = Object.keys(excelRows[0]);
       ws.addRow(headers);
@@ -630,7 +628,7 @@ const ROW_H = 24, HEAD_H = 28, BAND_H = 16;
     // ── Page 1 banner ──
     doc.rect(0, 0, PAGE_W, 56).fill(BLUE);
     doc.fillColor(WHITE).fontSize(16).font('Helvetica-Bold')
-      .text('BRP — MSME Activity Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
+      .text('BRP — Activity Report', MARGIN, 10, { width: PAGE_W - MARGIN * 2, align: 'center' });
     const sub = `Period: ${start === 'All' ? 'All Time' : `${fmtDDMMYYYY(start)} to ${fmtDDMMYYYY(end)}`}  ·  Generated: ${generatedDate}  ·  Total Records: ${rows.length}`;
     doc.fontSize(8.5).font('Helvetica')
       .text(sub, MARGIN, 34, { width: PAGE_W - MARGIN * 2, align: 'center' });
@@ -673,10 +671,11 @@ const ROW_H = 24, HEAD_H = 28, BAND_H = 16;
 
         doc.rect(MARGIN, y, tableW, thisRowH).fill(altIdx % 2 === 0 ? WHITE : BLUE_ALT);
 
-       const vals = [
+const vals = [
   fmtDDMMYYYY(r.activity_date), r.emp_code || '', r.officer || '',
   r.msme_name || '',
-  r.activity_type || r.sector || '', r.sub_activity || r.support_type || '',
+ r.activity_type || r.sector || '',
+  r.sub_activity || r.support_type || '',
   r.resolved_solution || '', r.end_results || r.description || '', r.remarks || '—',
 ];
 

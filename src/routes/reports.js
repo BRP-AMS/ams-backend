@@ -255,7 +255,7 @@ router.get('/export',
   authorize('super_admin','admin','hr','manager','employee'),
   async (req, res) => {
   try {
-    const { format='excel', status, empId, managerId } = req.query;
+    const { format='excel', empId, managerId } = req.query;
     const role = req.user.role;
     let { startDate, endDate } = req.query;
 
@@ -336,11 +336,19 @@ router.get('/export',
     // admin/hr/super_admin without manager filter → no single manager; leave blank
 
     // ── Attendance records ─────────────────────────────────────────────────────
+    // NOTE: intentionally NOT filtering by `status` here (unlike some other
+    // routes in this file) — this matrix needs every record for every day
+    // regardless of its status, since toCode() below already classifies each
+    // cell correctly from the record's own status/leave_status (LA/L/LOP/A/
+    // P/OD). Filtering the query by status made a Pending leave (or one that
+    // had just been Approved) vanish from the query entirely whenever the
+    // report was requested with a status filter other than 'All' — the cell
+    // then had no record at all and fell back to 'A' (Absent), even though
+    // the leave was genuinely pending/approved.
     const recFilter = {
       date:   {$gte:startDate,$lte:endDate},
       emp_id: {$in:employees.map(e=>e._id)},
     };
-    if (status && status !== 'All') recFilter.status = status;
     const rawRecs = await AttendanceRecord.find(recFilter).sort({date:1}).lean();
 
     // Build index — prefer real check-in records over rejected leave records for the same date.

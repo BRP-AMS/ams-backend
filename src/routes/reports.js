@@ -867,13 +867,14 @@ const FILL_HOL  = {type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF3CD'}};
       // of every employee's first day-chunk being scattered across a run of
       // pages, then the SAME employees' second day-chunk showing up much
       // later after every other employee's first chunk has already printed.
+      const renderSection = (matrix, initialFirstPage) => {
       const TITLE_H = 46;
       const rowsPerPage = Math.max(1, Math.floor((PH-60-(ML+TITLE_H+HRH))/RH));
       const employeeGroups=[];
       for(let i=0;i<matrix.length;i+=rowsPerPage) employeeGroups.push(matrix.slice(i,i+rowsPerPage));
 
       let y;
-      let firstPage=true;
+      let firstPage=initialFirstPage;
       employeeGroups.forEach(empGroup=>{
         chunks.forEach((chunkDates,ci)=>{
           if(firstPage){
@@ -1178,6 +1179,22 @@ if (role === 'employee') {
   doc.fillColor('#3B6EA5').fontSize(9).font('Helvetica').text('Date:', roX, ry);
   doc.moveTo(roX + 100, ry + 9).lineTo(roX + 100 + sigLineW * 0.55, ry + 9).stroke('#999');
 }
+      };
+
+      renderSection(matrix, true);
+
+      // Individual per-employee report pages, appended in sequence ordered by
+      // employee ID — mirrors the Excel export's one-sheet-per-employee loop,
+      // giving every employee the same single-employee layout as their own
+      // individual download, all inside this one combined PDF.
+      if (matrix.length > 1) {
+        const sortedMatrix = [...matrix].sort((a, b) => {
+          const aId = parseInt(a.emp.emp_id, 10), bId = parseInt(b.emp.emp_id, 10);
+          if (!isNaN(aId) && !isNaN(bId)) return aId - bId;
+          return String(a.emp.emp_id || '').localeCompare(String(b.emp.emp_id || ''));
+        });
+        sortedMatrix.forEach(entry => renderSection([entry], false));
+      }
 
       doc.end();
       return;

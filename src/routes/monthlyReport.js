@@ -11,7 +11,18 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'application/pdf') {
+      const err = new Error('Only PDF files are accepted');
+      err.status = 400;
+      return cb(err);
+    }
+    cb(null, true);
+  },
+});
 
 const uploadToCloudinary = (buffer, options) =>
   new Promise((resolve, reject) => {
